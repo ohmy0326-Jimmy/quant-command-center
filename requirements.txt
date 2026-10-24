@@ -1,10 +1,10 @@
 streamlit
-yfinance
 pandas
 numpy
-requests
-plotly
-google-generativeai
+yfinance
 gspread
 oauth2client
+requests
+plotly
 google-genai
+matplotlib
