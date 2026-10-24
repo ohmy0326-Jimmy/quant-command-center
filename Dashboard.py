@@ -485,8 +485,20 @@ elif page == "第三頁：重大行事曆與會展":
 elif page == "第四頁：部位監控與量化風控":
     @st.cache_data(ttl=60)
     def load_quant_database():
-        client = gspread.service_account(filename="google_key.json")
+        scope = [
+            "https://spreadsheets.google.com/feeds",
+            "https://www.googleapis.com/auth/drive"
+        ]
+        key_dict = dict(st.secrets["google_key"])
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(key_dict, scope)
+        client = gspread.authorize(creds)
+        
         spreadsheet = client.open("Quant_Database")
+        return (
+            pd.DataFrame(spreadsheet.worksheet("Active_Positions").get_all_records()),
+            pd.DataFrame(spreadsheet.worksheet("Daily_NAV").get_all_records()),
+            pd.DataFrame(spreadsheet.worksheet("持倉統計").get_all_records())
+        )
         return (
             pd.DataFrame(spreadsheet.worksheet("Active_Positions").get_all_records()),
             pd.DataFrame(spreadsheet.worksheet("Daily_NAV").get_all_records()),
