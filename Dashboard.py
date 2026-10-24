@@ -41,7 +41,6 @@ def check_password():
     else:
         return True
 
-# 如果未通過密碼驗證，直接停止執行後續畫面
 if not check_password():
     st.stop()
 
@@ -160,7 +159,7 @@ if page == "第一頁：總經與風險鬧鐘":
                             2. 今日操作提醒（應對當前環境的現金水位或避險方針）。
                             請給出專業、直擊重點的繁體中文建議。
                             """
-                            res = client.models.generate_content(model='gemini-2.5-flash', contents=p_text)
+                            res = client.models.generate_content(model='gemini-3.8-flash', contents=p_text)
                             st.session_state.ai_memo_p1["text"] = res.text
                             st.session_state.ai_memo_p1["time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         except Exception as e:
@@ -384,7 +383,7 @@ elif page == "第二頁：板塊資金輪動":
                         client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
                         summary_table = df_sectors[['代號', '板塊名稱', '日漲跌幅 (%)', '月漲跌幅 (%)', '前十大核心持股與佔比 (1-10 排序)']].to_string(index=False)
                         prompt_p2 = f"身為頂級美股對沖基金經理人。以下是我剛剛透過華爾街即時抓取整理的 11 大板塊數據：\n{summary_table}\n請給予我 1.資金流向解讀 2.強勢板塊推薦 3.脆弱板塊風險提示。"
-                        res_p2 = client.models.generate_content(model='gemini-2.5-flash', contents=prompt_p2)
+                        res_p2 = client.models.generate_content(model='gemini-3.8-flash', contents=prompt_p2)
                         st.session_state.ai_memo_p2["text"] = res_p2.text
                         st.session_state.ai_memo_p2["time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     except Exception as e:
@@ -449,7 +448,7 @@ elif page == "第三頁：重大行事曆與會展":
                             try:
                                 client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
                                 res = client.models.generate_content(
-                                    model='gemini-2.5-flash', 
+                                    model='gemini-3.8-flash', 
                                     contents=f"身為避險基金經理人，面對即將到來的總經事件：【{ev['項目']}】（影響層面：{ev['影響']}），請給我 2 點精煉、具體且直接可執行的資產配置與風控建議。"
                                 )
                                 st.session_state.ai_memo_p3[event_key] = {"text": res.text, "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
@@ -704,7 +703,7 @@ elif page == "第四頁：部位監控與量化風控":
                         client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
                         positions_summary = df[['標的', '名稱', '真實風險權重 (%)', '標的槓桿', '報酬率 (%)']].to_string(index=False) if not df.empty else "無持倉"
                         prompt_text = f"總帳戶淨值: NT$ {total_net_liq:,.0f}\n合併總槓桿率: {global_leverage}x\n總現金水位: {global_cash_pct}%\n持倉明細:\n{positions_summary}\n請給予 3 點風控建議。"
-                        response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt_text)
+                        response = client.models.generate_content(model='gemini-3.8-flash', contents=prompt_text)
                         st.session_state.ai_memo_p4["text"] = response.text
                         st.session_state.ai_memo_p4["time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     except Exception as e:
