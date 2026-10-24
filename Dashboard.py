@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from google import genai
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from oauth2client.service_account import ServiceAccountCredentials  # <-- 確保這裡有這一行！
+from oauth2client.service_account import ServiceAccountCredentials
 
 # ==========================================
 # 網頁基本設定與密碼驗證防護
@@ -134,42 +134,37 @@ if page == "第一頁：總經與風險鬧鐘":
             st.markdown("---")
             
             with st.expander("🤖 點擊展開：AI 避險基金經理人今日總經晨報與操盤提醒", expanded=True):
-                api_key_input_p1 = st.text_input("請輸入您的 Gemini API Key (用於生成總經晨報)", type="password", key="p1_ai_key")
                 if st.button("🧠 一鍵生成今日總經盤勢速覽", use_container_width=True):
-                    key_use = api_key_input_p1 if api_key_input_p1 else st.secrets.get("GEMINI_API_KEY", "")
-                    if not key_use:
-                        st.error("❌ 請先輸入有效的 Gemini API Key！")
-                    else:
-                        with st.spinner("AI 經理人正在解讀各大總經指標..."):
-                            try:
-                                client = genai.Client(api_key=key_use)
-                                snapshot_str = f"- VIX恐慌指數: {vix_val:.2f}\n- 10年公債殖利率: {tnx_val:.2f}%\n"
-                                
-                                for k, t in indicators.items():
-                                    try:
-                                        s_df = yf.Ticker(t).history(period="5d")
-                                        if not s_df.empty:
-                                            c_val = float(s_df['Close'].iloc[-1])
-                                            p_val = float(s_df['Close'].iloc[-2])
-                                            pct_chg = ((c_val - p_val) / p_val) * 100
-                                            snapshot_str += f"- {k}: {c_val:,.2f} ({pct_chg:+.2f}%)\n"
-                                    except:
-                                        pass
-                                        
-                                p_text = f"""
-                                你是一位頂級美股對沖基金經理人。以下是我剛剛抓取的今日市場核心總經數據即時快照：
-                                {snapshot_str}
-                                
-                                請針對目前的波動率、債市殖利率與跨市場表現，為我提供一份精煉的「今日總經晨報」，包含：
-                                1. 宏觀解讀（資金流向與潛在風險）。
-                                2. 今日操作提醒（應對當前環境的現金水位或避險方針）。
-                                請給出專業、直擊重點的繁體中文建議。
-                                """
-                                res = client.models.generate_content(model='gemini-2.5-flash', contents=p_text)
-                                st.session_state.ai_memo_p1["text"] = res.text
-                                st.session_state.ai_memo_p1["time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                            except Exception as e:
-                                st.error(f"晨報生成失敗: {e}")
+                    with st.spinner("AI 經理人正在解讀各大總經指標..."):
+                        try:
+                            client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+                            snapshot_str = f"- VIX恐慌指數: {vix_val:.2f}\n- 10年公債殖利率: {tnx_val:.2f}%\n"
+                            
+                            for k, t in indicators.items():
+                                try:
+                                    s_df = yf.Ticker(t).history(period="5d")
+                                    if not s_df.empty:
+                                        c_val = float(s_df['Close'].iloc[-1])
+                                        p_val = float(s_df['Close'].iloc[-2])
+                                        pct_chg = ((c_val - p_val) / p_val) * 100
+                                        snapshot_str += f"- {k}: {c_val:,.2f} ({pct_chg:+.2f}%)\n"
+                                except:
+                                    pass
+                                    
+                            p_text = f"""
+                            你是一位頂級美股對沖基金經理人。以下是我剛剛抓取的今日市場核心總經數據即時快照：
+                            {snapshot_str}
+                            
+                            請針對目前的波動率、債市殖利率與跨市場表現，為我提供一份精煉的「今日總經晨報」，包含：
+                            1. 宏觀解讀（資金流向與潛在風險）。
+                            2. 今日操作提醒（應對當前環境的現金水位或避險方針）。
+                            請給出專業、直擊重點的繁體中文建議。
+                            """
+                            res = client.models.generate_content(model='gemini-2.5-flash', contents=p_text)
+                            st.session_state.ai_memo_p1["text"] = res.text
+                            st.session_state.ai_memo_p1["time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        except Exception as e:
+                            st.error(f"晨報生成失敗: {e}")
                 
                 if st.session_state.ai_memo_p1["text"]:
                     st.markdown("---")
@@ -383,23 +378,17 @@ elif page == "第二頁：板塊資金輪動":
             st.markdown("---")
             st.subheader("🤖 AI 避險基金經理人：板塊資金輪動深度分析與推薦")
             
-            api_key_input_p2 = st.text_input("請輸入您的 Gemini API Key (用於生成板塊分析)", type="password", key="p2_ai_key")
-            
             if st.button("🧠 啟動 AI 板塊資金輪動與推薦解析", use_container_width=True):
-                key_use = api_key_input_p2 if api_key_input_p2 else st.secrets.get("GEMINI_API_KEY", "")
-                if not key_use:
-                    st.error("❌ 請先輸入有效的 Gemini API Key！")
-                else:
-                    with st.spinner("AI 經理人正在解析 11 大板塊強弱排行與即時持股佔比..."):
-                        try:
-                            client = genai.Client(api_key=key_use)
-                            summary_table = df_sectors[['代號', '板塊名稱', '日漲跌幅 (%)', '月漲跌幅 (%)', '前十大核心持股與佔比 (1-10 排序)']].to_string(index=False)
-                            prompt_p2 = f"身為頂級美股對沖基金經理人。以下是我剛剛透過華爾街即時抓取整理的 11 大板塊數據：\n{summary_table}\n請給予我 1.資金流向解讀 2.強勢板塊推薦 3.脆弱板塊風險提示。"
-                            res_p2 = client.models.generate_content(model='gemini-2.5-flash', contents=prompt_p2)
-                            st.session_state.ai_memo_p2["text"] = res_p2.text
-                            st.session_state.ai_memo_p2["time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        except Exception as e:
-                            st.error(f"AI 分析生成失敗: {e}")
+                with st.spinner("AI 經理人正在解析 11 大板塊強弱排行與即時持股佔比..."):
+                    try:
+                        client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+                        summary_table = df_sectors[['代號', '板塊名稱', '日漲跌幅 (%)', '月漲跌幅 (%)', '前十大核心持股與佔比 (1-10 排序)']].to_string(index=False)
+                        prompt_p2 = f"身為頂級美股對沖基金經理人。以下是我剛剛透過華爾街即時抓取整理的 11 大板塊數據：\n{summary_table}\n請給予我 1.資金流向解讀 2.強勢板塊推薦 3.脆弱板塊風險提示。"
+                        res_p2 = client.models.generate_content(model='gemini-2.5-flash', contents=prompt_p2)
+                        st.session_state.ai_memo_p2["text"] = res_p2.text
+                        st.session_state.ai_memo_p2["time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    except Exception as e:
+                        st.error(f"AI 分析生成失敗: {e}")
             
             if st.session_state.ai_memo_p2["text"]:
                 st.markdown("---")
@@ -443,7 +432,6 @@ elif page == "第三頁：重大行事曆與會展":
     ]
 
     filtered_events = [ev for ev in events_data if today <= datetime.strptime(ev["日期"], "%Y-%m-%d").date() <= three_months_later]
-    api_key_input_p3 = st.text_input("請輸入您的 Gemini API Key (用於生成 AI 戰術建議)", type="password", key="p3_key")
 
     if filtered_events:
         st.markdown("### 📌 未來 3 個月重大總經事件與 AI 經理人戰術指導")
@@ -457,20 +445,16 @@ elif page == "第三頁：重大行事曆與會展":
                 
                 with cols[3]:
                     if st.button(f"🧠 AI 經理人解析此事件", key=f"ai_event_btn_{idx}"):
-                        key_use = api_key_input_p3 if api_key_input_p3 else st.secrets.get("GEMINI_API_KEY", "")
-                        if not key_use:
-                            st.error("請先輸入 API Key！")
-                        else:
-                            with st.spinner("AI 經理人正在生成戰術..."):
-                                try:
-                                    client = genai.Client(api_key=key_use)
-                                    res = client.models.generate_content(
-                                        model='gemini-2.5-flash', 
-                                        contents=f"身為避險基金經理人，面對即將到來的總經事件：【{ev['項目']}】（影響層面：{ev['影響']}），請給我 2 點精煉、具體且直接可執行的資產配置與風控建議。"
-                                    )
-                                    st.session_state.ai_memo_p3[event_key] = {"text": res.text, "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-                                except Exception as e:
-                                    st.error(f"生成失敗: {e}")
+                        with st.spinner("AI 經理人正在生成戰術..."):
+                            try:
+                                client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+                                res = client.models.generate_content(
+                                    model='gemini-2.5-flash', 
+                                    contents=f"身為避險基金經理人，面對即將到來的總經事件：【{ev['項目']}】（影響層面：{ev['影響']}），請給我 2 點精煉、具體且直接可執行的資產配置與風控建議。"
+                                )
+                                st.session_state.ai_memo_p3[event_key] = {"text": res.text, "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+                            except Exception as e:
+                                st.error(f"生成失敗: {e}")
                 
                 if event_key in st.session_state.ai_memo_p3:
                     memo = st.session_state.ai_memo_p3[event_key]
@@ -493,13 +477,7 @@ elif page == "第四頁：部位監控與量化風控":
         key_dict = dict(st.secrets["google_key"])
         creds = ServiceAccountCredentials.from_json_keyfile_dict(key_dict, scope)
         client = gspread.authorize(creds)
-        
         spreadsheet = client.open("Quant_Database")
-        return (
-            pd.DataFrame(spreadsheet.worksheet("Active_Positions").get_all_records()),
-            pd.DataFrame(spreadsheet.worksheet("Daily_NAV").get_all_records()),
-            pd.DataFrame(spreadsheet.worksheet("持倉統計").get_all_records())
-        )
         return (
             pd.DataFrame(spreadsheet.worksheet("Active_Positions").get_all_records()),
             pd.DataFrame(spreadsheet.worksheet("Daily_NAV").get_all_records()),
@@ -719,23 +697,18 @@ elif page == "第四頁：部位監控與量化風控":
 
             st.markdown("---")
             st.subheader("🤖 AI 避險基金經理人即時壓力測試與風控審查")
-            api_key_input = st.text_input("請輸入您的 Gemini API Key (若已在 secrets 設定可留空)", type="password", key="p4_key")
             
             if st.button("🧠 啟動 AI 經理人風控與壓力測試", use_container_width=True):
-                key_to_use = api_key_input if api_key_input else st.secrets.get("GEMINI_API_KEY", "")
-                if not key_to_use:
-                    st.error("❌ 請先輸入有效的 Gemini API Key！")
-                else:
-                    with st.spinner("AI 經理人正在分析中..."):
-                        try:
-                            client = genai.Client(api_key=key_to_use)
-                            positions_summary = df[['標的', '名稱', '真實風險權重 (%)', '標的槓桿', '報酬率 (%)']].to_string(index=False) if not df.empty else "無持倉"
-                            prompt_text = f"總帳戶淨值: NT$ {total_net_liq:,.0f}\n合併總槓桿率: {global_leverage}x\n總現金水位: {global_cash_pct}%\n持倉明細:\n{positions_summary}\n請給予 3 點風控建議。"
-                            response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt_text)
-                            st.session_state.ai_memo_p4["text"] = response.text
-                            st.session_state.ai_memo_p4["time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        except Exception as e:
-                            st.error(f"AI 呼叫失敗: {e}")
+                with st.spinner("AI 經理人正在分析中..."):
+                    try:
+                        client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+                        positions_summary = df[['標的', '名稱', '真實風險權重 (%)', '標的槓桿', '報酬率 (%)']].to_string(index=False) if not df.empty else "無持倉"
+                        prompt_text = f"總帳戶淨值: NT$ {total_net_liq:,.0f}\n合併總槓桿率: {global_leverage}x\n總現金水位: {global_cash_pct}%\n持倉明細:\n{positions_summary}\n請給予 3 點風控建議。"
+                        response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt_text)
+                        st.session_state.ai_memo_p4["text"] = response.text
+                        st.session_state.ai_memo_p4["time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    except Exception as e:
+                        st.error(f"AI 呼叫失敗: {e}")
             
             if st.session_state.ai_memo_p4["text"]:
                 st.markdown("---")
@@ -780,8 +753,6 @@ elif page == "第五頁：Telegram 戰情推播":
                 bot_token = st.secrets["telegram"]["bot_token"]
                 chat_id = st.secrets["telegram"]["chat_id"]
                 url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-                
-                # 簡單抓取目前時間與快速摘要
                 summary_text = f"📊 【量化戰鬥艙日誌摘要】\n時間：{datetime.now().strftime('%Y-%m-%d %H:%M')}\n狀態：系統運作順暢，全自動監控中！"
                 payload = {
                     "chat_id": chat_id,
