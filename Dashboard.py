@@ -36,7 +36,7 @@ def check_password():
         st.markdown("## 🔐 系統安全驗證")
         st.text_input(
             "請輸入系統登入密碼", type="password", on_change=password_entered, key="password"
-        >
+        )
         st.error("😕 密碼錯誤，請重新輸入")
         return False
     else:
