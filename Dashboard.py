@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from google import genai
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from oauth2client.service_account import ServiceAccountCredentials  # <-- 確保這裡有這一行！
 
 # ==========================================
 # 網頁基本設定與密碼驗證防護
