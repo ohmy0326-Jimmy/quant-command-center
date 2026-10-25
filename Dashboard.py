@@ -666,10 +666,15 @@ elif page == "第四頁：部位監控與量化風控":
                 account_data['帳戶淨值'] = 0.0
                 
                 for idx, row in account_data.iterrows():
-                    if str(row['帳戶名稱']).strip() == "元大期貨":
-                        # 修復元大期貨淨值計算邏輯（期貨淨值 = 初始權益 + 未實現損益，現金隨之動態平衡）
-                        account_data.at[idx, '帳戶淨值'] = float(170422.0 + row['部位權益貢獻'])
-                        account_data.at[idx, '現金餘額'] = float(max(0.0, account_data.at[idx, '帳戶淨值'] - row['維持保證金總額']))
+                    acc_name = str(row['帳戶名稱']).strip()
+                    if "元大期貨" in acc_name:
+                        # 【核心修正】元大期貨專用邏輯：
+                        # 帳戶淨值 = 初始權益(170,422) + 該帳戶期貨部位累積的未實現損益(部位權益貢獻)
+                        # 現金餘額 = 帳戶淨值 - 維持保證金總額（確保不會出現無理的負數或重複扣款）
+                        net_val = float(170422.0 + row['部位權益貢獻'])
+                        maint_m = float(row['維持保證金總額'])
+                        account_data.at[idx, '帳戶淨值'] = net_val
+                        account_data.at[idx, '現金餘額'] = max(0.0, net_val - maint_m)
                     else:
                         account_data.at[idx, '帳戶淨值'] = float(row['現金餘額'] - row['融資/質押借款'] + row['部位權益貢獻'])
 
