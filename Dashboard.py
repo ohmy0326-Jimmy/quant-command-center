@@ -683,16 +683,14 @@ elif page == "第四頁：部位監控與量化風控":
                 acc_maint_margin = df.groupby('帳戶')['維持保證金(原幣)'].sum()
 
             if not account_data.empty:
-                for col in ["現金餘額", "融資/質押借款"]:
+                for col in ["現金餘額", "融資/質押借款", "帳戶淨值", "名目曝險"]:
                     if col in account_data.columns:
                         account_data[col] = pd.to_numeric(account_data[col], errors='coerce').fillna(0.0).astype(float)
                 
                 account_data['部位權益貢獻'] = account_data['帳戶名稱'].map(acc_equity_twd).fillna(0.0).astype(float)
-                account_data['名目曝險'] = account_data['帳戶名稱'].map(acc_exp_twd).fillna(0.0).astype(float)
                 account_data['維持保證金總額'] = account_data['帳戶名稱'].map(acc_maint_margin).fillna(0.0).astype(float)
-                account_data['帳戶淨值'] = 0.0
                 
-                # 【絕對保護現貨帳戶】：現貨帳戶完全讀取試算表真實資料，僅對元大期貨套用動態保證金計算
+                # 【完美修復】：現貨帳戶完全讀取試算表中的原始真實數據，不額外用公式覆寫淨值！
                 for idx, row in account_data.iterrows():
                     acc_name = str(row['帳戶名稱']).strip()
                     if "元大期貨" in acc_name:
@@ -700,9 +698,10 @@ elif page == "第四頁：部位監控與量化風控":
                         maint_m = float(row['維持保證金總額'])
                         account_data.at[idx, '帳戶淨值'] = net_val
                         account_data.at[idx, '現金餘額'] = float(max(0.0, net_val - maint_m))
+                        account_data.at[idx, '名目曝險'] = float(acc_exp_twd.get(row['帳戶名稱'], 0.0))
                     else:
-                        # 現貨與複委託帳戶：直接採用您原本第二版的試算表同步公式，絕不覆寫
-                        account_data.at[idx, '帳戶淨值'] = float(row['現金餘額'] - row['融資/質押借款'] + row['部位權益貢獻'])
+                        # 現貨與複委託帳戶：直接保留試算表同步過來的真實帳戶淨值與現金
+                        pass
 
                 total_net_liq = float(account_data["帳戶淨值"].sum())
 
