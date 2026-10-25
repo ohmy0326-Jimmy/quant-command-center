@@ -653,16 +653,12 @@ elif page == "第四頁：部位監控與量化風控":
                 df['Beta值'] = df['標的'].map(betas).fillna(1.0)
                 df['產業別'] = df['標的'].map(sectors).fillna("其他")
                 
-                # ==========================================
-                # 🛠️ 關鍵修正：期貨採「點位差 × 口數 × 乘數」計算損益
-                # ==========================================
+                # 採「點位差 × 口數 × 乘數」計算期貨損益
                 is_futures_mask = df['種類'].astype(str).str.contains('期', na=False)
                 
-                # 計算期貨點數損益（微台乘數為10，小台為50，大台為200，股票期貨為2000）
                 def calc_futures_pnl(row):
                     t = str(row['標的']).upper()
                     mult = 10 if t == 'FMF' else (50 if t == 'MTX' else (200 if t == 'TX' else 2000))
-                    # 損益 = (即時報價 - 平均成本) * 持有數量 * 乘數
                     return (row['即時報價'] - row['平均成本']) * row['持有數量'] * mult
 
                 df['淨未實現損益(原幣)'] = np.where(
@@ -671,7 +667,6 @@ elif page == "第四頁：部位監控與量化風控":
                     0.0
                 )
 
-                # 非期貨（如現股、ETF）的損益計算
                 stock_mask = ~is_futures_mask
                 if stock_mask.any():
                     stock_latest = np.where(df.loc[stock_mask, '即時報價'].notna() & (df.loc[stock_mask, '平均成本'] != 0), 
@@ -703,10 +698,10 @@ elif page == "第四頁：部位監控與量化風控":
                 account_data['維持保證金總額'] = account_data['帳戶名稱'].map(acc_maint_margin).fillna(0.0).astype(float)
                 account_data['帳戶淨值'] = 0.0
                 
+                # 嚴格區分：僅對元大期貨套用期貨邏輯，其餘現貨/複委託帳戶維持原本標準公式不變
                 for idx, row in account_data.iterrows():
                     acc_name = str(row['帳戶名稱']).strip()
                     if "元大期貨" in acc_name:
-                        # 完美對齊券商邏輯：淨值 = 初始權益(170,422) + 損益；現金(可動用) = 淨值 - 維持保證金總額
                         net_val = float(170422.0 + row['部位權益貢獻'])
                         maint_m = float(row['維持保證金總額'])
                         account_data.at[idx, '帳戶淨值'] = net_val
