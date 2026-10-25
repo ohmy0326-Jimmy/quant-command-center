@@ -1,3 +1,4 @@
+import os
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -12,14 +13,17 @@ from plotly.subplots import make_subplots
 from oauth2client.service_account import ServiceAccountCredentials
 
 # ==========================================
-# 網頁基本設定與密碼驗證防護
+# 網頁基本設定與密碼驗證防護（支援環境變數與 Secret）
 # ==========================================
 st.set_page_config(page_title="量化交易戰鬥艙", page_icon="⚔️", layout="wide", initial_sidebar_state="expanded")
+
+# 安全讀取登入密碼（支援雲端環境變數或本地 secrets）
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD") or st.secrets.get("passwords", {}).get("admin", "")
 
 def check_password():
     """驗證密碼是否正確"""
     def password_entered():
-        if st.session_state["password"] == st.secrets["passwords"]["admin"]:
+        if st.session_state["password"] == ADMIN_PASSWORD:
             st.session_state["password_correct"] = True
             del st.session_state["password"]
         else:
@@ -136,7 +140,8 @@ if page == "第一頁：總經與風險鬧鐘":
                 if st.button("🧠 一鍵生成今日總經盤勢速覽", use_container_width=True):
                     with st.spinner("AI 經理人正在解讀各大總經指標..."):
                         try:
-                            client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+                            gemini_key = os.environ.get("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")
+                            client = genai.Client(api_key=gemini_key)
                             snapshot_str = f"- VIX恐慌指數: {vix_val:.2f}\n- 10年公債殖利率: {tnx_val:.2f}%\n"
                             
                             for k, t in indicators.items():
@@ -386,7 +391,8 @@ elif page == "第二頁：板塊與主題資金輪動":
             if st.button("🧠 啟動 AI 板塊與主題資金輪動解析", use_container_width=True):
                 with st.spinner("AI 經理人正在解析各板塊及軟/硬/太空 ETF 強弱排行與持股佔比..."):
                     try:
-                        client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+                        gemini_key = os.environ.get("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")
+                        client = genai.Client(api_key=gemini_key)
                         summary_table = df_sectors[['代號', '板塊名稱', '日漲跌幅 (%)', '月漲跌幅 (%)', '前十大核心持股與佔比 (1-10 排序)']].to_string(index=False)
                         prompt_p2 = f"身為頂級美股對沖基金經理人。以下是我剛剛透過華爾街即時抓取整理的 11 大板塊與軟體(IGV)/硬體(SOXX)/太空(UFO)主題ETF數據：\n{summary_table}\n請給予我 1.資金流向與主題輪動解讀 2.強勢板塊/主題推薦 3.脆弱板塊風險提示。"
                         res_p2 = client.models.generate_content(model='gemini-3.8-flash', contents=prompt_p2)
@@ -498,7 +504,8 @@ elif page == "第三頁：重大行事曆與會展":
                         if st.button(f"🧠 AI 解析", key=f"ai_event_btn_{idx}"):
                             with st.spinner("AI 經理人正在生成戰術..."):
                                 try:
-                                    client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+                                    gemini_key = os.environ.get("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")
+                                    client = genai.Client(api_key=gemini_key)
                                     res = client.models.generate_content(
                                         model='gemini-3.8-flash', 
                                         contents=f"身為避險基金經理人，面對即將到來的重大財報或總經事件：【{ev['項目']}】（影響層面：{ev['影響']}），請給我 2 點精煉、具體且直接可執行的資產配置與風控建議。"
@@ -509,8 +516,8 @@ elif page == "第三頁：重大行事曆與會展":
                     with sub_c2:
                         if st.button(f"📲 推播TG", key=f"tg_event_btn_{idx}"):
                             try:
-                                bot_token = st.secrets["telegram"]["bot_token"]
-                                chat_id = st.secrets["telegram"]["chat_id"]
+                                bot_token = os.environ.get("TELEGRAM_BOT_TOKEN") or st.secrets.get("telegram", {}).get("bot_token", "")
+                                chat_id = os.environ.get("TELEGRAM_CHAT_ID") or st.secrets.get("telegram", {}).get("chat_id", "")
                                 msg = f"📅 【量化戰情室行事曆提醒】\n事件：{ev['項目']}\n日期：{ev['日期']}\n影響：{ev['影響']}"
                                 r = requests.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", json={"chat_id": chat_id, "text": msg}, timeout=5)
                                 if r.status_code == 200:
@@ -812,8 +819,8 @@ elif page == "第四頁：部位監控與量化風控":
                     
                     if st.button("🚨 一鍵推播停損警報至 Telegram", type="primary"):
                         try:
-                            bot_token = st.secrets["telegram"]["bot_token"]
-                            chat_id = st.secrets["telegram"]["chat_id"]
+                            bot_token = os.environ.get("TELEGRAM_BOT_TOKEN") or st.secrets.get("telegram", {}).get("bot_token", "")
+                            chat_id = os.environ.get("TELEGRAM_CHAT_ID") or st.secrets.get("telegram", {}).get("chat_id", "")
                             alarm_text = "🚨 【量化戰情室風控警報】以下部位已觸及最大虧損限制：\n"
                             for idx, row in alarms.iterrows():
                                 name_display = row['名稱'] if row['名稱'] else row['標的']
@@ -907,8 +914,8 @@ elif page == "第四頁：部位監控與量化風控":
                     st.error("🚨 **【全局風控警告】合併總槓桿率已超過 1.5x 警戒線，請注意流動性與融資維持率風險！**")
                     if st.button("⚠️ 推送合併槓桿超標警報至 Telegram"):
                         try:
-                            bot_token = st.secrets["telegram"]["bot_token"]
-                            chat_id = st.secrets["telegram"]["chat_id"]
+                            bot_token = os.environ.get("TELEGRAM_BOT_TOKEN") or st.secrets.get("telegram", {}).get("bot_token", "")
+                            chat_id = os.environ.get("TELEGRAM_CHAT_ID") or st.secrets.get("telegram", {}).get("chat_id", "")
                             msg = f"🚨 【量化戰情室槓桿警告】\n目前合併總槓桿率達 {global_leverage}x (已超過 1.5x 警戒線)！\n總淨值：NT$ {total_net_liq:,.0f}\n總曝險：NT$ {total_exposure:,.0f}"
                             r = requests.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", json={"chat_id": chat_id, "text": msg}, timeout=5)
                             if r.status_code == 200:
@@ -953,7 +960,8 @@ elif page == "第四頁：部位監控與量化風控":
             if st.button("🧠 啟動 AI 經理人風控與壓力測試", use_container_width=True):
                 with st.spinner("AI 經理人正在分析中..."):
                     try:
-                        client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+                        gemini_key = os.environ.get("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")
+                        client = genai.Client(api_key=gemini_key)
                         positions_summary = df[['標的', '名稱', '產業別', 'Beta值', '真實風險權重 (%)', '標的槓桿', '報酬率 (%)']].to_string(index=False) if not df.empty else "無持倉"
                         prompt_text = f"總帳戶淨值: NT$ {total_net_liq:,.0f}\n合併總槓桿率: {global_leverage}x\n投資組合加權Beta: {portfolio_beta:.2f}\n總現金水位: {global_cash_pct}%\n持倉明細:\n{positions_summary}\n請給予 3 點風控建議。"
                         response = client.models.generate_content(model='gemini-3.8-flash', contents=prompt_text)
@@ -984,8 +992,8 @@ elif page == "第五頁：Telegram 戰情推播":
     with col1:
         if st.button("🚀 發送 Telegram 測試訊息", type="primary", use_container_width=True):
             try:
-                bot_token = st.secrets["telegram"]["bot_token"]
-                chat_id = st.secrets["telegram"]["chat_id"]
+                bot_token = os.environ.get("TELEGRAM_BOT_TOKEN") or st.secrets.get("telegram", {}).get("bot_token", "")
+                chat_id = os.environ.get("TELEGRAM_CHAT_ID") or st.secrets.get("telegram", {}).get("chat_id", "")
                 url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
                 payload = {
                     "chat_id": chat_id,
@@ -1002,8 +1010,8 @@ elif page == "第五頁：Telegram 戰情推播":
     with col2:
         if st.button("📊 推送目前帳戶總覽與風控摘要", use_container_width=True):
             try:
-                bot_token = st.secrets["telegram"]["bot_token"]
-                chat_id = st.secrets["telegram"]["chat_id"]
+                bot_token = os.environ.get("TELEGRAM_BOT_TOKEN") or st.secrets.get("telegram", {}).get("bot_token", "")
+                chat_id = os.environ.get("TELEGRAM_CHAT_ID") or st.secrets.get("telegram", {}).get("chat_id", "")
                 url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
                 
                 summary_text = (
