@@ -485,6 +485,7 @@ elif page == "第四頁：部位監控與量化風控":
             "META": "社群與AI",
             "SOXL": "半導體槓桿ETF",
             "00631L": "台股槓桿ETF",
+            "LITX": "光通產業",
             "TX": "台指期貨",
             "MTX": "小型台指期"
         }
@@ -506,6 +507,10 @@ elif page == "第四頁：部位監控與量化風控":
                     refined_sector = "其他"
             except:
                 refined_sector = "其他與衍生品"
+
+        # 期貨指數商品直接對應大盤，Beta 設為 1.0
+        if t_upper in ['TX', 'MTX']:
+            return 1.0, str(refined_sector)
 
         try:
             benchmark = "^TWII" if is_tw else "^GSPC"
@@ -668,13 +673,8 @@ elif page == "第四頁：部位監控與量化風控":
                 for idx, row in account_data.iterrows():
                     acc_name = str(row['帳戶名稱']).strip()
                     if "元大期貨" in acc_name:
-                        # 【核心修正】元大期貨專用邏輯：
-                        # 帳戶淨值 = 初始權益(170,422) + 該帳戶期貨部位累積的未實現損益(部位權益貢獻)
-                        # 現金餘額 = 帳戶淨值 - 維持保證金總額（確保不會出現無理的負數或重複扣款）
-                        net_val = float(170422.0 + row['部位權益貢獻'])
-                        maint_m = float(row['維持保證金總額'])
-                        account_data.at[idx, '帳戶淨值'] = net_val
-                        account_data.at[idx, '現金餘額'] = max(0.0, net_val - maint_m)
+                        # 【正確修正】元大期貨與其他帳戶一致：使用試算表中的現金餘額 + 衍生品未實現損益
+                        account_data.at[idx, '帳戶淨值'] = float(row['現金餘額'] + row['部位權益貢獻'])
                     else:
                         account_data.at[idx, '帳戶淨值'] = float(row['現金餘額'] - row['融資/質押借款'] + row['部位權益貢獻'])
 
