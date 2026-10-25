@@ -473,6 +473,8 @@ elif page == "第四頁：部位監控與量化風控":
         detailed_sector_map = {
             "MUU": "記憶體",
             "SNXX": "記憶體",
+            "AMUU": "AI晶片",
+            "KORU": "韓國指數",
             "金居": "銅箔材料",
             "2330": "晶圓代工",
             "TSM": "晶圓代工",
@@ -621,6 +623,8 @@ elif page == "第四頁：部位監控與量化風控":
 
                         is_tw_market = (t_upper in ['TE', 'TF']) or ('.TW' in t_upper) or ('.TWO' in t_upper) or (len(t_upper) == 3 and t_upper.isalpha())
                         b_val, s_val = get_market_beta_and_sector(ticker, is_tw_market)
+                        
+                        # 特殊手動微調校正：確保 MUU 抓取動態計算的真實 Beta 值（而非被強制設為 1）
                         betas[ticker] = b_val
                         sectors[ticker] = s_val
                         
@@ -698,14 +702,12 @@ elif page == "第四頁：部位監控與量化風控":
                 for idx, row in account_data.iterrows():
                     acc_name = str(row['帳戶名稱']).strip()
                     if "元大期貨" in acc_name:
-                        # 元大期貨維持原本邏輯
                         q_equity_contrib = float(df[df['帳戶'] == acc_name]['淨未實現損益(原幣)'].sum() * df[df['帳戶'] == acc_name]['換算匯率'].iloc[0]) if not df[df['帳戶'] == acc_name].empty else 0.0
                         net_val = float(170422.0 + q_equity_contrib)
                         maint_m = float(row['維持保證金總額'])
                         account_data.at[idx, '帳戶淨值'] = net_val
                         account_data.at[idx, '現金餘額'] = float(max(0.0, net_val - maint_m))
                     else:
-                        # 其它5個帳戶：現金餘額 + 即時持股市值 - 融資/質押借款
                         cash = float(row['現金餘額'])
                         mkt_val = float(row['即時持股市值'])
                         debt = float(row['融資/質押借款'])
@@ -713,7 +715,6 @@ elif page == "第四頁：部位監控與量化風控":
 
                 total_net_liq = float(account_data["帳戶淨值"].sum())
 
-            # 確保真實風險權重 (%) 正確計算
             if not df.empty:
                 df['真實風險權重 (%)'] = np.where(total_net_liq > 0, (df['實質曝險(台幣)'] / total_net_liq) * 100.0, 0.0).astype(float)
 
