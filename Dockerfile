@@ -2,12 +2,10 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# 安裝系統相依與編譯工具
+# 安裝必要的系統編譯與網路工具（已移除會報錯的套件）
 RUN apt-get update && apt-get install -y \
     build-essential \
     curl \
-    software-properties-common \
-    git \
     && rm -rf /var/lib/apt/lists/*
 
 # 複製並安裝 Python 套件
