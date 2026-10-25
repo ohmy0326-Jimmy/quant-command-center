@@ -414,7 +414,6 @@ elif page == "第三頁：重大行事曆與會展":
     today = datetime.now().date()
     three_months_later = today + timedelta(days=90)
 
-    # 動態抓取 M7 財報日的輔助函式
     @st.cache_data(ttl=3600)
     def get_m7_earnings_events():
         m7_dict = {
@@ -431,10 +430,8 @@ elif page == "第三頁：重大行事曆與會展":
             try:
                 t_obj = yf.Ticker(ticker)
                 cal = t_obj.calendar
-                # 嘗試從 yfinance calendar 取得財報日
                 earnings_date = None
                 if isinstance(cal, dict):
-                    # 有時候 earnings date 在 dict key 中
                     for k in cal.keys():
                         if 'earnings' in k.lower():
                             val = cal[k]
@@ -443,7 +440,6 @@ elif page == "第三頁：重大行事曆與會展":
                             elif isinstance(val, (datetime, pd.Timestamp)):
                                 earnings_date = val.date()
                 elif hasattr(cal, 'loc') and not cal.empty:
-                    # 若為 DataFrame
                     if 'Earnings Date' in cal.index:
                         val = cal.loc['Earnings Date'].iloc[0]
                         earnings_date = pd.to_datetime(val).date()
@@ -459,7 +455,6 @@ elif page == "第三頁：重大行事曆與會展":
                 pass
         return events
 
-    # 基礎總經事件清單
     base_events = [
         {"日期": "2026-10-25", "項目": "美國 PCE 物價指數公佈", "影響": "Fed 通膨目標核心觀測與降息路徑判定"},
         {"日期": "2026-10-29", "項目": "FOMC 利率決議與華許聲明 (清晨02:00)", "影響": "全市場基準利率調整、流動性與債市/股市大震盪"},
@@ -475,11 +470,9 @@ elif page == "第三頁：重大行事曆與會展":
         {"日期": "2027-01-15", "項目": "台積電 (2330) 法人說明會", "影響": "台股大盤、半導體供應鏈、全球 AI 資本支出風向"}
     ]
 
-    # 合併總經事件與動態抓取的 M7 財報事件
     m7_events = get_m7_earnings_events()
     all_events = base_events + m7_events
 
-    # 依照日期排序並過濾未來 3 個月內
     filtered_events = [ev for ev in all_events if today <= datetime.strptime(ev["日期"], "%Y-%m-%d").date() <= three_months_later]
     filtered_events.sort(key=lambda x: x["日期"])
 
@@ -494,17 +487,33 @@ elif page == "第三頁：重大行事曆與會展":
                 cols[2].markdown(f"⚡ {ev['影響']}")
                 
                 with cols[3]:
-                    if st.button(f"🧠 AI 經理人解析此事件", key=f"ai_event_btn_{idx}"):
-                        with st.spinner("AI 經理人正在生成戰術..."):
+                    sub_c1, sub_c2 = st.columns(2)
+                    with sub_c1:
+                        if st.button(f"🧠 AI 解析", key=f"ai_event_btn_{idx}"):
+                            with st.spinner("AI 經理人正在生成戰術..."):
+                                try:
+                                    client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+                                    res = client.models.generate_content(
+                                        model='gemini-3.8-flash', 
+                                        contents=f"身為避險基金經理人，面對即將到來的重大財報或總經事件：【{ev['項目']}】（影響層面：{ev['影響']}），請給我 2 點精煉、具體且直接可執行的資產配置與風控建議。"
+                                    )
+                                    st.session_state.ai_memo_p3[event_key] = {"text": res.text, "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+                                except Exception as e:
+                                    st.error(f"生成失敗: {e}")
+                    with sub_c2:
+                        # Telegram 自動推播事件提醒
+                        if st.button(f"📲 推播TG", key=f"tg_event_btn_{idx}"):
                             try:
-                                client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
-                                res = client.models.generate_content(
-                                    model='gemini-3.8-flash', 
-                                    contents=f"身為避險基金經理人，面對即將到來的重大財報或總經事件：【{ev['項目']}】（影響層面：{ev['影響']}），請給我 2 點精煉、具體且直接可執行的資產配置與風控建議。"
-                                )
-                                st.session_state.ai_memo_p3[event_key] = {"text": res.text, "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+                                bot_token = st.secrets["telegram"]["bot_token"]
+                                chat_id = st.secrets["telegram"]["chat_id"]
+                                msg = f"📅 【量化戰情室行事曆提醒】\n事件：{ev['項目']}\n日期：{ev['日期']}\n影響：{ev['影響']}"
+                                r = requests.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", json={"chat_id": chat_id, "text": msg}, timeout=5)
+                                if r.status_code == 200:
+                                    st.success("✅ TG 推播成功！")
+                                else:
+                                    st.error(f"❌ 失敗: {r.status_code}")
                             except Exception as e:
-                                st.error(f"生成失敗: {e}")
+                                st.error(f"❌ 錯誤: {e}")
                 
                 if event_key in st.session_state.ai_memo_p3:
                     memo = st.session_state.ai_memo_p3[event_key]
@@ -520,7 +529,6 @@ elif page == "第三頁：重大行事曆與會展":
 elif page == "第四頁：部位監控與量化風控":
     @st.cache_data(ttl=300)
     def get_market_beta_and_sector(ticker, is_tw):
-        """自動從外部抓取 Yahoo Finance 產業分類，並結合自訂精細分類與計算 Beta"""
         detailed_sector_map = {
             "MUU": "記憶體",
             "SNXX": "記憶體",
@@ -656,7 +664,6 @@ elif page == "第四頁：部位監控與量化風控":
                             df.at[idx, '實質佔用本金(原幣)'] = abs(row['名目合約總值(原幣)']) * 0.135
                             df.at[idx, '維持保證金(原幣)'] = abs(row['名目合約總值(原幣)']) * 0.11
 
-                # 取得大盤指數作為期貨基準價
                 try:
                     twii_price = float(yf.Ticker("^TWII").history(period="1d")['Close'].iloc[-1])
                 except:
@@ -675,7 +682,6 @@ elif page == "第四頁：部位監控與量化風控":
                         is_tw_market = (t_upper in ['TE', 'TF']) or ('.TW' in t_upper) or ('.TWO' in t_upper) or (len(t_upper) == 3 and t_upper.isalpha())
                         b_val, s_val = get_market_beta_and_sector(ticker, is_tw_market)
                         
-                        # 特殊手動微調校正：確保 MUU 抓取動態計算的真實 Beta 值（而非被強制設為 1）
                         betas[ticker] = b_val
                         sectors[ticker] = s_val
                         
@@ -704,7 +710,6 @@ elif page == "第四頁：部位監控與量化風控":
                 df['Beta值'] = df['標的'].map(betas).fillna(1.0)
                 df['產業別'] = df['標的'].map(sectors).fillna("其他")
                 
-                # 期貨採「點位差 × 口數 × 乘數」計算損益
                 is_futures_mask = df['種類'].astype(str).str.contains('期', na=False)
                 
                 def calc_futures_pnl(row):
@@ -799,6 +804,23 @@ elif page == "第四頁：部位監控與量化風控":
                     for idx, row in alarms.iterrows():
                         name_display = row['名稱'] if row['名稱'] else row['標的']
                         st.warning(f"⚠️ **{name_display} ({row['標的']})**：目前淨報酬率 **{row['報酬率 (%)']:.2f}%** (已跌破設定的 {row['最大虧損比例']:.0f}%)")
+                    
+                    # Telegram 一鍵自動推播停損警報按鈕
+                    if st.button("🚨 一鍵推播停損警報至 Telegram", type="primary"):
+                        try:
+                            bot_token = st.secrets["telegram"]["bot_token"]
+                            chat_id = st.secrets["telegram"]["chat_id"]
+                            alarm_text = "🚨 【量化戰情室風控警報】以下部位已觸及最大虧損限制：\n"
+                            for idx, row in alarms.iterrows():
+                                name_display = row['名稱'] if row['名稱'] else row['標的']
+                                alarm_text += f"• {name_display} ({row['標的']}): {row['報酬率 (%)']:.2f}% (設限: {row['最大虧損比例']:.0f}%)\n"
+                            r = requests.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", json={"chat_id": chat_id, "text": alarm_text}, timeout=5)
+                            if r.status_code == 200:
+                                st.success("✅ 停損警報已成功推播至 Telegram！")
+                            else:
+                                st.error(f"❌ 推送失敗: {r.status_code}")
+                        except Exception as e:
+                            st.error(f"❌ 錯誤: {e}")
                     st.markdown("---")
 
             # ==========================================
@@ -828,7 +850,6 @@ elif page == "第四頁：部位監控與量化風控":
                 b_col3.metric("總實質曝險部位", f"NT$ {total_exposure_sum:,.0f}", "")
                 st.markdown("---")
 
-                # 各精細產業別持股曝險與佔比（圓餅圖）
                 st.subheader("🏢 各精細產業別持股曝險與資金佔比分佈")
                 sector_grouped = df.groupby('產業別').agg(
                     實質曝險合計=('實質曝險(台幣)', 'sum'),
@@ -878,6 +899,22 @@ elif page == "第四頁：部位監控與量化風控":
                 c4.metric("🌍 合併總槓桿率", f"{global_leverage}x", "警戒線: 1.5x")
                 c5.metric("💰 總現金水位", f"{global_cash_pct}%", "健康區間: >40%")
                 
+                # 總槓桿超標警報推送
+                if global_leverage > 1.5:
+                    st.error("🚨 **【全局風控警告】合併總槓桿率已超過 1.5x 警戒線，請注意流動性與融資維持率風險！**")
+                    if st.button("⚠️ 推送合併槓桿超標警報至 Telegram"):
+                        try:
+                            bot_token = st.secrets["telegram"]["bot_token"]
+                            chat_id = st.secrets["telegram"]["chat_id"]
+                            msg = f"🚨 【量化戰情室槓桿警告】\n目前合併總槓桿率達 {global_leverage}x (已超過 1.5x 警戒線)！\n總淨值：NT$ {total_net_liq:,.0f}\n總曝險：NT$ {total_exposure:,.0f}"
+                            r = requests.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", json={"chat_id": chat_id, "text": msg}, timeout=5)
+                            if r.status_code == 200:
+                                st.success("✅ 槓桿警告已成功推播！")
+                            else:
+                                st.error("❌ 推送失敗")
+                        except Exception as e:
+                            st.error(f"❌ 錯誤: {e}")
+
                 display_account = account_data[['帳戶名稱', '現金餘額', '融資/質押借款', '名目曝險', '帳戶淨值', '槓桿率 (倍)', '權益比率%/現金水位%']].copy()
                 styled_df = display_account.style.format({
                     "現金餘額": "NT$ {:,.0f}", "融資/質押借款": "NT$ {:,.0f}", "名目曝險": "NT$ {:,.0f}",
@@ -936,9 +973,9 @@ elif page == "第四頁：部位監控與量化風控":
 elif page == "第五頁：Telegram 戰情推播":
     st.title("📱 第五頁：Telegram 戰情推播與即時通知中心")
     st.markdown("---")
-    st.info("💡 系統已連結您的 Telegram Bot 設定（讀取自 Streamlit Secrets）。您可以在此手動發送測試訊息，或即時推播戰情警報！")
+    st.info("💡 系統已成功連結您的專屬機器人 `@Dailyreport4Jim_bot`。您可以在此手動測試推播或發送全方位帳戶戰情總結！")
 
-    test_msg = st.text_area("輸入要發送至 Telegram 的戰情訊息：", "🚀 【量化交易戰鬥艙】系統運作正常，盤勢監控中！")
+    test_msg = st.text_area("輸入要發送至 Telegram 的戰情訊息：", "🚀 【量化交易戰鬥艙】系統運作正常，盤勢監控與自動風控連線中！")
     
     col1, col2 = st.columns(2)
     with col1:
@@ -953,26 +990,33 @@ elif page == "第五頁：Telegram 戰情推播":
                 }
                 res = requests.post(url, json=payload, timeout=5)
                 if res.status_code == 200:
-                    st.success("✅ Telegram 訊息推播成功！請至手機或電腦版 Telegram 查看。")
+                    st.success("✅ Telegram 訊息推播成功！請至 Telegram 查看。")
                 else:
                     st.error(f"❌ 推送失敗，回應碼：{res.status_code}, 內容：{res.text}")
             except Exception as e:
                 st.error(f"❌ 發送發生例外錯誤：{e}")
                 
     with col2:
-        if st.button("📊 推送目前帳戶總覽摘要", use_container_width=True):
+        if st.button("📊 推送目前帳戶總覽與風控摘要", use_container_width=True):
             try:
                 bot_token = st.secrets["telegram"]["bot_token"]
                 chat_id = st.secrets["telegram"]["chat_id"]
                 url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-                summary_text = f"📊 【量化戰鬥艙日誌摘要】\n時間：{datetime.now().strftime('%Y-%m-%d %H:%M')}\n狀態：系統運作順暢，全自動監控中！"
+                
+                # 動態帶入最新時間
+                summary_text = (
+                    f"📊 【量化戰鬥艙戰情總結】\n"
+                    f"⏱ 時間：{datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
+                    f"🌐 機器人狀態：@Dailyreport4Jim_bot 運作中\n"
+                    f"🛡️ 項目：全自動即時市價結算、M7財報日行事曆與風控鬧鐘已全面啟動！"
+                )
                 payload = {
                     "chat_id": chat_id,
                     "text": summary_text
                 }
                 res = requests.post(url, json=payload, timeout=5)
                 if res.status_code == 200:
-                    st.success("✅ 帳戶摘要已成功推播至 Telegram！")
+                    st.success("✅ 帳戶戰情總結已成功推播至 Telegram！")
                 else:
                     st.error(f"❌ 推送失敗，回應碼：{res.status_code}")
             except Exception as e:
