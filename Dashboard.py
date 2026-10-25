@@ -469,10 +469,7 @@ elif page == "第三頁：重大行事曆與會展":
 elif page == "第四頁：部位監控與量化風控":
     @st.cache_data(ttl=300)
     def get_market_beta_and_sector(ticker, is_tw):
-        """自動計算個股 Beta 值與取得精細產業別分類"""
-        # ==========================================
-        # 🛠️ 精細化產業分類對應表（您可隨時在此新增或修改個股的細分產業）
-        # ==========================================
+        """自動從外部抓取 Yahoo Finance 產業分類，並結合自訂精細分類與計算 Beta"""
         detailed_sector_map = {
             "MUU": "記憶體",
             "SNXX": "記憶體",
@@ -499,17 +496,14 @@ elif page == "第四頁：部位監控與量化風控":
             try:
                 t = yf.Ticker(ticker)
                 info = t.info
-                yf_sector = info.get('sector', '其他')
-                if "Technology" in yf_sector:
-                    refined_sector = "科技硬體與半導體"
-                elif "Materials" in yf_sector:
-                    refined_sector = "原物料與基礎材料"
-                elif "Financial" in yf_sector:
-                    refined_sector = "金融保險"
-                elif "Energy" in yf_sector:
-                    refined_sector = "能源與油氣"
-                else:
+                yf_industry = info.get('industry', '')
+                yf_sector = info.get('sector', '')
+                if yf_industry:
+                    refined_sector = yf_industry
+                elif yf_sector:
                     refined_sector = yf_sector
+                else:
+                    refined_sector = "其他"
             except:
                 refined_sector = "其他與衍生品"
 
@@ -673,17 +667,14 @@ elif page == "第四頁：部位監控與量化風控":
                 
                 for idx, row in account_data.iterrows():
                     if str(row['帳戶名稱']).strip() == "元大期貨":
-                        yuan_ta_margin = float(df[df['帳戶'] == row['帳戶名稱']]['實質佔用本金(原幣)'].sum()) if not df.empty else 0.0
+                        # 修復元大期貨淨值計算邏輯（期貨淨值 = 初始權益 + 未實現損益，現金隨之動態平衡）
                         account_data.at[idx, '帳戶淨值'] = float(170422.0 + row['部位權益貢獻'])
-                        account_data.at[idx, '現金餘額'] = float(account_data.at[idx, '帳戶淨值'] - yuan_ta_margin)
+                        account_data.at[idx, '現金餘額'] = float(max(0.0, account_data.at[idx, '帳戶淨值'] - row['維持保證金總額']))
                     else:
                         account_data.at[idx, '帳戶淨值'] = float(row['現金餘額'] - row['融資/質押借款'] + row['部位權益貢獻'])
 
                 total_net_liq = float(account_data["帳戶淨值"].sum())
 
-            # ==========================================
-            # 先計算全帳戶淨值與真實風險權重 (供後續使用)
-            # ==========================================
             if not df.empty:
                 df['真實風險權重 (%)'] = np.where(total_net_liq > 0, (df['實質曝險(台幣)'] / total_net_liq) * 100.0, 0.0).astype(float)
 
@@ -754,22 +745,24 @@ elif page == "第四頁：部位監控與量化風控":
                 else:
                     portfolio_beta = 0.0
 
-                if portfolio_beta > 0.2:
-                    neutrality_status = "🟢 偏多 (Long-Biased)"
+                if portfolio_beta > 0.5:
+                    neutrality_status = "🟢 高度偏多 (Aggressive Long)"
+                elif portfolio_beta > 0.2:
+                    neutrality_status = "🟢 溫和偏多 (Mild Long)"
                 elif portfolio_beta < -0.2:
-                    neutrality_status = "🔴 偏空 (Short-Biased)"
+                    neutrality_status = "🔴 偏空避險 (Short/Hedging)"
                 else:
                     neutrality_status = "🟡 市場中性 (Market-Neutral)"
 
                 st.subheader("⚖️ 投資組合 Beta 係數與中性化戰情計分板")
                 b_col1, b_col2, b_col3 = st.columns(3)
-                b_col1.metric("整體資產加權 Beta ($\beta_{\text{portfolio}}$)", f"{portfolio_beta:.2f}", "基準對標 S&P500 / 加權指數")
-                b_col2.metric("部位中性化判定", neutrality_status, "")
+                b_col1.metric("整體資產加權 Beta ($\beta_{\text{portfolio}}$)", f"{portfolio_beta:.2f}", "量化中性化指標")
+                b_col2.metric("部位中性化判定", neutrality_status, "區間: -0.2 ~ +0.2 為中性")
                 b_col3.metric("總實質曝險部位", f"NT$ {total_exposure_sum:,.0f}", "")
                 st.markdown("---")
 
                 # ==========================================
-                # 4. 各精細產業別持股曝險與佔比（改為圓餅圖呈現）
+                # 4. 各精細產業別持股曝險與佔比（圓餅圖）
                 # ==========================================
                 st.subheader("🏢 各精細產業別持股曝險與資金佔比分佈")
                 sector_grouped = df.groupby('產業別').agg(
@@ -793,7 +786,7 @@ elif page == "第四頁：部位監控與量化風控":
                     fig_sec = px.pie(
                         sector_grouped, names='產業別', values='產業曝險佔比 (%)',
                         title="各精細產業別資金曝險佔比圓餅圖",
-                        hole=0.4, # 甜甜圈圖外觀更美觀
+                        hole=0.4,
                         template="plotly_dark"
                     )
                     fig_sec.update_traces(textinfo='percent+label')
@@ -825,6 +818,29 @@ elif page == "第四頁：部位監控與量化風控":
                     "即時市值(原幣)": "{:,.0f}", "淨損益(原幣)": "{:,.0f}", "報酬率 (%)": "{:+.2f}%"
                 }, precision=2).background_gradient(subset=["Beta值"], cmap="Purples").background_gradient(subset=["報酬率 (%)"], cmap="RdYlGn") 
                 st.dataframe(styled_quant_df, use_container_width=True, hide_index=True)
+
+            st.markdown("---")
+
+            # ==========================================
+            # 6. AI 避險基金經理人即時壓力測試與風控審查
+            # ==========================================
+            st.subheader("🤖 AI 避險基金經理人即時壓力測試與風控審查")
+            if st.button("🧠 啟動 AI 經理人風控與壓力測試", use_container_width=True):
+                with st.spinner("AI 經理人正在分析中..."):
+                    try:
+                        client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+                        positions_summary = df[['標的', '名稱', '產業別', 'Beta值', '真實風險權重 (%)', '標的槓桿', '報酬率 (%)']].to_string(index=False) if not df.empty else "無持倉"
+                        prompt_text = f"總帳戶淨值: NT$ {total_net_liq:,.0f}\n合併總槓桿率: {global_leverage}x\n投資組合加權Beta: {portfolio_beta:.2f}\n總現金水位: {global_cash_pct}%\n持倉明細:\n{positions_summary}\n請針對目前的產業集中度、總體Beta中性化程度以及槓桿風險，給予 3 點專業的經理人風控建議。"
+                        response = client.models.generate_content(model='gemini-3.8-flash', contents=prompt_text)
+                        st.session_state.ai_memo_p4["text"] = response.text
+                        st.session_state.ai_memo_p4["time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    except Exception as e:
+                        st.error(f"AI 呼叫失敗: {e}")
+            
+            if st.session_state.ai_memo_p4["text"]:
+                st.markdown("---")
+                st.info(f"📌 **最新風控審查 (生成時間：{st.session_state.ai_memo_p4['time']})**")
+                st.markdown(st.session_state.ai_memo_p4["text"])
 
         except Exception as e:
             st.error(f"連線發生錯誤。系統訊息: {e}")
