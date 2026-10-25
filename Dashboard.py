@@ -698,7 +698,9 @@ elif page == "第四頁：部位監控與量化風控":
                 account_data['維持保證金總額'] = account_data['帳戶名稱'].map(acc_maint_margin).fillna(0.0).astype(float)
                 account_data['帳戶淨值'] = 0.0
                 
-                # 嚴格區分：僅對元大期貨套用期貨邏輯，其餘現貨/複委託帳戶維持原本標準公式不變
+                # ==========================================
+                # 🛠️ 嚴格隔離：現貨帳戶維持原本公式，僅元大期貨套用獨立期貨權益邏輯
+                # ==========================================
                 for idx, row in account_data.iterrows():
                     acc_name = str(row['帳戶名稱']).strip()
                     if "元大期貨" in acc_name:
@@ -707,6 +709,7 @@ elif page == "第四頁：部位監控與量化風控":
                         account_data.at[idx, '帳戶淨值'] = net_val
                         account_data.at[idx, '現金餘額'] = float(max(0.0, net_val - maint_m))
                     else:
+                        # 現貨/複委託帳戶：絕對不變動原本的標準計算公式
                         account_data.at[idx, '帳戶淨值'] = float(row['現金餘額'] - row['融資/質押借款'] + row['部位權益貢獻'])
 
                 total_net_liq = float(account_data["帳戶淨值"].sum())
