@@ -507,7 +507,6 @@ elif page == "第三頁：重大行事曆與會展":
                                 except Exception as e:
                                     st.error(f"生成失敗: {e}")
                     with sub_c2:
-                        # Telegram 自動推播事件提醒
                         if st.button(f"📲 推播TG", key=f"tg_event_btn_{idx}"):
                             try:
                                 bot_token = st.secrets["telegram"]["bot_token"]
@@ -811,7 +810,6 @@ elif page == "第四頁：部位監控與量化風控":
                         name_display = row['名稱'] if row['名稱'] else row['標的']
                         st.warning(f"⚠️ **{name_display} ({row['標的']})**：目前淨報酬率 **{row['報酬率 (%)']:.2f}%** (已跌破設定的 {row['最大虧損比例']:.0f}%)")
                     
-                    # Telegram 一鍵自動推播停損警報按鈕
                     if st.button("🚨 一鍵推播停損警報至 Telegram", type="primary"):
                         try:
                             bot_token = st.secrets["telegram"]["bot_token"]
@@ -905,7 +903,6 @@ elif page == "第四頁：部位監控與量化風控":
                 c4.metric("🌍 合併總槓桿率", f"{global_leverage}x", "警戒線: 1.5x")
                 c5.metric("💰 總現金水位", f"{global_cash_pct}%", "健康區間: >40%")
                 
-                # 總槓桿超標警報推送
                 if global_leverage > 1.5:
                     st.error("🚨 **【全局風控警告】合併總槓桿率已超過 1.5x 警戒線，請注意流動性與融資維持率風險！**")
                     if st.button("⚠️ 推送合併槓桿超標警報至 Telegram"):
@@ -1009,7 +1006,6 @@ elif page == "第五頁：Telegram 戰情推播":
                 chat_id = st.secrets["telegram"]["chat_id"]
                 url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
                 
-                # 動態帶入最新時間
                 summary_text = (
                     f"📊 【量化戰鬥艙戰情總結】\n"
                     f"⏱ 時間：{datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
