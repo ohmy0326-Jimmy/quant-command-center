@@ -1,4 +1,5 @@
-google_key.json
 .streamlit/
-*.docx
-~$*
+.git/
+__pycache__/
+*.pyc
+google_key.json
