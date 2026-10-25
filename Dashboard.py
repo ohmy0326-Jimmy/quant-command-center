@@ -557,7 +557,7 @@ elif page == "第四頁：部位監控與量化風控":
     st.write("數據來源：Notion 交易日誌 ➔ Make.com ➔ Google Sheets (基礎計價幣別：TWD 台幣)")
     st.markdown("---")
 
-    with st.spinner('📡 正在同步雲端資料庫，計算多帳戶動態、期交所指數與股票期貨保證金規範...'):
+    with st.spinner('📡 正在同步雲端資料庫，計算多帳戶動態、期交所期貨點位損益與保證金規範...'):
         try:
             account_data, nav_data, quant_data = load_quant_database()
             try:
@@ -583,33 +583,33 @@ elif page == "第四頁：部位監控與量化風控":
             
             if not df.empty:
                 df['換算匯率'] = np.where(df['種類'].astype(str).str.contains('美'), usdtwd_rate, 1.0).astype(float)
-                df['實質佔用本金(原幣)'] = df['名目合約總值(原幣)'].abs()
+                df['實質佔用本金(原幣)'] = 0.0
                 df['維持保證金(原幣)'] = 0.0
                 
-                # 【精準套用期交所指數期貨與股票期貨保證金標準】
+                # 期交所保證金標準設定
                 for idx, row in df.iterrows():
                     kind_str = str(row['種類'])
+                    t_str = str(row['標的']).upper()
+                    q_abs = abs(row['持有數量'])
+                    
                     if '期' in kind_str:
-                        t_str = str(row['標的']).upper()
-                        q_abs = abs(row['持有數量'])
-                        if t_str == 'FMF':  # 微型臺指期 (原始 35,050 / 維持 26,900)
+                        if t_str == 'FMF':  # 微台
                             df.at[idx, '實質佔用本金(原幣)'] = 35050.0 * q_abs
                             df.at[idx, '維持保證金(原幣)'] = 26900.0 * q_abs
-                        elif t_str == 'MTX':  # 小型臺指期 (原始 175,250 / 維持 134,500)
+                        elif t_str == 'MTX':  # 小台
                             df.at[idx, '實質佔用本金(原幣)'] = 175250.0 * q_abs
                             df.at[idx, '維持保證金(原幣)'] = 134500.0 * q_abs
-                        elif t_str == 'TX':   # 臺股期貨 (原始 701,000 / 維持 538,000)
+                        elif t_str == 'TX':   # 大台
                             df.at[idx, '實質佔用本金(原幣)'] = 701000.0 * q_abs
                             df.at[idx, '維持保證金(原幣)'] = 538000.0 * q_abs
-                        else:  
-                            # 股票期貨（個指期）：預設以合約總值的 13.5% 作為原始保證金，11% 作為維持保證金[cite: 1]
+                        else:  # 股票期貨（個指期）
                             contract_val = abs(row['名目合約總值(原幣)'])
                             df.at[idx, '實質佔用本金(原幣)'] = contract_val * 0.135
                             df.at[idx, '維持保證金(原幣)'] = contract_val * 0.11
                     else:
                         df.at[idx, '實質佔用本金(原幣)'] = abs(row['名目合約總值(原幣)'])
 
-                # 取得大盤最新指數作為指數期貨基準價
+                # 取得即時報價
                 try:
                     twii_price = float(yf.Ticker("^TWII").history(period="1d")['Close'].iloc[-1])
                 except:
@@ -653,32 +653,41 @@ elif page == "第四頁：部位監控與量化風控":
                 df['Beta值'] = df['標的'].map(betas).fillna(1.0)
                 df['產業別'] = df['標的'].map(sectors).fillna("其他")
                 
+                # ==========================================
+                # 🛠️ 關鍵修正：期貨採「點位差 × 口數 × 乘數」計算損益
+                # ==========================================
                 is_futures_mask = df['種類'].astype(str).str.contains('期', na=False)
-                df['最新名目市值(原幣)'] = np.where(
-                    is_futures_mask,
-                    df['名目合約總值(原幣)'],
-                    np.where(df['即時報價'].notna() & (df['平均成本'] != 0), df['名目合約總值(原幣)'] * (df['即時報價'] / df['平均成本']), df['名目合約總值(原幣)'])
-                ).astype(float)
+                
+                # 計算期貨點數損益（微台乘數為10，小台為50，大台為200，股票期貨為2000）
+                def calc_futures_pnl(row):
+                    t = str(row['標的']).upper()
+                    mult = 10 if t == 'FMF' else (50 if t == 'MTX' else (200 if t == 'TX' else 2000))
+                    # 損益 = (即時報價 - 平均成本) * 持有數量 * 乘數
+                    return (row['即時報價'] - row['平均成本']) * row['持有數量'] * mult
 
-                df['點差損益(原幣)'] = (df['最新名目市值(原幣)'] - df['名目合約總值(原幣)']).astype(float)
-                
-                tax_rates = np.full(len(df), 0.003)
-                is_options = df['種類'].astype(str).str.contains('選擇權|權', na=False)
-                is_us = df['種類'].astype(str).str.contains('美', na=False)
-                tax_rates = np.where(is_futures_mask, 0.00005, tax_rates)
-                tax_rates = np.where(is_options, 0.002, tax_rates)
-                tax_rates = np.where(is_us & ~is_options, 0.0002, tax_rates)
-                
-                df['預估稅費(原幣)'] = (df['最新名目市值(原幣)'].abs() * tax_rates).astype(float)
-                df['淨未實現損益(原幣)'] = (df['點差損益(原幣)'] - df['預估稅費(原幣)']).astype(float)
+                df['淨未實現損益(原幣)'] = np.where(
+                    is_futures_mask & df['即時報價'].notna(),
+                    df.apply(calc_futures_pnl, axis=1),
+                    0.0
+                )
+
+                # 非期貨（如現股、ETF）的損益計算
+                stock_mask = ~is_futures_mask
+                if stock_mask.any():
+                    stock_latest = np.where(df.loc[stock_mask, '即時報價'].notna() & (df.loc[stock_mask, '平均成本'] != 0), 
+                                            df.loc[stock_mask, '名目合約總值(原幣)'] * (df.loc[stock_mask, '即時報價'] / df.loc[stock_mask, '平均成本']), 
+                                            df.loc[stock_mask, '名目合約總值(原幣)'])
+                    tax_rate = 0.003
+                    df.loc[stock_mask, '淨未實現損益(原幣)'] = (stock_latest - df.loc[stock_mask, '名目合約總值(原幣)']) - (np.abs(stock_latest) * tax_rate)
+
                 df['報酬率 (%)'] = np.where(df['實質佔用本金(原幣)'] != 0, (df['淨未實現損益(原幣)'] / df['實質佔用本金(原幣)'].abs()) * 100.0, 0.0).astype(float)
                 
                 df['顯示_投入總金額(原幣)'] = np.where(is_futures_mask, df['實質佔用本金(原幣)'], df['名目合約總值(原幣)']).astype(float)
-                df['顯示_即時市值(原幣)'] = np.where(is_futures_mask, df['實質佔用本金(原幣)'] + df['淨未實現損益(原幣)'], df['最新名目市值(原幣)']).astype(float)
-                df['實質曝險(台幣)'] = (df['最新名目市值(原幣)'].abs() * df['標的槓桿'] * df['換算匯率']).astype(float)
+                df['顯示_即時市值(原幣)'] = np.where(is_futures_mask, df['實質佔用本金(原幣)'] + df['淨未實現損益(原幣)'], df['即時報價'] * df['持有數量']).astype(float)
+                df['實質曝險(台幣)'] = np.where(is_futures_mask, df['實質佔用本金(原幣)'] * df['標的槓桿'] * df['換算匯率'], (df['即時報價'].fillna(df['平均成本']) * df['持有數量']).abs() * df['標的槓桿'] * df['換算匯率']).astype(float)
                 
                 df['是衍生品'] = df['種類'].astype(str).str.contains('期|選擇權|權', na=False, regex=True)
-                df['權益貢獻(台幣)'] = np.where(df['是衍生品'], df['淨未實現損益(原幣)'] * df['換算匯率'], df['最新名目市值(原幣)'] * df['換算匯率']).astype(float)
+                df['權益貢獻(台幣)'] = df['淨未實現損益(原幣)'] * df['換算匯率']
                 
                 acc_equity_twd = df.groupby('帳戶')['權益貢獻(台幣)'].sum()
                 acc_exp_twd = df.groupby('帳戶')['實質曝險(台幣)'].sum()
@@ -697,6 +706,7 @@ elif page == "第四頁：部位監控與量化風控":
                 for idx, row in account_data.iterrows():
                     acc_name = str(row['帳戶名稱']).strip()
                     if "元大期貨" in acc_name:
+                        # 完美對齊券商邏輯：淨值 = 初始權益(170,422) + 損益；現金(可動用) = 淨值 - 維持保證金總額
                         net_val = float(170422.0 + row['部位權益貢獻'])
                         maint_m = float(row['維持保證金總額'])
                         account_data.at[idx, '帳戶淨值'] = net_val
