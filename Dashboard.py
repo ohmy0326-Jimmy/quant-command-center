@@ -644,6 +644,9 @@ elif page == "第四頁：部位監控與量化風控":
                         sectors[ticker] = "其他"
                 
                 df['即時報價'] = df['標的'].map(prices)
+                # 【容錯機制】：若即時報價抓取失敗 (NaN)，自動以平均成本替代，避免數值崩潰
+                df['即時報價'] = df['即時報價'].fillna(df['平均成本'])
+                
                 df['Beta值'] = df['標的'].map(betas).fillna(1.0)
                 df['產業別'] = df['標的'].map(sectors).fillna("其他")
                 
@@ -656,14 +659,14 @@ elif page == "第四頁：部位監控與量化風控":
                     return (row['即時報價'] - row['平均成本']) * row['持有數量'] * mult
 
                 df['淨未實現損益(原幣)'] = np.where(
-                    is_futures_mask & df['即時報價'].notna(),
+                    is_futures_mask,
                     df.apply(calc_futures_pnl, axis=1),
                     0.0
                 )
 
                 stock_mask = ~is_futures_mask
                 if stock_mask.any():
-                    stock_latest = np.where(df.loc[stock_mask, '即時報價'].notna() & (df.loc[stock_mask, '平均成本'] != 0), 
+                    stock_latest = np.where(df.loc[stock_mask, '平均成本'] != 0, 
                                             df.loc[stock_mask, '名目合約總值(原幣)'] * (df.loc[stock_mask, '即時報價'] / df.loc[stock_mask, '平均成本']), 
                                             df.loc[stock_mask, '名目合約總值(原幣)'])
                     tax_rate = 0.003
@@ -672,26 +675,24 @@ elif page == "第四頁：部位監控與量化風控":
                 df['報酬率 (%)'] = np.where(df['實質佔用本金(原幣)'] != 0, (df['淨未實現損益(原幣)'] / df['實質佔用本金(原幣)'].abs()) * 100.0, 0.0).astype(float)
                 
                 df['顯示_投入總金額(原幣)'] = np.where(is_futures_mask, df['實質佔用本金(原幣)'], df['名目合約總值(原幣)']).astype(float)
-                df['顯示_即時市值(原幣)'] = np.where(is_futures_mask, df['實質佔用本金(原幣)'] + df['淨未實現損益(原幣)'], np.where(df['即時報價'].notna(), df['即時報價'] * df['持有數量'], df['名目合約總值(原幣)'])).astype(float)
+                df['顯示_即時市值(原幣)'] = np.where(is_futures_mask, df['實質佔用本金(原幣)'] + df['淨未實現損益(原幣)'], df['即時報價'] * df['持有數量']).astype(float)
                 
-                # 【核心修改】：強制完全由 Python 即時報價與持股數量來計算實質曝險（名目曝險）
+                # 強制完全由 Python 依即時報價與持股數量計算實質曝險
                 df['實質曝險(台幣)'] = (df['顯示_即時市值(原幣)'].abs() * df['標的槓桿'] * df['換算匯率']).astype(float)
                 
                 df['是衍生品'] = df['種類'].astype(str).str.contains('期|選擇權|權', na=False, regex=True)
                 df['權益貢獻(台幣)'] = df['淨未實現損益(原幣)'] * df['換算匯率']
                 
-                # 嚴格由 Python 計算各帳戶的即時名目曝險與損益貢獻
                 acc_equity_twd = df.groupby('帳戶')['權益貢獻(台幣)'].sum()
                 acc_exp_twd = df.groupby('帳戶')['實質曝險(台幣)'].sum()
                 acc_maint_margin = df.groupby('帳戶')['維持保證金(原幣)'].sum()
 
             if not account_data.empty:
-                for col in ["現金餘額", "融資/質押借款", "帳戶淨值"]:
+                for col in ["現金餘額", "融資/質押借款"]:
                     if col in account_data.columns:
                         account_data[col] = pd.to_numeric(account_data[col], errors='coerce').fillna(0.0).astype(float)
                 
                 account_data['部位權益貢獻'] = account_data['帳戶名稱'].map(acc_equity_twd).fillna(0.0).astype(float)
-                # 【絕對不讀取 Google Sheet 中的名目曝險】，強制改由 Python 透過即時持股口數與即時報價加總計算！
                 account_data['名目曝險'] = account_data['帳戶名稱'].map(acc_exp_twd).fillna(0.0).astype(float)
                 account_data['維持保證金總額'] = account_data['帳戶名稱'].map(acc_maint_margin).fillna(0.0).astype(float)
                 account_data['帳戶淨值'] = 0.0
@@ -704,14 +705,16 @@ elif page == "第四頁：部位監控與量化風控":
                         account_data.at[idx, '帳戶淨值'] = net_val
                         account_data.at[idx, '現金餘額'] = float(max(0.0, net_val - maint_m))
                     else:
-                        # 【絕對不讀取 Google Sheet 中的帳戶淨值】
-                        # 改由 Python 讀取真實現金與負債，並加上即時部位權益貢獻計算出準確的即時淨值
                         base_cash = float(row['現金餘額'])
                         base_debt = float(row['融資/質押借款'])
                         eq_contrib = float(row['部位權益貢獻'])
                         account_data.at[idx, '帳戶淨值'] = base_cash - base_debt + eq_contrib
 
                 total_net_liq = float(account_data["帳戶淨值"].sum())
+
+            # 【修復真實風險權重 (%)】：確保總淨值大於0時，精準算出每檔持倉佔總資產的百分比
+            if not df.empty:
+                df['真實風險權重 (%)'] = np.where(total_net_liq > 0, (df['實質曝險(台幣)'] / total_net_liq) * 100.0, 0.0).astype(float)
 
             st.subheader("📈 歷史資金成長曲線與最大回撤 (MDD) [以台幣計價]")
             if not nav_data.empty and '日期' in nav_data.columns and '總淨值' in nav_data.columns:
