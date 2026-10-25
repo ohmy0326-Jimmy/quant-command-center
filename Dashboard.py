@@ -496,9 +496,7 @@ elif page == "第四頁：部位監控與量化風控":
             refined_sector = detailed_sector_map[t_upper]
         else:
             try:
-                # 修正美股代號格式 (例如 BRK.B 轉為 BRK-B)
-                yf_ticker_str = t_upper.replace('.', '-')
-                t = yf.Ticker(yf_ticker_str)
+                t = yf.Ticker(ticker)
                 info = t.info
                 yf_industry = info.get('industry', '')
                 yf_sector = info.get('sector', '')
@@ -516,8 +514,7 @@ elif page == "第四頁：部位監控與量化風控":
 
         try:
             benchmark = "^TWII" if is_tw else "^GSPC"
-            yf_ticker_str = t_upper.replace('.', '-')
-            df_asset = yf.Ticker(yf_ticker_str).history(period="1y")['Close']
+            df_asset = yf.Ticker(ticker).history(period="1y")['Close']
             df_bench = yf.Ticker(benchmark).history(period="1y")['Close']
             
             combined = pd.concat([df_asset, df_bench], axis=1).dropna()
@@ -560,7 +557,7 @@ elif page == "第四頁：部位監控與量化風控":
     st.write("數據來源：Notion 交易日誌 ➔ Make.com ➔ Google Sheets (基礎計價幣別：TWD 台幣)")
     st.markdown("---")
 
-    with st.spinner('📡 正在從網路自動抓取即時報價，同步期交所保證金與全球市場數據...'):
+    with st.spinner('📡 正在穿透雲端，同步期交所保證金雙軌制量化資料庫與 Beta 產業配置...'):
         try:
             account_data, nav_data, quant_data = load_quant_database()
             try:
@@ -622,13 +619,11 @@ elif page == "第四頁：部位監控與量化風控":
                             sectors[ticker] = "微型臺指期" if t_upper == 'FMF' else ("小型臺指" if t_upper == 'MTX' else "臺指期貨")
                             continue
 
-                        # 精準判斷是否為台股市場（代號純數字、包含 .TW/.TWO、或具有中文字元）
-                        is_tw_market = ('.TW' in t_upper) or ('.TWO' in t_upper) or t_upper.isdigit() or any('\u4e00' <= c <= '\u9fff' for c in ticker)
+                        is_tw_market = (t_upper in ['TE', 'TF']) or ('.TW' in t_upper) or ('.TWO' in t_upper) or (len(t_upper) == 3 and t_upper.isalpha())
                         b_val, s_val = get_market_beta_and_sector(ticker, is_tw_market)
                         betas[ticker] = b_val
                         sectors[ticker] = s_val
                         
-                        yf_ticker_str = t_upper.replace('.', '-')
                         if is_tw_market:
                             try:
                                 headers = {'User-Agent': 'Mozilla/5.0'}
@@ -637,11 +632,11 @@ elif page == "第四頁：部位監控與量化風控":
                                 if match:
                                     prices[ticker] = float(match.group(1))
                                 else:
-                                    prices[ticker] = float(yf.Ticker(yf_ticker_str).history(period="1d")['Close'].iloc[-1])
+                                    prices[ticker] = float(yf.Ticker(ticker).history(period="1d")['Close'].iloc[-1])
                             except:
-                                prices[ticker] = float(yf.Ticker(yf_ticker_str).history(period="1d")['Close'].iloc[-1])
+                                prices[ticker] = float(yf.Ticker(ticker).history(period="1d")['Close'].iloc[-1])
                         else:
-                            hist = yf.Ticker(yf_ticker_str).history(period="5d")
+                            hist = yf.Ticker(ticker).history(period="5d")
                             prices[ticker] = float(hist['Close'].iloc[-1]) if not hist.empty else np.nan
                     except:
                         prices[ticker] = np.nan
@@ -681,7 +676,7 @@ elif page == "第四頁：部位監控與量化風控":
                 df['實質曝險(台幣)'] = (df['顯示_即時市值(原幣)'].abs() * df['標的槓桿'] * df['換算匯率']).astype(float)
                 
                 df['是衍生品'] = df['種類'].astype(str).str.contains('期|選擇權|權', na=False, regex=True)
-                df['權益貢獻(台幣)'] = np.where(df['是衍生品'], df['淨未實現損益(原幣)'] * df['換算匯率'], df['顯示_即時市值(原幣)'] * df['換算匯率'])
+                df['權益貢獻(台幣)'] = df['淨未實現損益(原幣)'] * df['換算匯率']
                 
                 acc_equity_twd = df.groupby('帳戶')['權益貢獻(台幣)'].sum()
                 acc_exp_twd = df.groupby('帳戶')['實質曝險(台幣)'].sum()
@@ -849,7 +844,27 @@ elif page == "第四頁：部位監控與量化風控":
                 st.dataframe(styled_quant_df, use_container_width=True, hide_index=True)
 
             st.markdown("---")
-            st
+            st.subheader("🤖 AI 避險基金經理人即時壓力測試與風控審查")
+            
+            if st.button("🧠 啟動 AI 經理人風控與壓力測試", use_container_width=True):
+                with st.spinner("AI 經理人正在分析中..."):
+                    try:
+                        client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+                        positions_summary = df[['標的', '名稱', '產業別', 'Beta值', '真實風險權重 (%)', '標的槓桿', '報酬率 (%)']].to_string(index=False) if not df.empty else "無持倉"
+                        prompt_text = f"總帳戶淨值: NT$ {total_net_liq:,.0f}\n合併總槓桿率: {global_leverage}x\n投資組合加權Beta: {portfolio_beta:.2f}\n總現金水位: {global_cash_pct}%\n持倉明細:\n{positions_summary}\n請給予 3 點風控建議。"
+                        response = client.models.generate_content(model='gemini-3.8-flash', contents=prompt_text)
+                        st.session_state.ai_memo_p4["text"] = response.text
+                        st.session_state.ai_memo_p4["time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    except Exception as e:
+                        st.error(f"AI 呼叫失敗: {e}")
+            
+            if st.session_state.ai_memo_p4["text"]:
+                st.markdown("---")
+                st.info(f"📌 **最新風控審查 (生成時間：{st.session_state.ai_memo_p4['time']})**")
+                st.markdown(st.session_state.ai_memo_p4["text"])
+
+        except Exception as e:
+            st.error(f"連線發生錯誤。系統訊息: {e}")
 
 # ==========================================
 # 第五頁：Telegram 戰情推播測試
