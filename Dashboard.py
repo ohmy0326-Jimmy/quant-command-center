@@ -402,3 +402,628 @@ elif page == "第二頁：板塊與主題資金輪動":
                     
         except Exception as e:
             st.error(f"板塊與主題 ETF 資料抓取失敗: {e}")
+
+# ==========================================
+# 第三頁：重大行事曆與會展
+# ==========================================
+elif page == "第三頁：重大行事曆與會展":
+    c1, c2 = st.columns([0.85, 0.15])
+    with c1:
+        st.title("📅 第三頁：重大行事曆與 M7 財報戰情室 (AI 經理人風控導航)")
+    with c2:
+        st.write("")
+        if st.button("🔄 重新整理", key="refresh_p3", use_container_width=True):
+            st.rerun()
+    st.markdown("---")
+    st.info("💡 系統自動整合未來 3 個月內的 FOMC 決議、CPI/PCE 通膨、就業魔王數據以及美股 M7 科技巨頭（AAPL、MSFT、NVDA、GOOGL、AMZN、META、TSLA）財報行事曆。")
+
+    today = datetime.now().date()
+    three_months_later = today + timedelta(days=90)
+
+    @st.cache_data(ttl=3600)
+    def get_m7_earnings_events():
+        m7_dict = {
+            "AAPL": "Apple (蘋果)",
+            "MSFT": "Microsoft (微軟)",
+            "NVDA": "NVIDIA (輝達)",
+            "GOOGL": "Alphabet (Google)",
+            "AMZN": "Amazon (亞馬遜)",
+            "META": "Meta (臉書)",
+            "TSLA": "Tesla (特斯拉)"
+        }
+        events = []
+        for ticker, name in m7_dict.items():
+            try:
+                t_obj = yf.Ticker(ticker)
+                cal = t_obj.calendar
+                earnings_date = None
+                if isinstance(cal, dict):
+                    for k in cal.keys():
+                        if 'earnings' in k.lower():
+                            val = cal[k]
+                            if isinstance(val, list) and len(val) > 0:
+                                earnings_date = pd.to_datetime(val[0]).date()
+                            elif isinstance(val, (datetime, pd.Timestamp)):
+                                earnings_date = val.date()
+                elif hasattr(cal, 'loc') and not cal.empty:
+                    if 'Earnings Date' in cal.index:
+                        val = cal.loc['Earnings Date'].iloc[0]
+                        earnings_date = pd.to_datetime(val).date()
+                
+                if earnings_date:
+                    date_str = earnings_date.strftime("%Y-%m-%d")
+                    events.append({
+                        "日期": date_str,
+                        "項目": f"美股 M7 財報：{name} ({ticker})",
+                        "影響": f"左右全球 AI 資本支出、科技股情緒與相關供應鏈（如半導體、伺服器）連動"
+                    })
+            except:
+                pass
+        return events
+
+    base_events = [
+        {"日期": "2026-10-25", "項目": "美國 PCE 物價指數公佈", "影響": "Fed 通膨目標核心觀測與降息路徑判定"},
+        {"日期": "2026-10-29", "項目": "FOMC 利率決議與華許聲明 (清晨02:00)", "影響": "全市場基準利率調整、流動性與債市/股市大震盪"},
+        {"日期": "2026-11-06", "項目": "美國 10 月非農就業報告 (NFP) & 失業率", "影響": "每月就業數據魔王，左右經濟軟著陸預期"},
+        {"日期": "2026-11-12", "項目": "美國 10 月消費者物價指數 (CPI)", "影響": "終端通膨黏著度，直接影響 Fed 下一步利率走向"},
+        {"日期": "2026-11-20", "項目": "台指期結算日 (11月)", "影響": "台股期貨與選擇權短線結算波動"},
+        {"日期": "2026-12-04", "項目": "美國 11 月非農就業報告 (NFP) & 失業率", "影響": "年底前最重要的勞動市場體檢"},
+        {"日期": "2026-12-10", "項目": "FOMC 利率決議與華許聲明 (清晨02:00)", "影響": "年底前關鍵利率決議與跨年資金定價"},
+        {"日期": "2026-12-10", "項目": "美國 11 月消費者物價指數 (CPI)", "影響": "年底消費旺季前夕的通膨檢驗"},
+        {"日期": "2026-12-18", "項目": "美國 11 月 PCE 物價指數公佈", "影響": "Fed 最看重的通膨終值數據"},
+        {"日期": "2027-01-08", "項目": "美國 12 月非農就業報告 (NFP)", "影響": "新年開局的第一個就業風向球"},
+        {"日期": "2027-01-14", "項目": "美國 12 月消費者物價指數 (CPI)", "影響": "跨年通膨收官數據與新年總經定調"},
+        {"日期": "2027-01-15", "項目": "台積電 (2330) 法人說明會", "影響": "台股大盤、半導體供應鏈、全球 AI 資本支出風向"}
+    ]
+
+    m7_events = get_m7_earnings_events()
+    all_events = base_events + m7_events
+
+    filtered_events = [ev for ev in all_events if today <= datetime.strptime(ev["日期"], "%Y-%m-%d").date() <= three_months_later]
+    filtered_events.sort(key=lambda x: x["日期"])
+
+    if filtered_events:
+        st.markdown("### 📌 未來 3 個月重大總經與 M7 財報事件排程")
+        for idx, ev in enumerate(filtered_events):
+            event_key = f"{ev['日期']}_{ev['項目']}"
+            with st.container():
+                cols = st.columns([1.2, 2.5, 2.5, 3.8])
+                cols[0].markdown(f"**📅 {ev['日期']}**")
+                cols[1].markdown(f"**{ev['項目']}**")
+                cols[2].markdown(f"⚡ {ev['影響']}")
+                
+                with cols[3]:
+                    sub_c1, sub_c2 = st.columns(2)
+                    with sub_c1:
+                        if st.button(f"🧠 AI 解析", key=f"ai_event_btn_{idx}"):
+                            with st.spinner("AI 經理人正在生成戰術..."):
+                                try:
+                                    client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+                                    res = client.models.generate_content(
+                                        model='gemini-3.8-flash', 
+                                        contents=f"身為避險基金經理人，面對即將到來的重大財報或總經事件：【{ev['項目']}】（影響層面：{ev['影響']}），請給我 2 點精煉、具體且直接可執行的資產配置與風控建議。"
+                                    )
+                                    st.session_state.ai_memo_p3[event_key] = {"text": res.text, "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+                                except Exception as e:
+                                    st.error(f"生成失敗: {e}")
+                    with sub_c2:
+                        # Telegram 自動推播事件提醒
+                        if st.button(f"📲 推播TG", key=f"tg_event_btn_{idx}"):
+                            try:
+                                bot_token = st.secrets["telegram"]["bot_token"]
+                                chat_id = st.secrets["telegram"]["chat_id"]
+                                msg = f"📅 【量化戰情室行事曆提醒】\n事件：{ev['項目']}\n日期：{ev['日期']}\n影響：{ev['影響']}"
+                                r = requests.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", json={"chat_id": chat_id, "text": msg}, timeout=5)
+                                if r.status_code == 200:
+                                    st.success("✅ TG 推播成功！")
+                                else:
+                                    st.error(f"❌ 失敗: {r.status_code}")
+                            except Exception as e:
+                                st.error(f"❌ 錯誤: {e}")
+                
+                if event_key in st.session_state.ai_memo_p3:
+                    memo = st.session_state.ai_memo_p3[event_key]
+                    st.info(f"📌 **最新戰術建議 (生成時間：{memo['time']})**")
+                    st.markdown(memo["text"])
+            st.markdown("---")
+    else:
+        st.info("目前未來 3 個月內無登錄的重大排程事件。")
+
+# ==========================================
+# 第四頁：部位監控與量化風控
+# ==========================================
+elif page == "第四頁：部位監控與量化風控":
+    @st.cache_data(ttl=300)
+    def get_market_beta_and_sector(ticker, is_tw):
+        detailed_sector_map = {
+            "MUU": "記憶體",
+            "SNXX": "記憶體",
+            "AMUU": "AI晶片",
+            "KORU": "韓國指數",
+            "金居": "銅箔材料",
+            "2330": "晶圓代工",
+            "TSM": "晶圓代工",
+            "NVDA": "AI晶片",
+            "AMD": "AI晶片",
+            "AVGO": "網通與半導體",
+            "MSFT": "軟體與雲端",
+            "AAPL": "消費電子",
+            "GOOGL": "數位廣告與雲端",
+            "META": "社群與AI",
+            "SOXL": "半導體槓桿ETF",
+            "00631L": "台股槓桿ETF",
+            "LITX": "光通產業",
+            "TX": "臺指期貨",
+            "MTX": "小型臺指",
+            "FMF": "微型臺指期"
+        }
+        
+        t_upper = str(ticker).upper()
+        if t_upper in detailed_sector_map:
+            refined_sector = detailed_sector_map[t_upper]
+        else:
+            try:
+                t = yf.Ticker(ticker)
+                info = t.info
+                yf_industry = info.get('industry', '')
+                yf_sector = info.get('sector', '')
+                if yf_industry:
+                    refined_sector = yf_industry
+                elif yf_sector:
+                    refined_sector = yf_sector
+                else:
+                    refined_sector = "其他"
+            except:
+                refined_sector = "其他與衍生品"
+
+        if t_upper in ['TX', 'MTX', 'FMF']:
+            return 1.0, str(refined_sector)
+
+        try:
+            benchmark = "^TWII" if is_tw else "^GSPC"
+            df_asset = yf.Ticker(ticker).history(period="1y")['Close']
+            df_bench = yf.Ticker(benchmark).history(period="1y")['Close']
+            
+            combined = pd.concat([df_asset, df_bench], axis=1).dropna()
+            if len(combined) > 30:
+                returns = combined.pct_change().dropna()
+                cov = np.cov(returns.iloc[:, 0], returns.iloc[:, 1])[0][1]
+                var_bench = np.var(returns.iloc[:, 1])
+                beta = cov / var_bench if var_bench != 0 else 1.0
+            else:
+                beta = 1.0
+            return float(round(beta, 2)), str(refined_sector)
+        except:
+            return 1.0, str(refined_sector)
+
+    @st.cache_data(ttl=60)
+    def load_quant_database():
+        scope = [
+            "https://spreadsheets.google.com/feeds",
+            "https://www.googleapis.com/auth/drive"
+        ]
+        key_dict = dict(st.secrets["google_key"])
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(key_dict, scope)
+        client = gspread.authorize(creds)
+        spreadsheet = client.open("Quant_Database")
+        return (
+            pd.DataFrame(spreadsheet.worksheet("Active_Positions").get_all_records()),
+            pd.DataFrame(spreadsheet.worksheet("Daily_NAV").get_all_records()),
+            pd.DataFrame(spreadsheet.worksheet("持倉統計").get_all_records())
+        )
+
+    c1, c2 = st.columns([0.85, 0.15])
+    with c1:
+        st.title("🛡️ 第四頁：部位監控、Beta 中性化與精細產業配置戰情室")
+    with c2:
+        st.write("")
+        if st.button("🔄 重新整理", key="refresh_p4", use_container_width=True):
+            load_quant_database.clear()
+            st.rerun()
+            
+    st.write("數據來源：Notion 交易日誌 ➔ Make.com ➔ Google Sheets (基礎計價幣別：TWD 台幣)")
+    st.markdown("---")
+
+    with st.spinner('📡 正在穿透雲端，即時連線抓取各個持股報價與計算動態風險...'):
+        try:
+            account_data, nav_data, quant_data = load_quant_database()
+            try:
+                usdtwd_rate = float(yf.Ticker("USDTWD=X").history(period="1d")['Close'].iloc[-1])
+            except:
+                usdtwd_rate = 32.5 
+            
+            df = quant_data.copy()
+            df['標的'] = df['標的'].astype(str).str.strip().str.upper()
+            df = df[df['標的'] != '']
+            df['持有數量'] = pd.to_numeric(df['持有數量'], errors='coerce').fillna(0.0)
+            df['平均成本'] = pd.to_numeric(df['平均成本'], errors='coerce').fillna(0.0)
+            
+            df['名目合約總值(原幣)'] = pd.to_numeric(df['投入總金額'], errors='coerce').fillna(0.0)
+            df['最大虧損比例'] = pd.to_numeric(df.get('最大虧損比例', -100), errors='coerce').fillna(-100.0)
+            df['標的槓桿'] = pd.to_numeric(df.get('標的槓桿', 1), errors='coerce').fillna(1.0)
+            df['名稱'] = df.get('名稱', '').astype(str)
+            
+            df = df[df['持有數量'] != 0].copy()
+            
+            acc_market_val_twd, acc_exp_twd, total_net_liq = pd.Series(dtype=float), pd.Series(dtype=float), 0.0
+            acc_maint_margin = pd.Series(dtype=float)
+            
+            if not df.empty:
+                df['換算匯率'] = np.where(df['種類'].astype(str).str.contains('美'), usdtwd_rate, 1.0).astype(float)
+                df['實質佔用本金(原幣)'] = df['名目合約總值(原幣)'].abs()
+                df['維持保證金(原幣)'] = 0.0
+                
+                for idx, row in df.iterrows():
+                    if '期' in str(row['種類']):
+                        t_str = str(row['標的']).upper()
+                        q_abs = abs(row['持有數量'])
+                        if t_str in ['TMF', 'FMF']: 
+                            df.at[idx, '實質佔用本金(原幣)'] = 35050.0 * q_abs
+                            df.at[idx, '維持保證金(原幣)'] = 26900.0 * q_abs
+                        elif t_str == 'MTX': 
+                            df.at[idx, '實質佔用本金(原幣)'] = 175250.0 * q_abs
+                            df.at[idx, '維持保證金(原幣)'] = 134500.0 * q_abs
+                        elif t_str == 'TX': 
+                            df.at[idx, '實質佔用本金(原幣)'] = 701000.0 * q_abs
+                            df.at[idx, '維持保證金(原幣)'] = 538000.0 * q_abs
+                        else: 
+                            df.at[idx, '實質佔用本金(原幣)'] = abs(row['名目合約總值(原幣)']) * 0.135
+                            df.at[idx, '維持保證金(原幣)'] = abs(row['名目合約總值(原幣)']) * 0.11
+
+                try:
+                    twii_price = float(yf.Ticker("^TWII").history(period="1d")['Close'].iloc[-1])
+                except:
+                    twii_price = 23000.0
+
+                tickers, prices, betas, sectors = df['標的'].unique().tolist(), {}, {}, {}
+                for ticker in tickers:
+                    try:
+                        t_upper = str(ticker).upper()
+                        if t_upper in ['TX', 'MTX', 'FMF', 'TMF']:
+                            prices[ticker] = twii_price
+                            betas[ticker] = 1.0
+                            sectors[ticker] = "微型臺指期" if t_upper == 'FMF' else ("小型臺指" if t_upper == 'MTX' else "臺指期貨")
+                            continue
+
+                        is_tw_market = (t_upper in ['TE', 'TF']) or ('.TW' in t_upper) or ('.TWO' in t_upper) or (len(t_upper) == 3 and t_upper.isalpha())
+                        b_val, s_val = get_market_beta_and_sector(ticker, is_tw_market)
+                        
+                        betas[ticker] = b_val
+                        sectors[ticker] = s_val
+                        
+                        if is_tw_market:
+                            try:
+                                headers = {'User-Agent': 'Mozilla/5.0'}
+                                res = requests.get(f"https://tw.stock.yahoo.com/quote/{ticker}", headers=headers, timeout=5)
+                                match = re.search(r'"regularMarketPrice":(?:{"raw":)?([0-9.]+)', res.text)
+                                if match:
+                                    prices[ticker] = float(match.group(1))
+                                else:
+                                    prices[ticker] = float(yf.Ticker(ticker).history(period="1d")['Close'].iloc[-1])
+                            except:
+                                prices[ticker] = float(yf.Ticker(ticker).history(period="1d")['Close'].iloc[-1])
+                        else:
+                            hist = yf.Ticker(ticker).history(period="5d")
+                            prices[ticker] = float(hist['Close'].iloc[-1]) if not hist.empty else np.nan
+                    except:
+                        prices[ticker] = np.nan
+                        betas[ticker] = 1.0
+                        sectors[ticker] = "其他"
+                
+                df['即時報價'] = df['標的'].map(prices)
+                df['即時報價'] = df['即時報價'].fillna(df['平均成本'])
+                
+                df['Beta值'] = df['標的'].map(betas).fillna(1.0)
+                df['產業別'] = df['標的'].map(sectors).fillna("其他")
+                
+                is_futures_mask = df['種類'].astype(str).str.contains('期', na=False)
+                
+                def calc_futures_pnl(row):
+                    t = str(row['標的']).upper()
+                    mult = 10 if t in ['FMF', 'TMF'] else (50 if t == 'MTX' else (200 if t == 'TX' else 2000))
+                    return (row['即時報價'] - row['平均成本']) * row['持有數量'] * mult
+
+                df['淨未實現損益(原幣)'] = np.where(
+                    is_futures_mask,
+                    df.apply(calc_futures_pnl, axis=1),
+                    0.0
+                )
+
+                stock_mask = ~is_futures_mask
+                if stock_mask.any():
+                    stock_latest = np.where(df.loc[stock_mask, '平均成本'] != 0, 
+                                            df.loc[stock_mask, '名目合約總值(原幣)'] * (df.loc[stock_mask, '即時報價'] / df.loc[stock_mask, '平均成本']), 
+                                            df.loc[stock_mask, '名目合約總值(原幣)'])
+                    tax_rate = 0.003
+                    df.loc[stock_mask, '淨未實現損益(原幣)'] = (stock_latest - df.loc[stock_mask, '名目合約總值(原幣)']) - (np.abs(stock_latest) * tax_rate)
+
+                df['報酬率 (%)'] = np.where(df['實質佔用本金(原幣)'] != 0, (df['淨未實現損益(原幣)'] / df['實質佔用本金(原幣)'].abs()) * 100.0, 0.0).astype(float)
+                
+                df['顯示_投入總金額(原幣)'] = np.where(is_futures_mask, df['實質佔用本金(原幣)'], df['名目合約總值(原幣)']).astype(float)
+                df['顯示_即時市值(原幣)'] = np.where(is_futures_mask, df['實質佔用本金(原幣)'] + df['淨未實現損益(原幣)'], df['即時報價'] * df['持有數量']).astype(float)
+                
+                df['即時市值(台幣)'] = (df['顯示_即時市值(原幣)'].abs() * df['換算匯率']).astype(float)
+                df['實質曝險(台幣)'] = (df['即時市值(台幣)'] * df['標的槓桿']).astype(float)
+                
+                df['是衍生品'] = df['種類'].astype(str).str.contains('期|選擇權|權', na=False, regex=True)
+                
+                acc_market_val_twd = df.groupby('帳戶')['即時市值(台幣)'].sum()
+                acc_exp_twd = df.groupby('帳戶')['實質曝險(台幣)'].sum()
+                acc_maint_margin = df.groupby('帳戶')['維持保證金(原幣)'].sum()
+
+            if not account_data.empty:
+                for col in ["現金餘額", "融資/質押借款"]:
+                    if col in account_data.columns:
+                        account_data[col] = pd.to_numeric(account_data[col], errors='coerce').fillna(0.0).astype(float)
+                
+                account_data['即時持股市值'] = account_data['帳戶名稱'].map(acc_market_val_twd).fillna(0.0).astype(float)
+                account_data['名目曝險'] = account_data['帳戶名稱'].map(acc_exp_twd).fillna(0.0).astype(float)
+                account_data['維持保證金總額'] = account_data['帳戶名稱'].map(acc_maint_margin).fillna(0.0).astype(float)
+                account_data['帳戶淨值'] = 0.0
+                
+                for idx, row in account_data.iterrows():
+                    acc_name = str(row['帳戶名稱']).strip()
+                    if "元大期貨" in acc_name:
+                        q_equity_contrib = float(df[df['帳戶'] == acc_name]['淨未實現損益(原幣)'].sum() * df[df['帳戶'] == acc_name]['換算匯率'].iloc[0]) if not df[df['帳戶'] == acc_name].empty else 0.0
+                        net_val = float(170422.0 + q_equity_contrib)
+                        maint_m = float(row['維持保證金總額'])
+                        account_data.at[idx, '帳戶淨值'] = net_val
+                        account_data.at[idx, '現金餘額'] = float(max(0.0, net_val - maint_m))
+                    else:
+                        cash = float(row['現金餘額'])
+                        mkt_val = float(row['即時持股市值'])
+                        debt = float(row['融資/質押借款'])
+                        account_data.at[idx, '帳戶淨值'] = cash + mkt_val - debt
+
+                total_net_liq = float(account_data["帳戶淨值"].sum())
+
+            if not df.empty:
+                df['真實風險權重 (%)'] = np.where(total_net_liq > 0, (df['實質曝險(台幣)'] / total_net_liq) * 100.0, 0.0).astype(float)
+
+            st.subheader("📈 歷史資金成長曲線與最大回撤 (MDD) [以台幣計價]")
+            if not nav_data.empty and '日期' in nav_data.columns and '總淨值' in nav_data.columns:
+                nav_data['日期'] = pd.to_datetime(nav_data['日期']).dt.strftime('%Y-%m-%d')
+                nav_data.set_index('日期', inplace=True)
+                nav_data['總淨值'] = pd.to_numeric(nav_data['總淨值'], errors='coerce')
+                
+                today_str = datetime.now().strftime('%Y-%m-%d')
+                if not nav_data.index.str.contains(today_str).any():
+                    nav_data.loc[today_str] = total_net_liq
+                else:
+                    nav_data.loc[today_str, '總淨值'] = total_net_liq
+                    
+                nav_series = nav_data['總淨值'].dropna()
+                if not nav_series.empty:
+                    current_nav, max_nav = nav_series.iloc[-1], nav_series.max()
+                    current_dd_pct = ((current_nav - max_nav) / max_nav) * 100
+                    st.metric("最新總淨值 (TWD)", f"NT$ {current_nav:,.0f}", f"距離歷史最高點: {current_dd_pct:.2f}%")
+                    st.line_chart(nav_series, height=150)
+            else:
+                st.metric("最新總淨值 (TWD)", f"NT$ {total_net_liq:,.0f}", "即時市價計算")
+            
+            st.markdown("---")
+
+            if not df.empty:
+                alarms = df[(df['最大虧損比例'] > -100) & (df['報酬率 (%)'] <= df['最大虧損比例'])]
+                if not alarms.empty:
+                    st.error("🚨 **【系統風控警報】偵測到部位觸及最大虧損限制，請評估是否停損處理！**")
+                    for idx, row in alarms.iterrows():
+                        name_display = row['名稱'] if row['名稱'] else row['標的']
+                        st.warning(f"⚠️ **{name_display} ({row['標的']})**：目前淨報酬率 **{row['報酬率 (%)']:.2f}%** (已跌破設定的 {row['最大虧損比例']:.0f}%)")
+                    
+                    # Telegram 一鍵自動推播停損警報按鈕
+                    if st.button("🚨 一鍵推播停損警報至 Telegram", type="primary"):
+                        try:
+                            bot_token = st.secrets["telegram"]["bot_token"]
+                            chat_id = st.secrets["telegram"]["chat_id"]
+                            alarm_text = "🚨 【量化戰情室風控警報】以下部位已觸及最大虧損限制：\n"
+                            for idx, row in alarms.iterrows():
+                                name_display = row['名稱'] if row['名稱'] else row['標的']
+                                alarm_text += f"• {name_display} ({row['標的']}): {row['報酬率 (%)']:.2f}% (設限: {row['最大虧損比例']:.0f}%)\n"
+                            r = requests.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", json={"chat_id": chat_id, "text": alarm_text}, timeout=5)
+                            if r.status_code == 200:
+                                st.success("✅ 停損警報已成功推播至 Telegram！")
+                            else:
+                                st.error(f"❌ 推送失敗: {r.status_code}")
+                        except Exception as e:
+                            st.error(f"❌ 錯誤: {e}")
+                    st.markdown("---")
+
+            # ==========================================
+            # 投資組合加權 Beta 與市場中性化判斷
+            # ==========================================
+            if not df.empty:
+                total_exposure_sum = df['實質曝險(台幣)'].sum()
+                if total_exposure_sum > 0:
+                    df['曝險權重'] = df['實質曝險(台幣)'] / total_exposure_sum
+                    portfolio_beta = (df['曝險權重'] * df['Beta值']).sum()
+                else:
+                    portfolio_beta = 0.0
+
+                if portfolio_beta > 0.5:
+                    neutrality_status = "🟢 高度偏多 (Aggressive Long)"
+                elif portfolio_beta > 0.2:
+                    neutrality_status = "🟢 溫和偏多 (Mild Long)"
+                elif portfolio_beta < -0.2:
+                    neutrality_status = "🔴 偏空避險 (Short/Hedging)"
+                else:
+                    neutrality_status = "🟡 市場中性 (Market-Neutral)"
+
+                st.subheader("⚖️ 投資組合 Beta 係數與中性化戰情計分板")
+                b_col1, b_col2, b_col3 = st.columns(3)
+                b_col1.metric("整體資產加權 Beta ($\beta_{\text{portfolio}}$)", f"{portfolio_beta:.2f}", "量化中性化指標")
+                b_col2.metric("部位中性化判定", neutrality_status, "區間: -0.2 ~ +0.2 為中性")
+                b_col3.metric("總實質曝險部位", f"NT$ {total_exposure_sum:,.0f}", "")
+                st.markdown("---")
+
+                st.subheader("🏢 各精細產業別持股曝險與資金佔比分佈")
+                sector_grouped = df.groupby('產業別').agg(
+                    實質曝險合計=('實質曝險(台幣)', 'sum'),
+                    標的數量=('標的', 'count')
+                ).reset_index()
+                
+                sector_grouped['產業曝險佔比 (%)'] = (sector_grouped['實質曝險合計'] / total_exposure_sum) * 100.0
+                sector_grouped = sector_grouped.sort_values(by='產業曝險佔比 (%)', ascending=False)
+
+                sec_col1, sec_col2 = st.columns([1.5, 2.5])
+                with sec_col1:
+                    styled_sec_df = sector_grouped.style.format({
+                        "實質曝險合計": "NT$ {:,.0f}",
+                        "產業曝險佔比 (%)": "{:.2f}%"
+                    }).background_gradient(subset=["產業曝險佔比 (%)"], cmap="Blues")
+                    st.dataframe(styled_sec_df, use_container_width=True, hide_index=True)
+                
+                with sec_col2:
+                    import plotly.express as px
+                    fig_sec = px.pie(
+                        sector_grouped, names='產業別', values='產業曝險佔比 (%)',
+                        title="各精細產業別資金曝險佔比圓餅圖",
+                        hole=0.4,
+                        template="plotly_dark"
+                    )
+                    fig_sec.update_traces(textinfo='percent+label')
+                    fig_sec.update_layout(height=320, margin=dict(l=10, r=10, t=40, b=10))
+                    st.plotly_chart(fig_sec, use_container_width=True)
+
+            st.markdown("---")
+
+            st.subheader("🏦 各帳戶動態風險與全局槓桿 (即時市價結算)")
+            if not account_data.empty:
+                account_data["槓桿率 (倍)"] = np.round(np.where(account_data["帳戶淨值"] != 0, (account_data["名目曝險"] / account_data["帳戶淨值"]), 0.0), 2).astype(float)
+                account_data["權益比率%/現金水位%"] = np.round(np.where(account_data["維持保證金總額"] > 0, (account_data["帳戶淨值"] / account_data["維持保證金總額"]) * 100.0, np.where(account_data["帳戶淨值"] != 0, (account_data["現金餘額"] / account_data["帳戶淨值"]) * 100.0, 0.0)), 1).astype(float)
+
+                total_exposure = float(account_data["名目曝險"].sum())
+                total_cash = float(account_data["現金餘額"].sum())
+                total_debt = float(account_data["融資/質押借款"].sum())
+                global_leverage = round(total_exposure / total_net_liq, 2) if total_net_liq > 0 else 0.0
+                global_cash_pct = round((total_cash / total_net_liq) * 100.0, 1) if total_net_liq > 0 else 0.0
+
+                c1, c2, c3, c4, c5 = st.columns(5)
+                c1.metric("總帳戶淨值/權益數", f"NT$ {total_net_liq:,.0f}", "")
+                c2.metric("總實質曝險 (TWD)", f"NT$ {total_exposure:,.0f}", "")
+                c3.metric("總借款負債 (TWD)", f"NT$ {total_debt:,.0f}", "")
+                c4.metric("🌍 合併總槓桿率", f"{global_leverage}x", "警戒線: 1.5x")
+                c5.metric("💰 總現金水位", f"{global_cash_pct}%", "健康區間: >40%")
+                
+                # 總槓桿超標警報推送
+                if global_leverage > 1.5:
+                    st.error("🚨 **【全局風控警告】合併總槓桿率已超過 1.5x 警戒線，請注意流動性與融資維持率風險！**")
+                    if st.button("⚠️ 推送合併槓桿超標警報至 Telegram"):
+                        try:
+                            bot_token = st.secrets["telegram"]["bot_token"]
+                            chat_id = st.secrets["telegram"]["chat_id"]
+                            msg = f"🚨 【量化戰情室槓桿警告】\n目前合併總槓桿率達 {global_leverage}x (已超過 1.5x 警戒線)！\n總淨值：NT$ {total_net_liq:,.0f}\n總曝險：NT$ {total_exposure:,.0f}"
+                            r = requests.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", json={"chat_id": chat_id, "text": msg}, timeout=5)
+                            if r.status_code == 200:
+                                st.success("✅ 槓桿警告已成功推播！")
+                            else:
+                                st.error("❌ 推送失敗")
+                        except Exception as e:
+                            st.error(f"❌ 錯誤: {e}")
+
+                display_account = account_data[['帳戶名稱', '現金餘額', '融資/質押借款', '名目曝險', '帳戶淨值', '槓桿率 (倍)', '權益比率%/現金水位%']].copy()
+                styled_df = display_account.style.format({
+                    "現金餘額": "NT$ {:,.0f}", "融資/質押借款": "NT$ {:,.0f}", "名目曝險": "NT$ {:,.0f}",
+                    "帳戶淨值": "NT$ {:,.0f}", "槓桿率 (倍)": "{:.2f}x", "權益比率%/現金水位%": "{:.1f}%"
+                }).background_gradient(subset=["槓桿率 (倍)"], cmap="Reds").background_gradient(subset=["權益比率%/現金水位%"], cmap="RdYlGn")
+                st.dataframe(styled_df, use_container_width=True, hide_index=True)
+
+            st.markdown("---")
+            st.subheader("🎯 微觀持倉、Beta 值與精細產業即時損益追蹤")
+            if not df.empty:
+                total_invested_twd = float((df['實質佔用本金(原幣)'] * df['換算匯率']).sum())
+                total_pnl_twd = float((df['淨未實現損益(原幣)'] * df['換算匯率']).sum())
+                total_roi_pct = float((total_pnl_twd / total_invested_twd) * 100.0) if total_invested_twd > 0 else 0.0
+                
+                c_a, c_b = st.columns(2)
+                c_a.metric("全帳戶持倉投入總金額 (TWD)", f"NT$ {total_invested_twd:,.0f}", "")
+                c_b.metric("總淨未實現損益 (TWD)", f"NT$ {total_pnl_twd:,.0f}", f"{total_roi_pct:+.2f}%")
+                
+                display_df = df[['帳戶', '產業別', '種類', '標的', '名稱', 'Beta值', '真實風險權重 (%)', '標的槓桿', '持有數量', '平均成本', '即時報價', '顯示_投入總金額(原幣)', '顯示_即時市值(原幣)', '淨未實現損益(原幣)', '報酬率 (%)', '最大虧損比例']].copy()
+                display_df.rename(columns={'顯示_投入總金額(原幣)': '投入總金額', '顯示_即時市值(原幣)': '即時市值(原幣)', '淨未實現損益(原幣)': '淨損益(原幣)'}, inplace=True)
+                display_df['最大虧損比例'] = display_df['最大虧損比例'].apply(lambda x: f"{x:.0f}%" if x > -100 else "未設定")
+
+                styled_quant_df = display_df.style.format({
+                    "Beta值": "{:.2f}", "真實風險權重 (%)": "{:.2f}%", "標的槓桿": "{:.1f}x", "持有數量": "{:,.0f}",
+                    "平均成本": "{:,.2f}", "即時報價": "{:,.2f}", "投入總金額": "{:,.0f}",
+                    "即時市值(原幣)": "{:,.0f}", "淨損益(原幣)": "{:,.0f}", "報酬率 (%)": "{:+.2f}%"
+                }, precision=2).background_gradient(subset=["Beta值"], cmap="Purples").background_gradient(subset=["報酬率 (%)"], cmap="RdYlGn") 
+                st.dataframe(styled_quant_df, use_container_width=True, hide_index=True)
+
+            st.markdown("---")
+            st.subheader("🤖 AI 避險基金經理人即時壓力測試與風控審查")
+            
+            if st.button("🧠 啟動 AI 經理人風控與壓力測試", use_container_width=True):
+                with st.spinner("AI 經理人正在分析中..."):
+                    try:
+                        client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+                        positions_summary = df[['標的', '名稱', '產業別', 'Beta值', '真實風險權重 (%)', '標的槓桿', '報酬率 (%)']].to_string(index=False) if not df.empty else "無持倉"
+                        prompt_text = f"總帳戶淨值: NT$ {total_net_liq:,.0f}\n合併總槓桿率: {global_leverage}x\n投資組合加權Beta: {portfolio_beta:.2f}\n總現金水位: {global_cash_pct}%\n持倉明細:\n{positions_summary}\n請給予 3 點風控建議。"
+                        response = client.models.generate_content(model='gemini-3.8-flash', contents=prompt_text)
+                        st.session_state.ai_memo_p4["text"] = response.text
+                        st.session_state.ai_memo_p4["time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    except Exception as e:
+                        st.error(f"AI 呼叫失敗: {e}")
+            
+            if st.session_state.ai_memo_p4["text"]:
+                st.markdown("---")
+                st.info(f"📌 **最新風控審查 (生成時間：{st.session_state.ai_memo_p4['time']})**")
+                st.markdown(st.session_state.ai_memo_p4["text"])
+
+        except Exception as e:
+            st.error(f"連線發生錯誤。系統訊息: {e}")
+
+# ==========================================
+# 第五頁：Telegram 戰情推播測試
+# ==========================================
+elif page == "第五頁：Telegram 戰情推播":
+    st.title("📱 第五頁：Telegram 戰情推播與即時通知中心")
+    st.markdown("---")
+    st.info("💡 系統已成功連結您的專屬機器人 `@Dailyreport4Jim_bot`。您可以在此手動測試推播或發送全方位帳戶戰情總結！")
+
+    test_msg = st.text_area("輸入要發送至 Telegram 的戰情訊息：", "🚀 【量化交易戰鬥艙】系統運作正常，盤勢監控與自動風控連線中！")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("🚀 發送 Telegram 測試訊息", type="primary", use_container_width=True):
+            try:
+                bot_token = st.secrets["telegram"]["bot_token"]
+                chat_id = st.secrets["telegram"]["chat_id"]
+                url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+                payload = {
+                    "chat_id": chat_id,
+                    "text": test_msg
+                }
+                res = requests.post(url, json=payload, timeout=5)
+                if res.status_code == 200:
+                    st.success("✅ Telegram 訊息推播成功！請至 Telegram 查看。")
+                else:
+                    st.error(f"❌ 推送失敗，回應碼：{res.status_code}, 內容：{res.text}")
+            except Exception as e:
+                st.error(f"❌ 發送發生例外錯誤：{e}")
+                
+    with col2:
+        if st.button("📊 推送目前帳戶總覽與風控摘要", use_container_width=True):
+            try:
+                bot_token = st.secrets["telegram"]["bot_token"]
+                chat_id = st.secrets["telegram"]["chat_id"]
+                url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+                
+                # 動態帶入最新時間
+                summary_text = (
+                    f"📊 【量化戰鬥艙戰情總結】\n"
+                    f"⏱ 時間：{datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
+                    f"🌐 機器人狀態：@Dailyreport4Jim_bot 運作中\n"
+                    f"🛡️ 項目：全自動即時市價結算、M7財報日行事曆與風控鬧鐘已全面啟動！"
+                )
+                payload = {
+                    "chat_id": chat_id,
+                    "text": summary_text
+                }
+                res = requests.post(url, json=payload, timeout=5)
+                if res.status_code == 200:
+                    st.success("✅ 帳戶戰情總結已成功推播至 Telegram！")
+                else:
+                    st.error(f"❌ 推送失敗，回應碼：{res.status_code}")
+            except Exception as e:
+                st.error(f"❌ 發生例外錯誤：{e}")
