@@ -602,7 +602,14 @@ elif page == "第四頁：部位監控與量化風控":
                 tickers, prices, betas, sectors = df['標的'].unique().tolist(), {}, {}, {}
                 for ticker in tickers:
                     try:
-                        is_tw_market = (ticker in ['TX', 'MTX', 'TE', 'TF']) or ('.TW' in ticker) or ('.TWO' in ticker)
+                        # 針對台指期與微台，強制抓取台灣加權指數 (^TWII) 作為即時報價，避免被誤認為美股 Textron (TX)
+                        if ticker in ['TX', 'MTX']:
+                            prices[ticker] = float(yf.Ticker("^TWII").history(period="1d")['Close'].iloc[-1])
+                            betas[ticker] = 1.0
+                            sectors[ticker] = "台指期貨" if ticker == 'TX' else "小型台指期"
+                            continue
+
+                        is_tw_market = (ticker in ['TE', 'TF']) or ('.TW' in ticker) or ('.TWO' in ticker)
                         b_val, s_val = get_market_beta_and_sector(ticker, is_tw_market)
                         betas[ticker] = b_val
                         sectors[ticker] = s_val
@@ -610,17 +617,14 @@ elif page == "第四頁：部位監控與量化風控":
                         if is_tw_market:
                             try:
                                 headers = {'User-Agent': 'Mozilla/5.0'}
-                                scrape_target = "FITX1.TW" if ticker in ['TX', 'MTX'] else ticker
-                                res = requests.get(f"https://tw.stock.yahoo.com/quote/{scrape_target}", headers=headers, timeout=5)
+                                res = requests.get(f"https://tw.stock.yahoo.com/quote/{ticker}", headers=headers, timeout=5)
                                 match = re.search(r'"regularMarketPrice":(?:{"raw":)?([0-9.]+)', res.text)
                                 if match:
                                     prices[ticker] = float(match.group(1))
                                 else:
-                                    fb = "^TWII" if ticker in ['TX', 'MTX'] else ticker
-                                    prices[ticker] = float(yf.Ticker(fb).history(period="1d")['Close'].iloc[-1])
+                                    prices[ticker] = float(yf.Ticker(ticker).history(period="1d")['Close'].iloc[-1])
                             except:
-                                fb = "^TWII" if ticker in ['TX', 'MTX'] else ticker
-                                prices[ticker] = float(yf.Ticker(fb).history(period="1d")['Close'].iloc[-1])
+                                prices[ticker] = float(yf.Ticker(ticker).history(period="1d")['Close'].iloc[-1])
                         else:
                             hist = yf.Ticker(ticker).history(period="5d")
                             prices[ticker] = float(hist['Close'].iloc[-1]) if not hist.empty else np.nan
@@ -672,7 +676,7 @@ elif page == "第四頁：部位監控與量化風控":
                 for idx, row in account_data.iterrows():
                     acc_name = str(row['帳戶名稱']).strip()
                     if "元大期貨" in acc_name:
-                        # 【完全還原您最早版本的元大期貨計算邏輯】
+                        # 【完全對齊最早版本的元大期貨計算邏輯】
                         yuan_ta_margin = float(df[df['帳戶'] == row['帳戶名稱']]['實質佔用本金(原幣)'].sum()) if not df.empty else 0.0
                         account_data.at[idx, '帳戶淨值'] = float(170422.0 + row['部位權益貢獻'])
                         account_data.at[idx, '現金餘額'] = float(account_data.at[idx, '帳戶淨值'] - yuan_ta_margin)
