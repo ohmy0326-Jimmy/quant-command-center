@@ -488,8 +488,6 @@ elif page == "第四頁：部位監控與量化風控":
             "META": "社群與AI",
             "SOXL": "半導體槓桿ETF",
             "00631L": "台股槓桿ETF",
-            "TMF": "美國公債期貨",
-            "FMF": "美國公債期貨",
             "TX": "台指期貨",
             "MTX": "小型台指期"
         }
@@ -502,7 +500,6 @@ elif page == "第四頁：部位監控與量化風控":
                 t = yf.Ticker(ticker)
                 info = t.info
                 yf_sector = info.get('sector', '其他')
-                # 依據 yfinance 類別進行第二層細分對應
                 if "Technology" in yf_sector:
                     refined_sector = "科技硬體與半導體"
                 elif "Materials" in yf_sector:
@@ -517,7 +514,6 @@ elif page == "第四頁：部位監控與量化風控":
                 refined_sector = "其他與衍生品"
 
         try:
-            # 計算 Beta 值
             benchmark = "^TWII" if is_tw else "^GSPC"
             df_asset = yf.Ticker(ticker).history(period="1y")['Close']
             df_bench = yf.Ticker(benchmark).history(period="1y")['Close']
@@ -595,10 +591,7 @@ elif page == "第四頁：部位監控與量化風控":
                     if '期' in str(row['種類']):
                         t_str = str(row['標的']).upper()
                         q_abs = abs(row['持有數量'])
-                        if t_str in ['TMF', 'FMF']: 
-                            df.at[idx, '實質佔用本金(原幣)'] = 35050.0 * q_abs
-                            df.at[idx, '維持保證金(原幣)'] = 26900.0 * q_abs
-                        elif t_str == 'MTX': 
+                        if t_str == 'MTX': 
                             df.at[idx, '實質佔用本金(原幣)'] = 175250.0 * q_abs
                             df.at[idx, '維持保證金(原幣)'] = 134500.0 * q_abs
                         elif t_str == 'TX': 
@@ -611,7 +604,7 @@ elif page == "第四頁：部位監控與量化風控":
                 tickers, prices, betas, sectors = df['標的'].unique().tolist(), {}, {}, {}
                 for ticker in tickers:
                     try:
-                        is_tw_market = (ticker in ['TX', 'MTX', 'FMF', 'TMF', 'TE', 'TF']) or ('.TW' in ticker) or ('.TWO' in ticker)
+                        is_tw_market = (ticker in ['TX', 'MTX', 'TE', 'TF']) or ('.TW' in ticker) or ('.TWO' in ticker)
                         b_val, s_val = get_market_beta_and_sector(ticker, is_tw_market)
                         betas[ticker] = b_val
                         sectors[ticker] = s_val
@@ -619,16 +612,16 @@ elif page == "第四頁：部位監控與量化風控":
                         if is_tw_market:
                             try:
                                 headers = {'User-Agent': 'Mozilla/5.0'}
-                                scrape_target = "FITX1.TW" if ticker in ['TX', 'MTX', 'FMF', 'TMF'] else ticker
+                                scrape_target = "FITX1.TW" if ticker in ['TX', 'MTX'] else ticker
                                 res = requests.get(f"https://tw.stock.yahoo.com/quote/{scrape_target}", headers=headers, timeout=5)
                                 match = re.search(r'"regularMarketPrice":(?:{"raw":)?([0-9.]+)', res.text)
                                 if match:
                                     prices[ticker] = float(match.group(1))
                                 else:
-                                    fb = "^TWII" if ticker in ['TX', 'MTX', 'FMF', 'TMF'] else ticker
+                                    fb = "^TWII" if ticker in ['TX', 'MTX'] else ticker
                                     prices[ticker] = float(yf.Ticker(fb).history(period="1d")['Close'].iloc[-1])
                             except:
-                                fb = "^TWII" if ticker in ['TX', 'MTX', 'FMF', 'TMF'] else ticker
+                                fb = "^TWII" if ticker in ['TX', 'MTX'] else ticker
                                 prices[ticker] = float(yf.Ticker(fb).history(period="1d")['Close'].iloc[-1])
                         else:
                             hist = yf.Ticker(ticker).history(period="5d")
@@ -687,6 +680,12 @@ elif page == "第四頁：部位監控與量化風控":
                         account_data.at[idx, '帳戶淨值'] = float(row['現金餘額'] - row['融資/質押借款'] + row['部位權益貢獻'])
 
                 total_net_liq = float(account_data["帳戶淨值"].sum())
+
+            # ==========================================
+            # 先計算全帳戶淨值與真實風險權重 (供後續使用)
+            # ==========================================
+            if not df.empty:
+                df['真實風險權重 (%)'] = np.where(total_net_liq > 0, (df['實質曝險(台幣)'] / total_net_liq) * 100.0, 0.0).astype(float)
 
             # ==========================================
             # 1. 歷史資金成長曲線與總淨值
@@ -770,7 +769,7 @@ elif page == "第四頁：部位監控與量化風控":
                 st.markdown("---")
 
                 # ==========================================
-                # 4. 各精細產業別持股曝險與佔比獨立列表
+                # 4. 各精細產業別持股曝險與佔比（改為圓餅圖呈現）
                 # ==========================================
                 st.subheader("🏢 各精細產業別持股曝險與資金佔比分佈")
                 sector_grouped = df.groupby('產業別').agg(
@@ -791,12 +790,14 @@ elif page == "第四頁：部位監控與量化風控":
                 
                 with sec_col2:
                     import plotly.express as px
-                    fig_sec = px.bar(
-                        sector_grouped, x='產業別', y='產業曝險佔比 (%)',
-                        text_auto='.2f%', title="各精細產業別資金曝險佔比分佈 (%)",
+                    fig_sec = px.pie(
+                        sector_grouped, names='產業別', values='產業曝險佔比 (%)',
+                        title="各精細產業別資金曝險佔比圓餅圖",
+                        hole=0.4, # 甜甜圈圖外觀更美觀
                         template="plotly_dark"
                     )
-                    fig_sec.update_layout(height=300, margin=dict(l=10, r=10, t=30, b=10))
+                    fig_sec.update_traces(textinfo='percent+label')
+                    fig_sec.update_layout(height=320, margin=dict(l=10, r=10, t=40, b=10))
                     st.plotly_chart(fig_sec, use_container_width=True)
 
             st.markdown("---")
@@ -814,7 +815,7 @@ elif page == "第四頁：部位監控與量化風控":
                 c_a.metric("全帳戶持倉投入總金額 (TWD)", f"NT$ {total_invested_twd:,.0f}", "")
                 c_b.metric("總淨未實現損益 (TWD)", f"NT$ {total_pnl_twd:,.0f}", f"{total_roi_pct:+.2f}%")
                 
-                display_df = df[['帳戶', '產業別', '種類', '標', '名稱', 'Beta值', '真實風險權重 (%)', '標的槓桿', '持有數量', '平均成本', '即時報價', '顯示_投入總金額(原幣)', '顯示_即時市值(原幣)', '淨未實現損益(原幣)', '報酬率 (%)', '最大虧損比例']].copy() if '標' in df.columns else df[['帳戶', '產業別', '種類', '標的', '名稱', 'Beta值', '真實風險權重 (%)', '標的槓桿', '持有數量', '平均成本', '即時報價', '顯示_投入總金額(原幣)', '顯示_即時市值(原幣)', '淨未實現損益(原幣)', '報酬率 (%)', '最大虧損比例']].copy()
+                display_df = df[['帳戶', '產業別', '種類', '標的', '名稱', 'Beta值', '真實風險權重 (%)', '標的槓桿', '持有數量', '平均成本', '即時報價', '顯示_投入總金額(原幣)', '顯示_即時市值(原幣)', '淨未實現損益(原幣)', '報酬率 (%)', '最大虧損比例']].copy()
                 display_df.rename(columns={'顯示_投入總金額(原幣)': '投入總金額', '顯示_即時市值(原幣)': '即時市值(原幣)', '淨未實現損益(原幣)': '淨損益(原幣)'}, inplace=True)
                 display_df['最大虧損比例'] = display_df['最大虧損比例'].apply(lambda x: f"{x:.0f}%" if x > -100 else "未設定")
 
