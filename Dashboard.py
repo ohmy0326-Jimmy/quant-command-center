@@ -609,8 +609,28 @@ elif page == "第四頁：部位監控與量化風控":
             "https://spreadsheets.google.com/feeds",
             "https://www.googleapis.com/auth/drive"
         ]
-        key_dict = dict(st.secrets["google_key"])
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(key_dict, scope)
+        
+        # 優先從環境變數或 Secret Manager 讀取，若無則降級讀取本機 secrets
+        import json
+        key_data = None
+        
+        # 1. 嘗試從環境變數或 Secret Manager 掛載點讀取
+        if "GOOGLE_SERVICE_KEY_JSON" in os.environ:
+            key_data = json.loads(os.environ["GOOGLE_SERVICE_KEY_JSON"])
+        else:
+            try:
+                # 2. 嘗試從 Google Secret Manager API 直接動態讀取
+                from google.cloud import secretmanager
+                client_sm = secretmanager.SecretManagerServiceClient()
+                project_id = "quant-dashboard-512010"
+                secret_name = f"projects/{project_id}/secrets/google-service-key/versions/latest"
+                response = client_sm.access_secret_version(request={"name": secret_name})
+                key_data = json.loads(response.payload.data.decode("UTF-8"))
+            except Exception:
+                # 3. 若皆失敗，降級讀取原本本機的 st.secrets
+                key_data = dict(st.secrets["google_key"])
+
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(key_data, scope)
         client = gspread.authorize(creds)
         spreadsheet = client.open("Quant_Database")
         return (
