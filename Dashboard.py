@@ -467,6 +467,32 @@ elif page == "第三頁：重大行事曆與會展":
 # 第四頁：部位監控與量化風控
 # ==========================================
 elif page == "第四頁：部位監控與量化風控":
+    @st.cache_data(ttl=300)
+    def get_market_beta_and_sector(ticker, is_tw):
+        """自動計算個股 Beta 值與取得產業別"""
+        try:
+            t = yf.Ticker(ticker)
+            info = t.info
+            sector = info.get('sector', '其他 / 衍生品')
+            
+            # 決定基準指數：台股對應 ^TWII，美股/其他對應 ^GSPC
+            benchmark = "^TWII" if is_tw else "^GSPC"
+            df_asset = t.history(period="1y")['Close']
+            df_bench = yf.Ticker(benchmark).history(period="1y")['Close']
+            
+            combined = pd.concat([df_asset, df_bench], axis=1).dropna()
+            if len(combined) > 30:
+                returns = combined.pct_change().dropna()
+                cov = np.cov(returns.iloc[:, 0], returns.iloc[:, 1])[0][1]
+                var_bench = np.var(returns.iloc[:, 1])
+                beta = cov / var_bench if var_bench != 0 else 1.0
+            else:
+                beta = 1.0
+            return float(round(beta, 2)), str(sector)
+        except:
+            # 針對期權或無法取得 info 的特殊標給予預設值
+            return 1.0, "衍生品 / 期貨"
+
     @st.cache_data(ttl=60)
     def load_quant_database():
         scope = [
@@ -485,7 +511,7 @@ elif page == "第四頁：部位監控與量化風控":
 
     c1, c2 = st.columns([0.85, 0.15])
     with c1:
-        st.title("🛡️ 第四頁：部位監控與量化風控 (戰鬥艙)")
+        st.title("🛡️ 第四頁：部位監控、Beta 中性化與產業配置")
     with c2:
         st.write("")
         if st.button("🔄 重新整理", key="refresh_p4", use_container_width=True):
@@ -495,7 +521,7 @@ elif page == "第四頁：部位監控與量化風控":
     st.write("數據來源：Notion 交易日誌 ➔ Make.com ➔ Google Sheets (基礎計價幣別：TWD 台幣)")
     st.markdown("---")
 
-    with st.spinner('📡 正在穿透雲端，同步期交所保證金雙軌制量化資料庫...'):
+    with st.spinner('📡 正在同步雲端資料庫，並計算個股 $\beta$ 值與產業分佈...'):
         try:
             account_data, nav_data, quant_data = load_quant_database()
             try:
@@ -541,11 +567,16 @@ elif page == "第四頁：部位監控與量化風控":
                             df.at[idx, '實質佔用本金(原幣)'] = abs(row['名目合約總值(原幣)']) * 0.135
                             df.at[idx, '維持保證金(原幣)'] = abs(row['名目合約總值(原幣)']) * 0.11
 
-                tickers, prices = df['標的'].unique().tolist(), {}
+                tickers, prices, betas, sectors = df['標的'].unique().tolist(), {}, {}, {}
                 for ticker in tickers:
                     try:
                         is_option = len(ticker) > 10 and any(char.isdigit() for char in ticker)
                         is_tw_market = (ticker in ['TX', 'MTX', 'FMF', 'TMF', 'TE', 'TF']) or ('.TW' in ticker) or ('.TWO' in ticker)
+                        
+                        # 計算 Beta 與取得產業別
+                        b_val, s_val = get_market_beta_and_sector(ticker, is_tw_market)
+                        betas[ticker] = b_val
+                        sectors[ticker] = s_val
                         
                         if is_tw_market:
                             try:
@@ -566,8 +597,13 @@ elif page == "第四頁：部位監控與量化風控":
                             prices[ticker] = float(hist['Close'].iloc[-1]) if not hist.empty else np.nan
                     except:
                         prices[ticker] = np.nan
+                        betas[ticker] = 1.0
+                        sectors[ticker] = "其他"
                 
                 df['即時報價'] = df['標的'].map(prices)
+                df['Beta值'] = df['標的'].map(betas).fillna(1.0)
+                df['產業別'] = df['標的'].map(sectors).fillna("其他")
+                
                 df['最新名目市值(原幣)'] = np.where(df['即時報價'].notna() & (df['平均成本'] != 0), df['名目合約總值(原幣)'] * (df['即時報價'] / df['平均成本']), df['名目合約總值(原幣)']).astype(float)
                 df['點差損益(原幣)'] = (df['最新名目市值(原幣)'] - df['名目合約總值(原幣)']).astype(float)
                 
@@ -614,65 +650,67 @@ elif page == "第四頁：部位監控與量化風控":
 
                 total_net_liq = float(account_data["帳戶淨值"].sum())
 
-            st.subheader("📈 歷史資金成長曲線與最大回撤 (MDD) [以台幣計價]")
-            if not nav_data.empty and '日期' in nav_data.columns and '總淨值' in nav_data.columns:
-                nav_data['日期'] = pd.to_datetime(nav_data['日期']).dt.strftime('%Y-%m-%d')
-                nav_data.set_index('日期', inplace=True)
-                nav_data['總淨值'] = pd.to_numeric(nav_data['總淨值'], errors='coerce')
-                
-                today_str = datetime.now().strftime('%Y-%m-%d')
-                if not nav_data.index.str.contains(today_str).any():
-                    nav_data.loc[today_str] = total_net_liq
-                else:
-                    nav_data.loc[today_str, '總淨值'] = total_net_liq
-                    
-                nav_series = nav_data['總淨值'].dropna()
-                if not nav_series.empty:
-                    current_nav, max_nav = nav_series.iloc[-1], nav_series.max()
-                    current_dd_pct = ((current_nav - max_nav) / max_nav) * 100
-                    st.metric("最新總淨值 (TWD)", f"NT$ {current_nav:,.0f}", f"距離歷史最高點: {current_dd_pct:.2f}%")
-                    st.line_chart(nav_series, height=150)
-            else:
-                st.metric("最新總淨值 (TWD)", f"NT$ {total_net_liq:,.0f}", "即時市價計算")
-            
             st.markdown("---")
 
+            # ==========================================
+            # 新增：計算投資組合加權 Beta 與市場中性化狀態
+            # ==========================================
             if not df.empty:
-                alarms = df[(df['最大虧損比例'] > -100) & (df['報酬率 (%)'] <= df['最大虧損比例'])]
-                if not alarms.empty:
-                    st.error("🚨 **【系統風控警報】偵測到部位觸及最大虧損限制，請評估是否停損處理！**")
-                    for idx, row in alarms.iterrows():
-                        name_display = row['名稱'] if row['名稱'] else row['標的']
-                        st.warning(f"⚠️ **{name_display} ({row['標的']})**：目前淨報酬率 **{row['報酬率 (%)']:.2f}%** (已跌破設定的 {row['最大虧損比例']:.0f}%)")
-                    st.markdown("---")
+                total_exposure_sum = df['實質曝險(台幣)'].sum()
+                if total_exposure_sum > 0:
+                    df['曝險權重'] = df['實質曝險(台幣)'] / total_exposure_sum
+                    portfolio_beta = (df['曝險權重'] * df['Beta值']).sum()
+                else:
+                    portfolio_beta = 0.0
 
-            st.subheader("🏦 各帳戶動態風險與全局槓桿 (即時市價結算)")
-            if not account_data.empty:
-                account_data["槓桿率 (倍)"] = np.round(np.where(account_data["帳戶淨值"] != 0, (account_data["名目曝險"] / account_data["帳戶淨值"]), 0.0), 2).astype(float)
-                account_data["權益比率%/現金水位%"] = np.round(np.where(account_data["維持保證金總額"] > 0, (account_data["帳戶淨值"] / account_data["維持保證金總額"]) * 100.0, np.where(account_data["帳戶淨值"] != 0, (account_data["現金餘額"] / account_data["帳戶淨值"]) * 100.0, 0.0)), 1).astype(float)
+                # 判斷中性化程度
+                if portfolio_beta > 0.2:
+                    neutrality_status = "🟢 偏多 (Long-Biased)"
+                elif portfolio_beta < -0.2:
+                    neutrality_status = "🔴 偏空 (Short-Biased)"
+                else:
+                    neutrality_status = "🟡 市場中性 (Market-Neutral)"
 
-                total_exposure = float(account_data["名目曝險"].sum())
-                total_cash = float(account_data["現金餘額"].sum())
-                total_debt = float(account_data["融資/質押借款"].sum())
-                global_leverage = round(total_exposure / total_net_liq, 2) if total_net_liq > 0 else 0.0
-                global_cash_pct = round((total_cash / total_net_liq) * 100.0, 1) if total_net_liq > 0 else 0.0
+                st.subheader("⚖️ 投資組合 Beta 係數與中性化戰情計分板")
+                b_col1, b_col2, b_col3 = st.columns(3)
+                b_col1.metric("整體資產加權 Beta ($\beta_{\text{portfolio}}$)", f"{portfolio_beta:.2f}", "基準對標 S&P500 / 加權指數")
+                b_col2.metric("部位中性化判定", neutrality_status, "")
+                b_col3.metric("總實質曝險部位", f"NT$ {total_exposure_sum:,.0f}", "")
+                st.markdown("---")
 
-                c1, c2, c3, c4, c5 = st.columns(5)
-                c1.metric("總帳戶淨值/權益數", f"NT$ {total_net_liq:,.0f}", "")
-                c2.metric("總實質曝險 (TWD)", f"NT$ {total_exposure:,.0f}", "")
-                c3.metric("總借款負債 (TWD)", f"NT$ {total_debt:,.0f}", "")
-                c4.metric("🌍 合併總槓桿率", f"{global_leverage}x", "警戒線: 1.5x")
-                c5.metric("💰 總現金水位", f"{global_cash_pct}%", "健康區間: >40%")
+                # ==========================================
+                # 新增：各產業別持股與曝險佔比彙總
+                # ==========================================
+                st.subheader("🏢 各產業別持股曝險與資金佔比分佈")
+                sector_grouped = df.groupby('產業別').agg(
+                    實質曝險合計=('實質曝險(台幣)', 'sum'),
+                    標的數量=('標的', 'count')
+                ).reset_index()
                 
-                display_account = account_data[['帳戶名稱', '現金餘額', '融資/質押借款', '名目曝險', '帳戶淨值', '槓桿率 (倍)', '權益比率%/現金水位%']].copy()
-                styled_df = display_account.style.format({
-                    "現金餘額": "NT$ {:,.0f}", "融資/質押借款": "NT$ {:,.0f}", "名目曝險": "NT$ {:,.0f}",
-                    "帳戶淨值": "NT$ {:,.0f}", "槓桿率 (倍)": "{:.2f}x", "權益比率%/現金水位%": "{:.1f}%"
-                }).background_gradient(subset=["槓桿率 (倍)"], cmap="Reds").background_gradient(subset=["權益比率%/現金水位%"], cmap="RdYlGn")
-                st.dataframe(styled_df, use_container_width=True, hide_index=True)
+                sector_grouped['產業曝險佔比 (%)'] = (sector_grouped['實質曝險合計'] / total_exposure_sum) * 100.0
+                sector_grouped = sector_grouped.sort_values(by='產業曝險佔比 (%)', ascending=False)
+
+                sec_col1, sec_col2 = st.columns([1.5, 2.5])
+                with sec_col1:
+                    styled_sec_df = sector_grouped.style.format({
+                        "實質曝險合計": "NT$ {:,.0f}",
+                        "產業曝險佔比 (%)": "{:.2f}%"
+                    }).background_gradient(subset=["產業曝險佔比 (%)"], cmap="Blues")
+                    st.dataframe(styled_sec_df, use_container_width=True, hide_index=True)
+                
+                with sec_col2:
+                    # 使用 Plotly 呈現產業佔比長條圖
+                    import plotly.express as px
+                    fig_sec = px.bar(
+                        sector_grouped, x='產業別', y='產業曝險佔比 (%)',
+                        text_auto='.2f%', title="各產業別資金曝險佔比分佈 (%)",
+                        template="plotly_dark"
+                    )
+                    fig_sec.update_layout(height=280, margin=dict(l=10, r=10, t=30, b=10))
+                    st.plotly_chart(fig_sec, use_container_width=True)
 
             st.markdown("---")
-            st.subheader("🎯 微觀持倉與即時損益追蹤")
+            st.subheader("🎯 微觀持倉、Beta 值與產業別即時損益追蹤")
             if not df.empty:
                 df['真實風險權重 (%)'] = np.where(total_net_liq > 0, (df['實質曝險(台幣)'] / total_net_liq) * 100.0, 0.0).astype(float)
                 total_invested_twd = float((df['實質佔用本金(原幣)'] * df['換算匯率']).sum())
@@ -683,36 +721,16 @@ elif page == "第四頁：部位監控與量化風控":
                 c_a.metric("全帳戶持倉投入總金額 (TWD)", f"NT$ {total_invested_twd:,.0f}", "")
                 c_b.metric("總淨未實現損益 (TWD)", f"NT$ {total_pnl_twd:,.0f}", f"{total_roi_pct:+.2f}%")
                 
-                display_df = df[['帳戶', '種類', '標的', '名稱', '真實風險權重 (%)', '標的槓桿', '持有數量', '平均成本', '即時報價', '顯示_投入總金額(原幣)', '顯示_即時市值(原幣)', '淨未實現損益(原幣)', '報酬率 (%)', '最大虧損比例']].copy()
+                display_df = df[['帳戶', '產業別', '種類', '標的', '名稱', 'Beta值', '真實風險權重 (%)', '標的槓桿', '持有數量', '平均成本', '即時報價', '顯示_投入總金額(原幣)', '顯示_即時市值(原幣)', '淨未實現損益(原幣)', '報酬率 (%)', '最大虧損比例']].copy()
                 display_df.rename(columns={'顯示_投入總金額(原幣)': '投入總金額', '顯示_即時市值(原幣)': '即時市值(原幣)', '淨未實現損益(原幣)': '淨損益(原幣)'}, inplace=True)
                 display_df['最大虧損比例'] = display_df['最大虧損比例'].apply(lambda x: f"{x:.0f}%" if x > -100 else "未設定")
 
                 styled_quant_df = display_df.style.format({
-                    "真實風險權重 (%)": "{:.2f}%", "標的槓桿": "{:.1f}x", "持有數量": "{:,.0f}",
+                    "Beta值": "{:.2f}", "真實風險權重 (%)": "{:.2f}%", "標的槓桿": "{:.1f}x", "持有數量": "{:,.0f}",
                     "平均成本": "{:,.2f}", "即時報價": "{:,.2f}", "投入總金額": "{:,.0f}",
-                    "即時市值(原幣)": "{:,.0f}", "淨損益(原幣)": "{:,.0f}", "報酬率 (%)": "{:+.2f}%"
-                }).background_gradient(subset=["真實風險權重 (%)"], cmap="Blues").background_gradient(subset=["報酬率 (%)"], cmap="RdYlGn") 
+                    "即時市值(原幣)": "{:,.0f}", "淨損益(原幣){:,.0f}" if "淨損益(原幣)" in display_df.columns else "淨損益(原幣)": "{:,.0f}", "報酬率 (%)": "{:+.2f}%"
+                }, precision=2).background_gradient(subset=["Beta值"], cmap="Purples").background_gradient(subset=["報酬率 (%)"], cmap="RdYlGn") 
                 st.dataframe(styled_quant_df, use_container_width=True, hide_index=True)
-
-            st.markdown("---")
-            st.subheader("🤖 AI 避險基金經理人即時壓力測試與風控審查")
-            
-            if st.button("🧠 啟動 AI 經理人風控與壓力測試", use_container_width=True):
-                with st.spinner("AI 經理人正在分析中..."):
-                    try:
-                        client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
-                        positions_summary = df[['標的', '名稱', '真實風險權重 (%)', '標的槓桿', '報酬率 (%)']].to_string(index=False) if not df.empty else "無持倉"
-                        prompt_text = f"總帳戶淨值: NT$ {total_net_liq:,.0f}\n合併總槓桿率: {global_leverage}x\n總現金水位: {global_cash_pct}%\n持倉明細:\n{positions_summary}\n請給予 3 點風控建議。"
-                        response = client.models.generate_content(model='gemini-3.8-flash', contents=prompt_text)
-                        st.session_state.ai_memo_p4["text"] = response.text
-                        st.session_state.ai_memo_p4["time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    except Exception as e:
-                        st.error(f"AI 呼叫失敗: {e}")
-            
-            if st.session_state.ai_memo_p4["text"]:
-                st.markdown("---")
-                st.info(f"📌 **最新風控審查 (生成時間：{st.session_state.ai_memo_p4['time']})**")
-                st.markdown(st.session_state.ai_memo_p4["text"])
 
         except Exception as e:
             st.error(f"連線發生錯誤。系統訊息: {e}")
