@@ -487,7 +487,8 @@ elif page == "第四頁：部位監控與量化風控":
             "00631L": "台股槓桿ETF",
             "LITX": "光通產業",
             "TX": "台指期貨",
-            "MTX": "小型台指期"
+            "MTX": "小型台指期",
+            "FMF": "微台期貨"
         }
         
         t_upper = str(ticker).upper()
@@ -508,7 +509,7 @@ elif page == "第四頁：部位監控與量化風控":
             except:
                 refined_sector = "其他與衍生品"
 
-        if t_upper in ['TX', 'MTX']:
+        if t_upper in ['TX', 'MTX', 'FMF']:
             return 1.0, str(refined_sector)
 
         try:
@@ -589,7 +590,7 @@ elif page == "第四頁：部位監控與量化風控":
                     if '期' in str(row['種類']):
                         t_str = str(row['標的']).upper()
                         q_abs = abs(row['持有數量'])
-                        if t_str == 'MTX': 
+                        if t_str in ['MTX', 'FMF']: 
                             df.at[idx, '實質佔用本金(原幣)'] = 175250.0 * q_abs
                             df.at[idx, '維持保證金(原幣)'] = 134500.0 * q_abs
                         elif t_str == 'TX': 
@@ -599,17 +600,24 @@ elif page == "第四頁：部位監控與量化風控":
                             df.at[idx, '實質佔用本金(原幣)'] = abs(row['名目合約總值(原幣)']) * 0.135
                             df.at[idx, '維持保證金(原幣)'] = abs(row['名目合約總值(原幣)']) * 0.11
 
+                # 先取得台股大盤最新指數作為期貨基準價
+                try:
+                    twii_price = float(yf.Ticker("^TWII").history(period="1d")['Close'].iloc[-1])
+                except:
+                    twii_price = 23000.0
+
                 tickers, prices, betas, sectors = df['標的'].unique().tolist(), {}, {}, {}
                 for ticker in tickers:
                     try:
-                        # 針對台指期與微台，強制抓取台灣加權指數 (^TWII) 作為即時報價，避免被誤認為美股 Textron (TX)
-                        if ticker in ['TX', 'MTX']:
-                            prices[ticker] = float(yf.Ticker("^TWII").history(period="1d")['Close'].iloc[-1])
+                        t_upper = str(ticker).upper()
+                        # 強制修正期貨代號的即時報價，對應台股大盤指數
+                        if t_upper in ['TX', 'MTX', 'FMF']:
+                            prices[ticker] = twii_price
                             betas[ticker] = 1.0
-                            sectors[ticker] = "台指期貨" if ticker == 'TX' else "小型台指期"
+                            sectors[ticker] = "微台期貨" if t_upper == 'FMF' else ("小型台指期" if t_upper == 'MTX' else "台指期貨")
                             continue
 
-                        is_tw_market = (ticker in ['TE', 'TF']) or ('.TW' in ticker) or ('.TWO' in ticker)
+                        is_tw_market = (t_upper in ['TE', 'TF']) or ('.TW' in t_upper) or ('.TWO' in t_upper)
                         b_val, s_val = get_market_beta_and_sector(ticker, is_tw_market)
                         betas[ticker] = b_val
                         sectors[ticker] = s_val
@@ -637,14 +645,20 @@ elif page == "第四頁：部位監控與量化風控":
                 df['Beta值'] = df['標的'].map(betas).fillna(1.0)
                 df['產業別'] = df['標的'].map(sectors).fillna("其他")
                 
-                df['最新名目市值(原幣)'] = np.where(df['即時報價'].notna() & (df['平均成本'] != 0), df['名目合約總值(原幣)'] * (df['即時報價'] / df['平均成本']), df['名目合約總值(原幣)']).astype(float)
+                # 針對期貨類商品，市值與損益由 Notion/Sheets 的點數差或投入金額正確計算，避免被即時報價覆蓋崩潰
+                is_futures_mask = df['種類'].astype(str).str.contains('期', na=False)
+                df['最新名目市值(原幣)'] = np.where(
+                    is_futures_mask,
+                    df['名目合約總值(原幣)'],
+                    np.where(df['即時報價'].notna() & (df['平均成本'] != 0), df['名目合約總值(原幣)'] * (df['即時報價'] / df['平均成本']), df['名目合約總值(原幣)'])
+                ).astype(float)
+
                 df['點差損益(原幣)'] = (df['最新名目市值(原幣)'] - df['名目合約總值(原幣)']).astype(float)
                 
                 tax_rates = np.full(len(df), 0.003)
-                is_futures = df['種類'].astype(str).str.contains('期', na=False)
                 is_options = df['種類'].astype(str).str.contains('選擇權|權', na=False)
                 is_us = df['種類'].astype(str).str.contains('美', na=False)
-                tax_rates = np.where(is_futures, 0.00005, tax_rates)
+                tax_rates = np.where(is_futures_mask, 0.00005, tax_rates)
                 tax_rates = np.where(is_options, 0.002, tax_rates)
                 tax_rates = np.where(is_us & ~is_options, 0.0002, tax_rates)
                 
@@ -652,8 +666,8 @@ elif page == "第四頁：部位監控與量化風控":
                 df['淨未實現損益(原幣)'] = (df['點差損益(原幣)'] - df['預估稅費(原幣)']).astype(float)
                 df['報酬率 (%)'] = np.where(df['實質佔用本金(原幣)'] != 0, (df['淨未實現損益(原幣)'] / df['實質佔用本金(原幣)'].abs()) * 100.0, 0.0).astype(float)
                 
-                df['顯示_投入總金額(原幣)'] = np.where(is_futures, df['實質佔用本金(原幣)'], df['名目合約總值(原幣)']).astype(float)
-                df['顯示_即時市值(原幣)'] = np.where(is_futures, df['實質佔用本金(原幣)'] + df['淨未實現損益(原幣)'], df['最新名目市值(原幣)']).astype(float)
+                df['顯示_投入總金額(原幣)'] = np.where(is_futures_mask, df['實質佔用本金(原幣)'], df['名目合約總值(原幣)']).astype(float)
+                df['顯示_即時市值(原幣)'] = np.where(is_futures_mask, df['實質佔用本金(原幣)'] + df['淨未實現損益(原幣)'], df['最新名目市值(原幣)']).astype(float)
                 df['實質曝險(台幣)'] = (df['最新名目市值(原幣)'].abs() * df['標的槓桿'] * df['換算匯率']).astype(float)
                 
                 df['是衍生品'] = df['種類'].astype(str).str.contains('期|選擇權|權', na=False, regex=True)
@@ -676,7 +690,6 @@ elif page == "第四頁：部位監控與量化風控":
                 for idx, row in account_data.iterrows():
                     acc_name = str(row['帳戶名稱']).strip()
                     if "元大期貨" in acc_name:
-                        # 【完全對齊最早版本的元大期貨計算邏輯】
                         yuan_ta_margin = float(df[df['帳戶'] == row['帳戶名稱']]['實質佔用本金(原幣)'].sum()) if not df.empty else 0.0
                         account_data.at[idx, '帳戶淨值'] = float(170422.0 + row['部位權益貢獻'])
                         account_data.at[idx, '現金餘額'] = float(account_data.at[idx, '帳戶淨值'] - yuan_ta_margin)
