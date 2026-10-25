@@ -23,7 +23,8 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD") or st.secrets.get("passwords",
 def check_password():
     """驗證密碼是否正確"""
     def password_entered():
-        if st.session_state["password"] == ADMIN_PASSWORD:
+        # 加上防護：確保 session_state 裡有 password 鍵值才進行比對
+        if "password" in st.session_state and st.session_state["password"] == ADMIN_PASSWORD:
             st.session_state["password_correct"] = True
             del st.session_state["password"]
         else:
