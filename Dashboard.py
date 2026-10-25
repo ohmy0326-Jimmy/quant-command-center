@@ -578,7 +578,7 @@ elif page == "第四頁：部位監控與量化風控":
             
             df = df[df['持有數量'] != 0].copy()
             
-            acc_equity_twd, acc_exp_twd, total_net_liq = pd.Series(dtype=float), pd.Series(dtype=float), 0.0
+            acc_market_val_twd, acc_exp_twd, total_net_liq = pd.Series(dtype=float), pd.Series(dtype=float), 0.0
             acc_maint_margin = pd.Series(dtype=float)
             
             if not df.empty:
@@ -676,39 +676,44 @@ elif page == "第四頁：部位監控與量化風控":
                 df['顯示_投入總金額(原幣)'] = np.where(is_futures_mask, df['實質佔用本金(原幣)'], df['名目合約總值(原幣)']).astype(float)
                 df['顯示_即時市值(原幣)'] = np.where(is_futures_mask, df['實質佔用本金(原幣)'] + df['淨未實現損益(原幣)'], df['即時報價'] * df['持有數量']).astype(float)
                 
-                df['實質曝險(台幣)'] = (df['顯示_即時市值(原幣)'].abs() * df['標的槓桿'] * df['換算匯率']).astype(float)
+                df['即時市值(台幣)'] = (df['顯示_即時市值(原幣)'].abs() * df['換算匯率']).astype(float)
+                df['實質曝險(台幣)'] = (df['即時市值(台幣)'] * df['標的槓桿']).astype(float)
                 
                 df['是衍生品'] = df['種類'].astype(str).str.contains('期|選擇權|權', na=False, regex=True)
-                df['權益貢獻(台幣)'] = df['淨未實現損益(原幣)'] * df['換算匯率']
                 
-                acc_equity_twd = df.groupby('帳戶')['權益貢獻(台幣)'].sum()
+                acc_market_val_twd = df.groupby('帳戶')['即時市值(台幣)'].sum()
                 acc_exp_twd = df.groupby('帳戶')['實質曝險(台幣)'].sum()
                 acc_maint_margin = df.groupby('帳戶')['維持保證金(原幣)'].sum()
 
             if not account_data.empty:
-                for col in ["現金餘額", "融資/質押借款", "帳戶淨值"]:
+                for col in ["現金餘額", "融資/質押借款"]:
                     if col in account_data.columns:
                         account_data[col] = pd.to_numeric(account_data[col], errors='coerce').fillna(0.0).astype(float)
                 
-                account_data['部位權益貢獻'] = account_data['帳戶名稱'].map(acc_equity_twd).fillna(0.0).astype(float)
+                account_data['即時持股市值'] = account_data['帳戶名稱'].map(acc_market_val_twd).fillna(0.0).astype(float)
                 account_data['名目曝險'] = account_data['帳戶名稱'].map(acc_exp_twd).fillna(0.0).astype(float)
                 account_data['維持保證金總額'] = account_data['帳戶名稱'].map(acc_maint_margin).fillna(0.0).astype(float)
+                account_data['帳戶淨值'] = 0.0
                 
-                # 【完美修復】：現貨與複委託帳戶直接讀取 Google Sheets 的原始帳戶淨值，絕不覆寫！
                 for idx, row in account_data.iterrows():
                     acc_name = str(row['帳戶名稱']).strip()
                     if "元大期貨" in acc_name:
-                        net_val = float(170422.0 + row['部位權益貢獻'])
+                        # 元大期貨維持原本邏輯
+                        q_equity_contrib = float(df[df['帳戶'] == acc_name]['淨未實現損益(原幣)'].sum() * df[df['帳戶'] == acc_name]['換算匯率'].iloc[0]) if not df[df['帳戶'] == acc_name].empty else 0.0
+                        net_val = float(170422.0 + q_equity_contrib)
                         maint_m = float(row['維持保證金總額'])
                         account_data.at[idx, '帳戶淨值'] = net_val
                         account_data.at[idx, '現金餘額'] = float(max(0.0, net_val - maint_m))
                     else:
-                        # 其他現貨帳戶：直接保留 Google Sheets 同步過來的真實淨值，不作任何破壞性破壞計算
-                        pass
+                        # 其它5個帳戶：現金餘額 + 即時持股市值 - 融資/質押借款
+                        cash = float(row['現金餘額'])
+                        mkt_val = float(row['即時持股市值'])
+                        debt = float(row['融資/質押借款'])
+                        account_data.at[idx, '帳戶淨值'] = cash + mkt_val - debt
 
                 total_net_liq = float(account_data["帳戶淨值"].sum())
 
-            # 【確保真實風險權重 (%) 正確計算】：只要總淨值大於0，就能正確算出佔比
+            # 確保真實風險權重 (%) 正確計算
             if not df.empty:
                 df['真實風險權重 (%)'] = np.where(total_net_liq > 0, (df['實質曝險(台幣)'] / total_net_liq) * 100.0, 0.0).astype(float)
 
