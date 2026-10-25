@@ -508,7 +508,6 @@ elif page == "第四頁：部位監控與量化風控":
             except:
                 refined_sector = "其他與衍生品"
 
-        # 期貨指數商品直接對應大盤，Beta 設為 1.0
         if t_upper in ['TX', 'MTX']:
             return 1.0, str(refined_sector)
 
@@ -673,8 +672,10 @@ elif page == "第四頁：部位監控與量化風控":
                 for idx, row in account_data.iterrows():
                     acc_name = str(row['帳戶名稱']).strip()
                     if "元大期貨" in acc_name:
-                        # 【正確修正】元大期貨與其他帳戶一致：使用試算表中的現金餘額 + 衍生品未實現損益
-                        account_data.at[idx, '帳戶淨值'] = float(row['現金餘額'] + row['部位權益貢獻'])
+                        # 【完全還原您最早版本的元大期貨計算邏輯】
+                        yuan_ta_margin = float(df[df['帳戶'] == row['帳戶名稱']]['實質佔用本金(原幣)'].sum()) if not df.empty else 0.0
+                        account_data.at[idx, '帳戶淨值'] = float(170422.0 + row['部位權益貢獻'])
+                        account_data.at[idx, '現金餘額'] = float(account_data.at[idx, '帳戶淨值'] - yuan_ta_margin)
                     else:
                         account_data.at[idx, '帳戶淨值'] = float(row['現金餘額'] - row['融資/質押借款'] + row['部位權益貢獻'])
 
