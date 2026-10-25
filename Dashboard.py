@@ -692,7 +692,6 @@ elif page == "第四頁：部位監控與量化風控":
                 account_data['維持保證金總額'] = account_data['帳戶名稱'].map(acc_maint_margin).fillna(0.0).astype(float)
                 account_data['帳戶淨值'] = 0.0
                 
-                # 嚴格區分：保留您原本乾淨的現貨帳戶公式，僅對元大期貨套用動態保證金與淨值計算
                 for idx, row in account_data.iterrows():
                     acc_name = str(row['帳戶名稱']).strip()
                     if "元大期貨" in acc_name:
@@ -821,7 +820,6 @@ elif page == "第四頁：部位監控與量化風控":
                 }).background_gradient(subset=["槓桿率 (倍)"], cmap="Reds").background_gradient(subset=["權益比率%/現金水位%"], cmap="RdYlGn")
                 st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
-            st.markdown---) if False else None
             st.markdown("---")
             st.subheader("🎯 微觀持倉、Beta 值與精細產業即時損益追蹤")
             if not df.empty:
