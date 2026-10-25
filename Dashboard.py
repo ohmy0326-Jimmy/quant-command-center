@@ -403,23 +403,68 @@ elif page == "第二頁：板塊資金輪動":
 elif page == "第三頁：重大行事曆與會展":
     c1, c2 = st.columns([0.85, 0.15])
     with c1:
-        st.title("📅 第三頁：重大行事曆與總經指標戰情室 (AI 經理人風控導航)")
+        st.title("📅 第三頁：重大行事曆與 M7 財報戰情室 (AI 經理人風控導航)")
     with c2:
         st.write("")
         if st.button("🔄 重新整理", key="refresh_p3", use_container_width=True):
             st.rerun()
     st.markdown("---")
-    st.info("💡 系統自動過濾未來 3 個月內的 FOMC 決議、CPI/PCE 通膨、就業魔王數據與台股總經指標。")
+    st.info("💡 系統自動整合未來 3 個月內的 FOMC 決議、CPI/PCE 通膨、就業魔王數據以及美股 M7 科技巨頭（AAPL、MSFT、NVDA、GOOGL、AMZN、META、TSLA）財報行事曆。")
 
     today = datetime.now().date()
     three_months_later = today + timedelta(days=90)
 
-    events_data = [
+    # 動態抓取 M7 財報日的輔助函式
+    @st.cache_data(ttl=3600)
+    def get_m7_earnings_events():
+        m7_dict = {
+            "AAPL": "Apple (蘋果)",
+            "MSFT": "Microsoft (微軟)",
+            "NVDA": "NVIDIA (輝達)",
+            "GOOGL": "Alphabet (Google)",
+            "AMZN": "Amazon (亞馬遜)",
+            "META": "Meta (臉書)",
+            "TSLA": "Tesla (特斯拉)"
+        }
+        events = []
+        for ticker, name in m7_dict.items():
+            try:
+                t_obj = yf.Ticker(ticker)
+                cal = t_obj.calendar
+                # 嘗試從 yfinance calendar 取得財報日
+                earnings_date = None
+                if isinstance(cal, dict):
+                    # 有時候 earnings date 在 dict key 中
+                    for k in cal.keys():
+                        if 'earnings' in k.lower():
+                            val = cal[k]
+                            if isinstance(val, list) and len(val) > 0:
+                                earnings_date = pd.to_datetime(val[0]).date()
+                            elif isinstance(val, (datetime, pd.Timestamp)):
+                                earnings_date = val.date()
+                elif hasattr(cal, 'loc') and not cal.empty:
+                    # 若為 DataFrame
+                    if 'Earnings Date' in cal.index:
+                        val = cal.loc['Earnings Date'].iloc[0]
+                        earnings_date = pd.to_datetime(val).date()
+                
+                if earnings_date:
+                    date_str = earnings_date.strftime("%Y-%m-%d")
+                    events.append({
+                        "日期": date_str,
+                        "項目": f"美股 M7 財報：{name} ({ticker})",
+                        "影響": f"左右全球 AI 資本支出、科技股情緒與相關供應鏈（如半導體、伺服器）連動"
+                    })
+            except:
+                pass
+        return events
+
+    # 基礎總經事件清單
+    base_events = [
         {"日期": "2026-10-25", "項目": "美國 PCE 物價指數公佈", "影響": "Fed 通膨目標核心觀測與降息路徑判定"},
         {"日期": "2026-10-29", "項目": "FOMC 利率決議與華許聲明 (清晨02:00)", "影響": "全市場基準利率調整、流動性與債市/股市大震盪"},
         {"日期": "2026-11-06", "項目": "美國 10 月非農就業報告 (NFP) & 失業率", "影響": "每月就業數據魔王，左右經濟軟著陸預期"},
         {"日期": "2026-11-12", "項目": "美國 10 月消費者物價指數 (CPI)", "影響": "終端通膨黏著度，直接影響 Fed 下一步利率走向"},
-        {"日期": "2026-11-15", "項目": "NVIDIA (NVDA) Q3 財報公布", "影響": "AI 硬體供應鏈、半導體板塊 (SOX/SOXL) 命脈"},
         {"日期": "2026-11-20", "項目": "台指期結算日 (11月)", "影響": "台股期貨與選擇權短線結算波動"},
         {"日期": "2026-12-04", "項目": "美國 11 月非農就業報告 (NFP) & 失業率", "影響": "年底前最重要的勞動市場體檢"},
         {"日期": "2026-12-10", "項目": "FOMC 利率決議與華許聲明 (清晨02:00)", "影響": "年底前關鍵利率決議與跨年資金定價"},
@@ -430,10 +475,16 @@ elif page == "第三頁：重大行事曆與會展":
         {"日期": "2027-01-15", "項目": "台積電 (2330) 法人說明會", "影響": "台股大盤、半導體供應鏈、全球 AI 資本支出風向"}
     ]
 
-    filtered_events = [ev for ev in events_data if today <= datetime.strptime(ev["日期"], "%Y-%m-%d").date() <= three_months_later]
+    # 合併總經事件與動態抓取的 M7 財報事件
+    m7_events = get_m7_earnings_events()
+    all_events = base_events + m7_events
+
+    # 依照日期排序並過濾未來 3 個月內
+    filtered_events = [ev for ev in all_events if today <= datetime.strptime(ev["日期"], "%Y-%m-%d").date() <= three_months_later]
+    filtered_events.sort(key=lambda x: x["日期"])
 
     if filtered_events:
-        st.markdown("### 📌 未來 3 個月重大總經事件與 AI 經理人戰術指導")
+        st.markdown("### 📌 未來 3 個月重大總經與 M7 財報事件排程")
         for idx, ev in enumerate(filtered_events):
             event_key = f"{ev['日期']}_{ev['項目']}"
             with st.container():
@@ -449,7 +500,7 @@ elif page == "第三頁：重大行事曆與會展":
                                 client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
                                 res = client.models.generate_content(
                                     model='gemini-3.8-flash', 
-                                    contents=f"身為避險基金經理人，面對即將到來的總經事件：【{ev['項目']}】（影響層面：{ev['影響']}），請給我 2 點精煉、具體且直接可執行的資產配置與風控建議。"
+                                    contents=f"身為避險基金經理人，面對即將到來的重大財報或總經事件：【{ev['項目']}】（影響層面：{ev['影響']}），請給我 2 點精煉、具體且直接可執行的資產配置與風控建議。"
                                 )
                                 st.session_state.ai_memo_p3[event_key] = {"text": res.text, "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
                             except Exception as e:
