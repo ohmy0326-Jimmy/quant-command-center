@@ -641,29 +641,21 @@ elif page == "第四頁：部位監控與量化風控":
         ]
         import json
         
-        key_data = None
-        raw_val = os.environ.get("GCP_KEY_JSON", "") or os.environ.get("GOOGLE_SERVICE_KEY_JSON", "")
-        raw_val = raw_val.strip()
-        
-        if not raw_val:
-            try:
-                from google.cloud import secretmanager
-                client_sm = secretmanager.SecretManagerServiceClient()
-                project_id = "quant-dashboard-512010"
-                secret_name = f"projects/{project_id}/secrets/google-service-key/versions/latest"
-                response = client_sm.access_secret_version(request={"name": secret_name})
-                raw_val = response.payload.data.decode("UTF-8").strip()
-            except Exception:
-                pass
-
-        if not raw_val:
+        # 在 Streamlit Cloud 上直接讀取 st.secrets
+        try:
             key_data = dict(st.secrets["google_key"])
-        else:
-            if raw_val.startswith('\ufeff'):
-                raw_val = raw_val[1:]
-            if (raw_val.startswith("'") and raw_val.endswith("'")) or (raw_val.startswith('"') and raw_val.endswith('"')):
-                raw_val = raw_val[1:-1].strip()
-            key_data = json.loads(raw_val)
+        except Exception as e:
+            # 若本地或環境有其他備援
+            raw_val = os.environ.get("GCP_KEY_JSON", "") or os.environ.get("GOOGLE_SERVICE_KEY_JSON", "")
+            if raw_val.strip():
+                raw_val = raw_val.strip()
+                if raw_val.startswith('\ufeff'):
+                    raw_val = raw_val[1:]
+                if (raw_val.startswith("'") and raw_val.endswith("'")) or (raw_val.startswith('"') and raw_val.endswith('"')):
+                    raw_val = raw_val[1:-1].strip()
+                key_data = json.loads(raw_val)
+            else:
+                raise Exception(f"無法載入 Google 憑證: {e}")
 
         creds = ServiceAccountCredentials.from_json_keyfile_dict(key_data, scope)
         client = gspread.authorize(creds)
