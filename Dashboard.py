@@ -23,7 +23,6 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD") or st.secrets.get("passwords",
 def check_password():
     """驗證密碼是否正確"""
     def password_entered():
-        # 加上防護：確保 session_state 裡有 password 鍵值才進行比對
         if "password" in st.session_state and st.session_state["password"] == ADMIN_PASSWORD:
             st.session_state["password_correct"] = True
             del st.session_state["password"]
@@ -48,6 +47,27 @@ def check_password():
 
 if not check_password():
     st.stop()
+
+# ==========================================
+# 共用 Telegram 推播輔助函式
+# ==========================================
+def send_to_telegram(title, text_content):
+    """共用的 Telegram 推播輔助函式，讓各頁面 AI 報告都能一鍵手動推播"""
+    try:
+        bot_token = os.environ.get("TELEGRAM_BOT_TOKEN") or st.secrets.get("telegram", {}).get("bot_token", "") or st.secrets.get("TELEGRAM_BOT_TOKEN", "")
+        chat_id = os.environ.get("TELEGRAM_CHAT_ID") or st.secrets.get("telegram", {}).get("chat_id", "") or st.secrets.get("TELEGRAM_CHAT_ID", "")
+        
+        if bot_token and chat_id:
+            tg_msg = f"🤖 **【{title}】**\n\n{text_content}"
+            res = requests.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", json={"chat_id": chat_id, "text": tg_msg}, timeout=5)
+            if res.status_code == 200:
+                st.success("✅ 成功推播至 Telegram！")
+            else:
+                st.error(f"❌ 推播失敗，回應碼：{res.status_code}")
+        else:
+            st.warning("⚠️ 尚未設定 Telegram Bot Token 或 Chat ID。")
+    except Exception as e:
+        st.error(f"❌ 發生例外錯誤：{e}")
 
 # 初始化 Session State
 if 'ai_memo_p1' not in st.session_state:
@@ -165,7 +185,7 @@ if page == "第一頁：總經與風險鬧鐘":
                             2. 今日操作提醒（應對當前環境的現金水位或避險方針）。
                             請給出專業、直擊重點的繁體中文建議。
                             """
-                            res = client.models.generate_content(model='gemini-3.8-flash', contents=p_text)
+                            res = client.models.generate_content(model='gemini-2.5-flash', contents=p_text)
                             st.session_state.ai_memo_p1["text"] = res.text
                             st.session_state.ai_memo_p1["time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         except Exception as e:
@@ -175,6 +195,9 @@ if page == "第一頁：總經與風險鬧鐘":
                     st.markdown("---")
                     st.info(f"📌 **最新總經晨報 (生成時間：{st.session_state.ai_memo_p1['time']})**")
                     st.markdown(st.session_state.ai_memo_p1["text"])
+                    
+                    if st.button("📤 推播此總經晨報到 Telegram", key="btn_tg_p1"):
+                        send_to_telegram("AI 總經晨報與操盤提醒", st.session_state.ai_memo_p1["text"])
                                 
             st.markdown("---")
 
@@ -396,7 +419,7 @@ elif page == "第二頁：板塊與主題資金輪動":
                         client = genai.Client(api_key=gemini_key)
                         summary_table = df_sectors[['代號', '板塊名稱', '日漲跌幅 (%)', '月漲跌幅 (%)', '前十大核心持股與佔比 (1-10 排序)']].to_string(index=False)
                         prompt_p2 = f"身為頂級美股對沖基金經理人。以下是我剛剛透過華爾街即時抓取整理的 11 大板塊與軟體(IGV)/硬體(SOXX)/太空(UFO)主題ETF數據：\n{summary_table}\n請給予我 1.資金流向與主題輪動解讀 2.強勢板塊/主題推薦 3.脆弱板塊風險提示。"
-                        res_p2 = client.models.generate_content(model='gemini-3.8-flash', contents=prompt_p2)
+                        res_p2 = client.models.generate_content(model='gemini-2.5-flash', contents=prompt_p2)
                         st.session_state.ai_memo_p2["text"] = res_p2.text
                         st.session_state.ai_memo_p2["time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     except Exception as e:
@@ -406,6 +429,9 @@ elif page == "第二頁：板塊與主題資金輪動":
                 st.markdown("---")
                 st.info(f"📌 **最新板塊與主題分析 (生成時間：{st.session_state.ai_memo_p2['time']})**")
                 st.markdown(st.session_state.ai_memo_p2["text"])
+                
+                if st.button("📤 推播此板塊分析到 Telegram", key="btn_tg_p2"):
+                    send_to_telegram("AI 板塊與主題資金輪動深度分析", st.session_state.ai_memo_p2["text"])
                     
         except Exception as e:
             st.error(f"板塊與主題 ETF 資料抓取失敗: {e}")
@@ -508,7 +534,7 @@ elif page == "第三頁：重大行事曆與會展":
                                     gemini_key = os.environ.get("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")
                                     client = genai.Client(api_key=gemini_key)
                                     res = client.models.generate_content(
-                                        model='gemini-3.8-flash', 
+                                        model='gemini-2.5-flash', 
                                         contents=f"身為避險基金經理人，面對即將到來的重大財報或總經事件：【{ev['項目']}】（影響層面：{ev['影響']}），請給我 2 點精煉、具體且直接可執行的資產配置與風控建議。"
                                     )
                                     st.session_state.ai_memo_p3[event_key] = {"text": res.text, "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
@@ -532,6 +558,10 @@ elif page == "第三頁：重大行事曆與會展":
                     memo = st.session_state.ai_memo_p3[event_key]
                     st.info(f"📌 **最新戰術建議 (生成時間：{memo['time']})**")
                     st.markdown(memo["text"])
+                    
+                    if st.button(f"📤 推播此事件戰術建議到 Telegram", key=f"btn_tg_p3_{idx}"):
+                        send_to_telegram(f"行事曆戰術建議：{ev['項目']}", memo["text"])
+                        
             st.markdown("---")
     else:
         st.info("目前未來 3 個月內無登錄的重大排程事件。")
@@ -609,26 +639,31 @@ elif page == "第四頁：部位監控與量化風控":
             "https://spreadsheets.google.com/feeds",
             "https://www.googleapis.com/auth/drive"
         ]
-        
-        # 優先從環境變數或 Secret Manager 讀取，若無則降級讀取本機 secrets
         import json
-        key_data = None
         
-        # 1. 嘗試從環境變數或 Secret Manager 掛載點讀取
-        if "GOOGLE_SERVICE_KEY_JSON" in os.environ:
-            key_data = json.loads(os.environ["GOOGLE_SERVICE_KEY_JSON"])
-        else:
+        key_data = None
+        raw_val = os.environ.get("GCP_KEY_JSON", "") or os.environ.get("GOOGLE_SERVICE_KEY_JSON", "")
+        raw_val = raw_val.strip()
+        
+        if not raw_val:
             try:
-                # 2. 嘗試從 Google Secret Manager API 直接動態讀取
                 from google.cloud import secretmanager
                 client_sm = secretmanager.SecretManagerServiceClient()
                 project_id = "quant-dashboard-512010"
                 secret_name = f"projects/{project_id}/secrets/google-service-key/versions/latest"
                 response = client_sm.access_secret_version(request={"name": secret_name})
-                key_data = json.loads(response.payload.data.decode("UTF-8"))
+                raw_val = response.payload.data.decode("UTF-8").strip()
             except Exception:
-                # 3. 若皆失敗，降級讀取原本本機的 st.secrets
-                key_data = dict(st.secrets["google_key"])
+                pass
+
+        if not raw_val:
+            key_data = dict(st.secrets["google_key"])
+        else:
+            if raw_val.startswith('\ufeff'):
+                raw_val = raw_val[1:]
+            if (raw_val.startswith("'") and raw_val.endswith("'")) or (raw_val.startswith('"') and raw_val.endswith('"')):
+                raw_val = raw_val[1:-1].strip()
+            key_data = json.loads(raw_val)
 
         creds = ServiceAccountCredentials.from_json_keyfile_dict(key_data, scope)
         client = gspread.authorize(creds)
@@ -985,7 +1020,7 @@ elif page == "第四頁：部位監控與量化風控":
                         client = genai.Client(api_key=gemini_key)
                         positions_summary = df[['標的', '名稱', '產業別', 'Beta值', '真實風險權重 (%)', '標的槓桿', '報酬率 (%)']].to_string(index=False) if not df.empty else "無持倉"
                         prompt_text = f"總帳戶淨值: NT$ {total_net_liq:,.0f}\n合併總槓桿率: {global_leverage}x\n投資組合加權Beta: {portfolio_beta:.2f}\n總現金水位: {global_cash_pct}%\n持倉明細:\n{positions_summary}\n請給予 3 點風控建議。"
-                        response = client.models.generate_content(model='gemini-3.8-flash', contents=prompt_text)
+                        response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt_text)
                         st.session_state.ai_memo_p4["text"] = response.text
                         st.session_state.ai_memo_p4["time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     except Exception as e:
@@ -995,6 +1030,9 @@ elif page == "第四頁：部位監控與量化風控":
                 st.markdown("---")
                 st.info(f"📌 **最新風控審查 (生成時間：{st.session_state.ai_memo_p4['time']})**")
                 st.markdown(st.session_state.ai_memo_p4["text"])
+                
+                if st.button("📤 推播此風控審查到 Telegram", key="btn_tg_p4"):
+                    send_to_telegram("AI 經理人風控與壓力測試審查", st.session_state.ai_memo_p4["text"])
 
         except Exception as e:
             st.error(f"連線發生錯誤。系統訊息: {e}")
