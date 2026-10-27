@@ -1,4 +1,5 @@
 import os
+import logging
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -11,6 +12,167 @@ from google import genai
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from oauth2client.service_account import ServiceAccountCredentials
+
+logger = logging.getLogger("trading_dashboard")
+
+# Yahoo ^TNX（CBOE 10 年期公債）有兩種報價：
+# 舊制是殖利率指數，收盤價 = 殖利率（%）× 10，例如 49.86 代表 4.986%。
+# 新制直接以百分比報價，例如 4.986 代表 4.986%。
+# 2026-10 實測 chart API 的 regularMarketPrice 約 4.99，近五年日線約在 1.3–5.4，
+# 一律除以 10 會顯示成約 0.50%，並讓「殖利率 > 4.5 加分」不會觸發。
+# 現代 10 年債殖利率未曾站上 20%（1981 年高點約 15.8%），
+# 因此原始報價 > 20 才視為舊制指數並除以 10；否則已是百分比。
+# 舊制在殖利率低於 2% 時原始報價也會 <= 20，無法從單一數字分辨，這種情況維持不除。
+TNX_INDEX_QUOTE_THRESHOLD = 20.0
+DEFAULT_VIX = 15.0
+DEFAULT_TNX_YIELD_PERCENT = 4.0
+
+
+def tnx_quote_to_yield_percent(raw_close):
+    """把單筆 Yahoo ^TNX 收盤價轉成百分比殖利率，相容舊制指數與新制百分比。"""
+    value = float(raw_close)
+    if value > TNX_INDEX_QUOTE_THRESHOLD:
+        return value / 10.0
+    return value
+
+
+def tnx_series_to_yield_percent(series):
+    """整段歷史沿用最新有效報價的慣例，避免逐筆門檻把同一序列拆成兩種刻度。"""
+    values = pd.to_numeric(series, errors="coerce")
+    valid = values.dropna()
+    if not valid.empty and float(valid.iloc[-1]) > TNX_INDEX_QUOTE_THRESHOLD:
+        return values / 10.0
+    return values
+
+
+def last_valid_close(history_df):
+    """回傳最後一筆有效收盤價。空表或全為空值時丟出 ValueError，讓呼叫端改走預設值並示警。"""
+    if history_df is None or getattr(history_df, "empty", True) or "Close" not in getattr(history_df, "columns", []):
+        raise ValueError("歷史資料為空")
+    closes = pd.to_numeric(history_df["Close"], errors="coerce").dropna()
+    if closes.empty:
+        raise ValueError("收盤價為空")
+    return float(closes.iloc[-1])
+
+# 臺指期貨契約規格。乘數是每點新台幣；保證金是每口金額。
+# 2026-10-27 元大期貨微台（FMF）3 口：原始 35,050×3＝105,150、維持 26,900×3＝80,700。
+# 交易所調整保證金時改這裡，或在持倉表填該列「原始保證金」「維持保證金」總額覆寫。
+# TMF 與 FMF 同為微型臺指，沿用每點 10 元。
+FUTURES_CONTRACT_SPECS = {
+    "FMF": {"multiplier": 10.0, "initial_margin": 35050.0, "maintenance_margin": 26900.0},
+    "TMF": {"multiplier": 10.0, "initial_margin": 35050.0, "maintenance_margin": 26900.0},
+    "MTX": {"multiplier": 50.0, "initial_margin": 175250.0, "maintenance_margin": 134500.0},
+    "TX": {"multiplier": 200.0, "initial_margin": 701000.0, "maintenance_margin": 538000.0},
+}
+# 未列在上表的期貨沿用原本的乘數，避免不知名商品的損益突然變成 0。
+DEFAULT_FUTURES_MULTIPLIER = 2000.0
+
+
+def futures_multiplier(symbol):
+    spec = FUTURES_CONTRACT_SPECS.get(str(symbol).upper())
+    if spec:
+        return float(spec["multiplier"])
+    return DEFAULT_FUTURES_MULTIPLIER
+
+
+def futures_notional(symbol, price, qty):
+    """契約名目曝險（含正負號）＝乘數 × 價格 × 口數。"""
+    return futures_multiplier(symbol) * float(price) * float(qty)
+
+
+def futures_open_pnl(symbol, price, avg_cost, qty):
+    """未平倉損益＝（價格 − 平均成本）× 口數 × 乘數。"""
+    return (float(price) - float(avg_cost)) * float(qty) * futures_multiplier(symbol)
+
+
+def _supplied_number(value):
+    """試算表有填數字才算券商填報；空白、None、NaN 都視為未填。"""
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except TypeError:
+        pass
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def series_optional_number(frame, column):
+    """讀選填欄位。沒有該欄、空白或無法解析時為 NaN，不把 0 和缺值混在一起。"""
+    if frame is None or column not in getattr(frame, "columns", []):
+        index = getattr(frame, "index", None)
+        return pd.Series(np.nan, index=index, dtype="float64")
+    raw = frame[column]
+    if not pd.api.types.is_numeric_dtype(raw):
+        raw = raw.astype(str).str.replace(",", "", regex=False).str.strip()
+        raw = raw.replace({"": np.nan, "None": np.nan, "nan": np.nan, "NaN": np.nan, "-": np.nan, "—": np.nan})
+    return pd.to_numeric(raw, errors="coerce")
+
+
+# 試算表「名目曝險」與即時契約名目差超過這個比例才提示。盤中價格小幅移動不提示。
+FUTURES_NOTIONAL_GAP_RATIO = 0.05
+
+
+def resolve_futures_account(
+    sheet_equity,
+    sheet_excess,
+    initial_margin,
+    maintenance_margin,
+    unrealized_pnl,
+    live_notional,
+    sheet_notional=None,
+    override_equity=None,
+    override_excess=None,
+):
+    """期貨帳戶沿用試算表現有欄位，不重算權益數。
+
+    預設（Active_Positions 的五欄）：權益數＝帳戶淨值，可動用保證金＝現金餘額。
+    權益比率＝權益數 ÷ 原始保證金 × 100%。槓桿＝即時名目曝險 ÷ 權益數。
+    選填欄「權益數」「可動用保證金」只有在有填數字時才覆寫。
+    未平倉損益只回傳供對照，不加入權益數。
+    """
+    supplied_equity = _supplied_number(override_equity)
+    supplied_excess = _supplied_number(override_excess)
+    equity = supplied_equity if supplied_equity is not None else _supplied_number(sheet_equity)
+    excess = supplied_excess if supplied_excess is not None else _supplied_number(sheet_excess)
+    initial_margin = float(initial_margin or 0.0)
+    maintenance_margin = float(maintenance_margin or 0.0)
+    unrealized_pnl = float(unrealized_pnl or 0.0)
+    live = float(live_notional or 0.0)
+    sheet_n = _supplied_number(sheet_notional)
+    if equity is None or initial_margin == 0:
+        equity_ratio = float("nan")
+    else:
+        equity_ratio = equity / initial_margin * 100.0
+    if equity is None or equity == 0:
+        leverage = float("nan")
+    else:
+        leverage = live / equity
+    if sheet_n is None or sheet_n == 0:
+        gap = float("nan")
+    else:
+        gap = abs(live - sheet_n) / abs(sheet_n)
+    return {
+        "equity": float("nan") if equity is None else float(equity),
+        "equity_source": "選填欄「權益數」" if supplied_equity is not None else "試算表「帳戶淨值」",
+        "excess": float("nan") if excess is None else float(excess),
+        "excess_source": "選填欄「可動用保證金」" if supplied_excess is not None else "試算表「現金餘額」",
+        "initial_margin": initial_margin,
+        "maintenance_margin": maintenance_margin,
+        "unrealized_pnl": unrealized_pnl,
+        "live_notional": live,
+        "sheet_notional": float("nan") if sheet_n is None else float(sheet_n),
+        "notional_gap": gap,
+        "equity_ratio": equity_ratio,
+        "leverage": leverage,
+    }
+
+
+def is_futures_account_name(name):
+    return "期貨" in str(name)
 
 # ==========================================
 # 網頁基本設定與密碼驗證防護（支援環境變數與 Secret）
@@ -118,28 +280,51 @@ if page == "第一頁：總經與風險鬧鐘":
 
     with st.spinner('📡 正在從華爾街精準抓取 1 年期總經日K與風險指標...'):
         try:
-            vix_df = yf.Ticker("^VIX").history(period="5d")
-            vix_val = float(vix_df['Close'].iloc[-1]) if not vix_df.empty else 15.0
-            
-            tnx_df = yf.Ticker("^TNX").history(period="5d")
-            tnx_val = float(tnx_df['Close'].iloc[-1]) / 10.0 if not tnx_df.empty else 4.0
-            
-            risk_score = 0
+            vix_is_fallback = False
+            tnx_is_fallback = False
+
+            try:
+                vix_val = last_valid_close(yf.Ticker("^VIX").history(period="5d"))
+            except Exception:
+                logger.exception("抓取 VIX 恐慌指數（^VIX）失敗，改用預設值 %.2f", DEFAULT_VIX)
+                vix_val = DEFAULT_VIX
+                vix_is_fallback = True
+                st.warning("⚠️ VIX 恐慌指數（^VIX）抓取失敗，已改用預設值 15.00。此數值為回退預設，不代表即時市價，風險分數可能失真。")
+
+            try:
+                tnx_val = tnx_quote_to_yield_percent(last_valid_close(yf.Ticker("^TNX").history(period="5d")))
+            except Exception:
+                logger.exception("抓取美國 10 年公債殖利率（^TNX）失敗，改用預設值 %.2f%%", DEFAULT_TNX_YIELD_PERCENT)
+                tnx_val = DEFAULT_TNX_YIELD_PERCENT
+                tnx_is_fallback = True
+                st.warning("⚠️ 美國 10 年公債殖利率（^TNX）抓取失敗，已改用預設值 4.00%。此數值為回退預設，不代表即時殖利率，風險分數可能失真。")
+
+            # 分數只來自兩項：VIX 最高 4 分、10 年債殖利率最高 2 分，滿分 6。
+            vix_points = 4 if vix_val > 25 else (2 if vix_val > 20 else 0)
+            tnx_points = 2 if tnx_val > 4.5 else 0
+            risk_score = vix_points + tnx_points
+            risk_score_max = 6
             risk_labels = []
-            
-            if vix_val > 25:
-                risk_score += 4
-                risk_labels.append(f"🚨 VIX 市場極度恐慌 ({vix_val:.2f} > 25)")
-            elif vix_val > 20:
-                risk_score += 2
-                risk_labels.append(f"⚠️ VIX 恐慌指數偏高 ({vix_val:.2f} > 20)")
-                
-            if tnx_val > 4.5:
-                risk_score += 2
-                risk_labels.append(f"⚠️ 10年債殖利率處於高檔 ({tnx_val:.2f}% > 4.5%)")
-                
-            st.markdown("### 🛡️ 宏觀市場風險計分板 (標準化評估)")
-            rc1, rc2, rc3 = st.columns([1.5, 2, 4.5])
+
+            if vix_points == 4:
+                risk_labels.append(f"🚨 VIX 市場極度恐慌 ({vix_val:.2f} > 25，+4 分)")
+            elif vix_points == 2:
+                risk_labels.append(f"⚠️ VIX 恐慌指數偏高 ({vix_val:.2f} > 20，+2 分)")
+
+            if tnx_points == 2:
+                risk_labels.append(f"⚠️ 10年債殖利率處於高檔 ({tnx_val:.2f}% > 4.5%，+2 分)")
+
+            vix_tag = "（預設值）" if vix_is_fallback else ""
+            tnx_tag = "（預設值）" if tnx_is_fallback else ""
+
+            st.markdown("### 🛡️ 宏觀市場風險計分板（僅 VIX 與美國 10 年債）")
+            st.caption(
+                "此分數不是全市場綜合評分，只計入兩個因子，滿分 6 分："
+                "VIX 恐慌指數最高 4 分（>25 得 4 分、>20 得 2 分、其餘 0 分）；"
+                "美國 10 年公債殖利率最高 2 分（>4.5% 得 2 分、其餘 0 分）。"
+                "美元指數、匯率、美股、台股、原油與黃金都不計入。"
+            )
+            rc1, rc2, rc3 = st.columns([1.5, 2.2, 4.3])
             with rc1:
                 if risk_score <= 1:
                     st.success("🟢 市場氣氛：【風險偏好 (Risk-On)】")
@@ -148,12 +333,23 @@ if page == "第一頁：總經與風險鬧鐘":
                 else:
                     st.error("🔴 市場氣氛：【高風險警戒 (Risk-Off)】")
             with rc2:
-                st.metric("當前綜合風險評分", f"{risk_score} / 6 分", f"VIX: {vix_val:.2f} | 債息: {tnx_val:.2f}%")
+                st.metric(
+                    "VIX＋10年債風險評分",
+                    f"{risk_score} / {risk_score_max} 分",
+                    f"VIX {vix_points}/4 分 + 10年債 {tnx_points}/2 分",
+                    delta_color="off",
+                    help="只計 VIX（最高 4 分）與美國 10 年公債殖利率（最高 2 分），滿分 6 分。",
+                )
             with rc3:
+                st.markdown(
+                    f"- **VIX 恐慌指數**：{vix_val:.2f}{vix_tag} → **{vix_points} / 4 分**\n"
+                    f"- **10 年公債殖利率**：{tnx_val:.2f}%{tnx_tag} → **{tnx_points} / 2 分**\n"
+                    f"- **合計**：{risk_score} / {risk_score_max} 分"
+                )
                 if risk_labels:
                     st.error(" | ".join(risk_labels))
                 else:
-                    st.info("✅ 目前無重大宏觀警訊，市場流動性與波動率維持健康 (Risk-On)。")
+                    st.info("✅ 上述兩項因子目前皆未達加分門檻（VIX ≤ 20，且 10 年債殖利率 ≤ 4.5%）。")
                     
             st.markdown("---")
             
@@ -163,23 +359,38 @@ if page == "第一頁：總經與風險鬧鐘":
                         try:
                             gemini_key = os.environ.get("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")
                             client = genai.Client(api_key=gemini_key)
-                            snapshot_str = f"- VIX恐慌指數: {vix_val:.2f}\n- 10年公債殖利率: {tnx_val:.2f}%\n"
+                            vix_note = "（預設回退值，非即時報價）" if vix_is_fallback else ""
+                            tnx_note = "（預設回退值，非即時報價）" if tnx_is_fallback else ""
+                            snapshot_str = (
+                                f"- VIX恐慌指數: {vix_val:.2f}{vix_note}\n"
+                                f"- 10年公債殖利率: {tnx_val:.2f}%{tnx_note}\n"
+                            )
                             
                             for k, t in indicators.items():
                                 try:
                                     s_df = yf.Ticker(t).history(period="5d")
-                                    if not s_df.empty:
-                                        c_val = float(s_df['Close'].iloc[-1])
-                                        p_val = float(s_df['Close'].iloc[-2])
-                                        pct_chg = ((c_val - p_val) / p_val) * 100
-                                        snapshot_str += f"- {k}: {c_val:,.2f} ({pct_chg:+.2f}%)\n"
-                                except:
-                                    pass
+                                    if s_df.empty or "Close" not in s_df.columns or len(s_df) < 2:
+                                        raise ValueError("歷史資料不足")
+                                    closes = tnx_series_to_yield_percent(s_df["Close"]) if t == "^TNX" else s_df["Close"]
+                                    valid_closes = pd.to_numeric(closes, errors="coerce").dropna()
+                                    if len(valid_closes) < 2:
+                                        raise ValueError("有效收盤價不足")
+                                    c_val = float(valid_closes.iloc[-1])
+                                    p_val = float(valid_closes.iloc[-2])
+                                    if p_val == 0:
+                                        raise ValueError("前收為 0")
+                                    pct_chg = ((c_val - p_val) / p_val) * 100
+                                    snapshot_str += f"- {k}: {c_val:,.2f} ({pct_chg:+.2f}%)\n"
+                                except Exception:
+                                    logger.exception("總經快照 %s（%s）抓取失敗", k, t)
+                                    snapshot_str += f"- {k}: 抓取失敗（未納入，無預設值）\n"
+                                    st.warning(f"⚠️ {k}（{t}）即時快照抓取失敗，AI 晨報不含此項即時數據，且未代入預設數字。")
                                     
                             p_text = f"""
                             你是一位頂級美股對沖基金經理人。以下是我剛剛抓取的今日市場核心總經數據即時快照：
                             {snapshot_str}
                             
+                            其中「VIX恐慌指數」與「10年公債殖利率」是風險計分實際採用的百分比數值（若標註預設回退值，代表該來源抓取失敗）。
                             請針對目前的波動率、債市殖利率與跨市場表現，為我提供一份精煉的「今日總經晨報」，包含：
                             1. 宏觀解讀（資金流向與潛在風險）。
                             2. 今日操作提醒（應對當前環境的現金水位或避險方針）。
@@ -205,7 +416,13 @@ if page == "第一頁：總經與風險鬧鐘":
             for idx, (name, ticker) in enumerate(indicators.items()):
                 try:
                     df_item = yf.Ticker(ticker).history(period="1y")
-                    if not df_item.empty:
+                    if df_item.empty:
+                        logger.error("總經指標 %s（%s）歷史資料為空，圖表略過", name, ticker)
+                        st.warning(f"⚠️ {name}（{ticker}）資料抓取失敗或為空，此圖表已略過，未使用預設價格。")
+                    else:
+                        if ticker == "^TNX":
+                            df_item = df_item.copy()
+                            df_item["Close"] = tnx_series_to_yield_percent(df_item["Close"])
                         df_item['MA5'] = df_item['Close'].rolling(window=5).mean()
                         df_item['MA20'] = df_item['Close'].rolling(window=20).mean()
                         df_item['MA60'] = df_item['Close'].rolling(window=60).mean()
@@ -213,6 +430,14 @@ if page == "第一頁：總經與風險鬧鐘":
                         
                         curr = float(df_item['Close'].iloc[-1])
                         prev = float(df_item['Close'].iloc[-2])
+                        if pd.isna(curr) or pd.isna(prev):
+                            valid_close = pd.to_numeric(df_item['Close'], errors='coerce').dropna()
+                            if len(valid_close) < 2:
+                                raise ValueError("有效收盤價不足")
+                            curr = float(valid_close.iloc[-1])
+                            prev = float(valid_close.iloc[-2])
+                        # BZ=F（布蘭特原油）換月時，Yahoo 連續合約的前後收盤可能來自不同月份，
+                        # 單日漲跌幅會出現與現貨不符的假性跳動；此處仍依原始收盤價計算，不另作調整。
                         pct = ((curr - prev) / prev) * 100
                         
                         with cols[idx % 2]:
@@ -233,8 +458,9 @@ if page == "第一頁：總經與風險鬧鐘":
                                 template="plotly_dark"
                             )
                             st.plotly_chart(fig, use_container_width=True)
-                except:
-                    pass
+                except Exception:
+                    logger.exception("總經指標 %s（%s）圖表載入失敗", name, ticker)
+                    st.warning(f"⚠️ {name}（{ticker}）資料抓取失敗，此圖表已略過，未使用預設價格。")
         except Exception as e:
             st.error(f"總經圖表載入失敗: {e}")
 
@@ -305,9 +531,15 @@ elif page == "第二頁：板塊與主題資金輪動":
                 formatted_str = ", ".join([f"{idx+1}. {s} ({w:.1f}%)" for idx, (s, w) in enumerate(holdings_list[:10])])
                 if formatted_str:
                     return formatted_str
-        except:
-            pass
-        return fallback_top10.get(ticker_symbol, "資料同步中...")
+            logger.warning("ETF %s 前十大持股為空，改用內建預設名單", ticker_symbol)
+        except Exception:
+            logger.exception("抓取 ETF %s 前十大持股失敗，改用內建預設名單", ticker_symbol)
+        fallback = fallback_top10.get(ticker_symbol)
+        if fallback:
+            st.warning(f"⚠️ {ticker_symbol} 前十大持股抓取失敗，已改用內建預設名單（非即時持股）。")
+            return f"（預設名單）{fallback}"
+        st.warning(f"⚠️ {ticker_symbol} 前十大持股抓取失敗，且無內建預設名單。")
+        return "資料同步中（抓取失敗，無預設名單）"
 
     with st.spinner("📡 正在從華爾街同步板塊與主題 ETF 之日K、多均線與持股結構數據..."):
         try:
@@ -350,6 +582,9 @@ elif page == "第二頁：板塊與主題資金輪動":
                         "月漲跌幅 (%)": round(monthly_pct, 2),
                         "前十大核心持股與佔比 (1-10 排序)": top10_str
                     })
+                else:
+                    logger.error("板塊 ETF %s（%s）歷史資料為空，已略過", ticker, name)
+                    st.warning(f"⚠️ {name}（{ticker}）歷史資料抓取失敗或為空，此板塊已略過，未使用估算漲跌幅。")
             
             df_sectors = pd.DataFrame(performance_list).sort_values(by="月漲跌幅 (%)", ascending=False)
             
@@ -465,6 +700,7 @@ elif page == "第三頁：重大行事曆與會展":
             "TSLA": "Tesla (特斯拉)"
         }
         events = []
+        failed = []
         for ticker, name in m7_dict.items():
             try:
                 t_obj = yf.Ticker(ticker)
@@ -490,9 +726,12 @@ elif page == "第三頁：重大行事曆與會展":
                         "項目": f"美股 M7 財報：{name} ({ticker})",
                         "影響": f"左右全球 AI 資本支出、科技股情緒與相關供應鏈（如半導體、伺服器）連動"
                     })
-            except:
-                pass
-        return events
+                else:
+                    logger.warning("%s（%s）財報日為空，未列入行事曆", name, ticker)
+            except Exception:
+                logger.exception("抓取 %s（%s）財報日失敗，此事件不列入行事曆", name, ticker)
+                failed.append(f"{name}（{ticker}）")
+        return events, failed
 
     base_events = [
         {"日期": "2026-10-25", "項目": "美國 PCE 物價指數公佈", "影響": "Fed 通膨目標核心觀測與降息路徑判定"},
@@ -509,7 +748,9 @@ elif page == "第三頁：重大行事曆與會展":
         {"日期": "2027-01-15", "項目": "台積電 (2330) 法人說明會", "影響": "台股大盤、半導體供應鏈、全球 AI 資本支出風向"}
     ]
 
-    m7_events = get_m7_earnings_events()
+    m7_events, m7_failed = get_m7_earnings_events()
+    if m7_failed:
+        st.warning("⚠️ 以下 M7 財報日抓取失敗，未列入行事曆，也未填入預設日期：" + "、".join(m7_failed))
     all_events = base_events + m7_events
 
     filtered_events = [ev for ev in all_events if today <= datetime.strptime(ev["日期"], "%Y-%m-%d").date() <= three_months_later]
@@ -596,6 +837,7 @@ elif page == "第四頁：部位監控與量化風控":
         }
         
         t_upper = str(ticker).upper()
+        sector_is_fallback = False
         if t_upper in detailed_sector_map:
             refined_sector = detailed_sector_map[t_upper]
         else:
@@ -610,11 +852,13 @@ elif page == "第四頁：部位監控與量化風控":
                     refined_sector = yf_sector
                 else:
                     refined_sector = "其他"
-            except:
+            except Exception:
+                logger.exception("抓取 %s 產業分類失敗，改用預設「其他與衍生品」", ticker)
                 refined_sector = "其他與衍生品"
+                sector_is_fallback = True
 
         if t_upper in ['TX', 'MTX', 'FMF']:
-            return 1.0, str(refined_sector)
+            return 1.0, str(refined_sector), sector_is_fallback, False
 
         try:
             benchmark = "^TWII" if is_tw else "^GSPC"
@@ -629,9 +873,10 @@ elif page == "第四頁：部位監控與量化風控":
                 beta = cov / var_bench if var_bench != 0 else 1.0
             else:
                 beta = 1.0
-            return float(round(beta, 2)), str(refined_sector)
-        except:
-            return 1.0, str(refined_sector)
+            return float(round(beta, 2)), str(refined_sector), sector_is_fallback, False
+        except Exception:
+            logger.exception("計算 %s Beta 失敗，改用預設 Beta 1.0", ticker)
+            return 1.0, str(refined_sector), sector_is_fallback, True
 
     @st.cache_data(ttl=60)
     def load_quant_database():
@@ -682,12 +927,16 @@ elif page == "第四頁：部位監控與量化風控":
         try:
             account_data, nav_data, quant_data = load_quant_database()
             try:
-                usdtwd_rate = float(yf.Ticker("USDTWD=X").history(period="1d")['Close'].iloc[-1])
-            except:
-                usdtwd_rate = 32.5 
+                usdtwd_rate = last_valid_close(yf.Ticker("USDTWD=X").history(period="1d"))
+            except Exception:
+                logger.exception("美元/台幣匯率（USDTWD=X）抓取失敗，改用預設值 32.5")
+                usdtwd_rate = 32.5
+                st.warning("⚠️ 美元/台幣匯率（USDTWD=X）抓取失敗，已改用預設值 32.50（預設值）。以下台幣換算使用此回退匯率，並非即時匯率。")
             
             df = quant_data.copy()
             df['標的'] = df['標的'].astype(str).str.strip().str.upper()
+            if '帳戶' in df.columns:
+                df['帳戶'] = df['帳戶'].astype(str).str.strip()
             df = df[df['標的'] != '']
             df['持有數量'] = pd.to_numeric(df['持有數量'], errors='coerce').fillna(0.0)
             df['平均成本'] = pd.to_numeric(df['平均成本'], errors='coerce').fillna(0.0)
@@ -701,49 +950,71 @@ elif page == "第四頁：部位監控與量化風控":
             
             acc_market_val_twd, acc_exp_twd, total_net_liq = pd.Series(dtype=float), pd.Series(dtype=float), 0.0
             acc_maint_margin = pd.Series(dtype=float)
+            acc_fut_pnl = pd.Series(dtype=float)
+            acc_fut_initial = pd.Series(dtype=float)
+            acc_fut_maint = pd.Series(dtype=float)
+            acc_fut_notional = pd.Series(dtype=float)
             
             if not df.empty:
                 df['換算匯率'] = np.where(df['種類'].astype(str).str.contains('美'), usdtwd_rate, 1.0).astype(float)
                 df['實質佔用本金(原幣)'] = df['名目合約總值(原幣)'].abs()
                 df['維持保證金(原幣)'] = 0.0
+                sheet_initial_margin = series_optional_number(df, "原始保證金")
+                sheet_maint_margin = series_optional_number(df, "維持保證金")
                 
                 for idx, row in df.iterrows():
                     if '期' in str(row['種類']):
                         t_str = str(row['標的']).upper()
-                        q_abs = abs(row['持有數量'])
-                        if t_str in ['TMF', 'FMF']: 
-                            df.at[idx, '實質佔用本金(原幣)'] = 35050.0 * q_abs
-                            df.at[idx, '維持保證金(原幣)'] = 26900.0 * q_abs
-                        elif t_str == 'MTX': 
-                            df.at[idx, '實質佔用本金(原幣)'] = 175250.0 * q_abs
-                            df.at[idx, '維持保證金(原幣)'] = 134500.0 * q_abs
-                        elif t_str == 'TX': 
-                            df.at[idx, '實質佔用本金(原幣)'] = 701000.0 * q_abs
-                            df.at[idx, '維持保證金(原幣)'] = 538000.0 * q_abs
-                        else: 
+                        q_abs = abs(float(row['持有數量']))
+                        spec = FUTURES_CONTRACT_SPECS.get(t_str)
+                        custom_initial = sheet_initial_margin.at[idx] if idx in sheet_initial_margin.index else np.nan
+                        custom_maint = sheet_maint_margin.at[idx] if idx in sheet_maint_margin.index else np.nan
+                        if pd.notna(custom_initial):
+                            df.at[idx, '實質佔用本金(原幣)'] = float(custom_initial)
+                        elif spec:
+                            df.at[idx, '實質佔用本金(原幣)'] = spec["initial_margin"] * q_abs
+                        else:
                             df.at[idx, '實質佔用本金(原幣)'] = abs(row['名目合約總值(原幣)']) * 0.135
+                        if pd.notna(custom_maint):
+                            df.at[idx, '維持保證金(原幣)'] = float(custom_maint)
+                        elif spec:
+                            df.at[idx, '維持保證金(原幣)'] = spec["maintenance_margin"] * q_abs
+                        else:
                             df.at[idx, '維持保證金(原幣)'] = abs(row['名目合約總值(原幣)']) * 0.11
 
                 try:
-                    twii_price = float(yf.Ticker("^TWII").history(period="1d")['Close'].iloc[-1])
-                except:
+                    twii_price = last_valid_close(yf.Ticker("^TWII").history(period="1d"))
+                except Exception:
+                    logger.exception("台灣加權指數（^TWII）抓取失敗，改用預設值 23000")
                     twii_price = 23000.0
+                    st.warning("⚠️ 台灣加權指數（^TWII）抓取失敗，期貨計價已改用預設值 23000（預設值），並非即時指數。")
 
                 tickers, prices, betas, sectors = df['標的'].unique().tolist(), {}, {}, {}
+                beta_fallback_notes = {}
+                price_fallback_tickers = []
+                quote_failure_tickers = []
                 for ticker in tickers:
                     try:
                         t_upper = str(ticker).upper()
                         if t_upper in ['TX', 'MTX', 'FMF', 'TMF']:
+                            # 這四個商品用加權指數現貨當計價。它和期貨成交價、券商結算價可能不同，未平倉損益會跟著差一截。
                             prices[ticker] = twii_price
                             betas[ticker] = 1.0
                             sectors[ticker] = "微型臺指期" if t_upper == 'FMF' else ("小型臺指" if t_upper == 'MTX' else "臺指期貨")
                             continue
 
                         is_tw_market = (t_upper in ['TE', 'TF']) or ('.TW' in t_upper) or ('.TWO' in t_upper) or (len(t_upper) == 3 and t_upper.isalpha())
-                        b_val, s_val = get_market_beta_and_sector(ticker, is_tw_market)
+                        b_val, s_val, sector_is_fallback, beta_is_fallback = get_market_beta_and_sector(ticker, is_tw_market)
                         
                         betas[ticker] = b_val
                         sectors[ticker] = s_val
+                        if beta_is_fallback or sector_is_fallback:
+                            parts = []
+                            if beta_is_fallback:
+                                parts.append("Beta 1.0（預設值）")
+                            if sector_is_fallback:
+                                parts.append(f"產業別「{s_val}」（預設值）")
+                            beta_fallback_notes[str(ticker)] = f"{ticker}：{'、'.join(parts)}"
                         
                         if is_tw_market:
                             try:
@@ -754,15 +1025,30 @@ elif page == "第四頁：部位監控與量化風控":
                                     prices[ticker] = float(match.group(1))
                                 else:
                                     prices[ticker] = float(yf.Ticker(ticker).history(period="1d")['Close'].iloc[-1])
-                            except:
+                            except Exception:
+                                logger.exception("台股 %s 網頁報價解析失敗，改以 yfinance 取得", ticker)
                                 prices[ticker] = float(yf.Ticker(ticker).history(period="1d")['Close'].iloc[-1])
                         else:
                             hist = yf.Ticker(ticker).history(period="5d")
                             prices[ticker] = float(hist['Close'].iloc[-1]) if not hist.empty else np.nan
-                    except:
+                        if pd.isna(prices.get(ticker, np.nan)):
+                            logger.error("%s 即時報價為空，將回退至平均成本", ticker)
+                            price_fallback_tickers.append(str(ticker))
+                    except Exception:
+                        logger.exception("抓取 %s 即時報價失敗，將回退至平均成本，Beta 暫以 1.0、產業別暫以「其他」", ticker)
                         prices[ticker] = np.nan
                         betas[ticker] = 1.0
                         sectors[ticker] = "其他"
+                        quote_failure_tickers.append(str(ticker))
+
+                for failed_ticker in quote_failure_tickers:
+                    beta_fallback_notes.pop(failed_ticker, None)
+                if beta_fallback_notes:
+                    st.warning("⚠️ 以下標的的市場資料抓取失敗，已改用預設值：" + "、".join(beta_fallback_notes.values()))
+                if price_fallback_tickers:
+                    st.warning("⚠️ 以下標的即時報價抓取失敗或為空，已改用平均成本作為回退價格（預設值，非即時市價）：" + "、".join(price_fallback_tickers))
+                if quote_failure_tickers:
+                    st.warning("⚠️ 以下標的報價抓取失敗：即時報價回退為平均成本（預設值），Beta 暫以 1.0（預設值）、產業別暫以「其他」（預設值）：" + "、".join(quote_failure_tickers))
                 
                 df['即時報價'] = df['標的'].map(prices)
                 df['即時報價'] = df['即時報價'].fillna(df['平均成本'])
@@ -771,15 +1057,22 @@ elif page == "第四頁：部位監控與量化風控":
                 df['產業別'] = df['標的'].map(sectors).fillna("其他")
                 
                 is_futures_mask = df['種類'].astype(str).str.contains('期', na=False)
+                if is_futures_mask.any():
+                    fut_sign = np.sign(df.loc[is_futures_mask, '持有數量']).astype(float)
+                    fut_sign = fut_sign.mask(fut_sign == 0, 1.0)
+                    df.loc[is_futures_mask, 'Beta值'] = df.loc[is_futures_mask, 'Beta值'].abs() * fut_sign
                 
                 def calc_futures_pnl(row):
-                    t = str(row['標的']).upper()
-                    mult = 10 if t in ['FMF', 'TMF'] else (50 if t == 'MTX' else (200 if t == 'TX' else 2000))
-                    return (row['即時報價'] - row['平均成本']) * row['持有數量'] * mult
+                    return futures_open_pnl(row['標的'], row['即時報價'], row['平均成本'], row['持有數量'])
 
                 df['淨未實現損益(原幣)'] = np.where(
                     is_futures_mask,
                     df.apply(calc_futures_pnl, axis=1),
+                    0.0
+                )
+                df['契約名目曝險(原幣)'] = np.where(
+                    is_futures_mask,
+                    df.apply(lambda row: futures_notional(row['標的'], row['即時報價'], row['持有數量']), axis=1),
                     0.0
                 )
 
@@ -794,35 +1087,90 @@ elif page == "第四頁：部位監控與量化風控":
                 df['報酬率 (%)'] = np.where(df['實質佔用本金(原幣)'] != 0, (df['淨未實現損益(原幣)'] / df['實質佔用本金(原幣)'].abs()) * 100.0, 0.0).astype(float)
                 
                 df['顯示_投入總金額(原幣)'] = np.where(is_futures_mask, df['實質佔用本金(原幣)'], df['名目合約總值(原幣)']).astype(float)
-                df['顯示_即時市值(原幣)'] = np.where(is_futures_mask, df['實質佔用本金(原幣)'] + df['淨未實現損益(原幣)'], df['即時報價'] * df['持有數量']).astype(float)
+                # 期貨的即時市值改為契約名目曝險（乘數×價格×口數），不再用保證金加減浮動損益。
+                df['顯示_即時市值(原幣)'] = np.where(
+                    is_futures_mask,
+                    df['契約名目曝險(原幣)'].abs(),
+                    df['即時報價'] * df['持有數量'],
+                ).astype(float)
                 
                 df['即時市值(台幣)'] = (df['顯示_即時市值(原幣)'].abs() * df['換算匯率']).astype(float)
-                df['實質曝險(台幣)'] = (df['即時市值(台幣)'] * df['標的槓桿']).astype(float)
+                # 期貨名目本身已是槓桿後曝險，不再乘「標的槓桿」，避免重複放大。
+                df['實質曝險(台幣)'] = np.where(
+                    is_futures_mask,
+                    (df['契約名目曝險(原幣)'].abs() * df['換算匯率']).astype(float),
+                    (df['即時市值(台幣)'] * df['標的槓桿']).astype(float),
+                )
+                df['期貨損益(台幣)'] = np.where(is_futures_mask, df['淨未實現損益(原幣)'] * df['換算匯率'], 0.0).astype(float)
+                df['原始保證金(台幣)'] = np.where(is_futures_mask, df['實質佔用本金(原幣)'] * df['換算匯率'], 0.0).astype(float)
+                df['維持保證金(台幣)'] = np.where(is_futures_mask, df['維持保證金(原幣)'] * df['換算匯率'], 0.0).astype(float)
+                df['期貨名目曝險(台幣)'] = np.where(is_futures_mask, df['契約名目曝險(原幣)'].abs() * df['換算匯率'], 0.0).astype(float)
                 
                 df['是衍生品'] = df['種類'].astype(str).str.contains('期|選擇權|權', na=False, regex=True)
                 
                 acc_market_val_twd = df.groupby('帳戶')['即時市值(台幣)'].sum()
                 acc_exp_twd = df.groupby('帳戶')['實質曝險(台幣)'].sum()
                 acc_maint_margin = df.groupby('帳戶')['維持保證金(原幣)'].sum()
+                acc_fut_pnl = df.groupby('帳戶')['期貨損益(台幣)'].sum()
+                acc_fut_initial = df.groupby('帳戶')['原始保證金(台幣)'].sum()
+                acc_fut_maint = df.groupby('帳戶')['維持保證金(台幣)'].sum()
+                acc_fut_notional = df.groupby('帳戶')['期貨名目曝險(台幣)'].sum()
 
             if not account_data.empty:
+                # 先留下試算表原值。期貨的帳戶淨值是券商權益數、名目曝險欄之後會被即時契約名目蓋掉。
+                sheet_equity_col = series_optional_number(account_data, "帳戶淨值")
+                sheet_notional_col = series_optional_number(account_data, "名目曝險")
                 for col in ["現金餘額", "融資/質押借款"]:
                     if col in account_data.columns:
-                        account_data[col] = pd.to_numeric(account_data[col], errors='coerce').fillna(0.0).astype(float)
+                        account_data[col] = series_optional_number(account_data, col).fillna(0.0).astype(float)
                 
                 account_data['即時持股市值'] = account_data['帳戶名稱'].map(acc_market_val_twd).fillna(0.0).astype(float)
                 account_data['名目曝險'] = account_data['帳戶名稱'].map(acc_exp_twd).fillna(0.0).astype(float)
                 account_data['維持保證金總額'] = account_data['帳戶名稱'].map(acc_maint_margin).fillna(0.0).astype(float)
-                account_data['帳戶淨值'] = 0.0
+                account_data['帳戶淨值'] = np.nan
+                account_data['是期貨帳戶'] = account_data['帳戶名稱'].astype(str).map(is_futures_account_name)
+                reported_equity_col = series_optional_number(account_data, "權益數")
+                reported_excess_col = series_optional_number(account_data, "可動用保證金")
+                account_data['可動用保證金_採用'] = np.nan
+                account_data['權益來源'] = ""
+                account_data['可動用來源'] = ""
+                account_data['原始保證金_期貨'] = 0.0
+                account_data['維持保證金_期貨'] = 0.0
+                account_data['未平倉損益_期貨'] = 0.0
+                account_data['權益比率_期貨'] = np.nan
+                account_data['契約名目_期貨'] = 0.0
+                account_data['試算表名目曝險'] = sheet_notional_col
+                account_data['名目差異'] = np.nan
                 
                 for idx, row in account_data.iterrows():
                     acc_name = str(row['帳戶名稱']).strip()
-                    if "元大期貨" in acc_name:
-                        q_equity_contrib = float(df[df['帳戶'] == acc_name]['淨未實現損益(原幣)'].sum() * df[df['帳戶'] == acc_name]['換算匯率'].iloc[0]) if not df[df['帳戶'] == acc_name].empty else 0.0
-                        net_val = float(170422.0 + q_equity_contrib)
-                        maint_m = float(row['維持保證金總額'])
-                        account_data.at[idx, '帳戶淨值'] = net_val
-                        account_data.at[idx, '現金餘額'] = float(max(0.0, net_val - maint_m))
+                    if is_futures_account_name(acc_name):
+                        pnl = float(acc_fut_pnl.get(acc_name, 0.0) or 0.0)
+                        initial_m = float(acc_fut_initial.get(acc_name, 0.0) or 0.0)
+                        maint_m = float(acc_fut_maint.get(acc_name, 0.0) or 0.0)
+                        metrics = resolve_futures_account(
+                            sheet_equity_col.at[idx],
+                            row.get('現金餘額', 0.0),
+                            initial_m,
+                            maint_m,
+                            pnl,
+                            row['名目曝險'],
+                            sheet_notional=sheet_notional_col.at[idx],
+                            override_equity=reported_equity_col.at[idx],
+                            override_excess=reported_excess_col.at[idx],
+                        )
+                        account_data.at[idx, '帳戶淨值'] = metrics["equity"]
+                        account_data.at[idx, '現金餘額'] = metrics["excess"]
+                        account_data.at[idx, '可動用保證金_採用'] = metrics["excess"]
+                        account_data.at[idx, '權益來源'] = metrics["equity_source"]
+                        account_data.at[idx, '可動用來源'] = metrics["excess_source"]
+                        account_data.at[idx, '原始保證金_期貨'] = metrics["initial_margin"]
+                        account_data.at[idx, '維持保證金_期貨'] = metrics["maintenance_margin"]
+                        account_data.at[idx, '未平倉損益_期貨'] = metrics["unrealized_pnl"]
+                        account_data.at[idx, '權益比率_期貨'] = metrics["equity_ratio"]
+                        account_data.at[idx, '契約名目_期貨'] = float(acc_fut_notional.get(acc_name, 0.0) or 0.0)
+                        account_data.at[idx, '試算表名目曝險'] = metrics["sheet_notional"]
+                        account_data.at[idx, '名目差異'] = metrics["notional_gap"]
                     else:
                         cash = float(row['現金餘額'])
                         mkt_val = float(row['即時持股市值'])
@@ -943,10 +1291,24 @@ elif page == "第四頁：部位監控與量化風控":
             st.subheader("🏦 各帳戶動態風險與全局槓桿 (即時市價結算)")
             if not account_data.empty:
                 account_data["槓桿率 (倍)"] = np.round(np.where(account_data["帳戶淨值"] != 0, (account_data["名目曝險"] / account_data["帳戶淨值"]), 0.0), 2).astype(float)
-                account_data["權益比率%/現金水位%"] = np.round(np.where(account_data["維持保證金總額"] > 0, (account_data["帳戶淨值"] / account_data["維持保證金總額"]) * 100.0, np.where(account_data["帳戶淨值"] != 0, (account_data["現金餘額"] / account_data["帳戶淨值"]) * 100.0, 0.0)), 1).astype(float)
+                stock_cash_ratio = np.where(
+                    account_data["帳戶淨值"] != 0,
+                    (account_data["現金餘額"] / account_data["帳戶淨值"]) * 100.0,
+                    0.0,
+                )
+                futures_equity_ratio = account_data["權益比率_期貨"]
+                account_data["權益比率%/現金水位%"] = np.round(
+                    np.where(account_data["是期貨帳戶"], futures_equity_ratio, stock_cash_ratio),
+                    1,
+                ).astype(float)
 
                 total_exposure = float(account_data["名目曝險"].sum())
-                total_cash = float(account_data["現金餘額"].sum())
+                free_cash = np.where(
+                    account_data["是期貨帳戶"],
+                    account_data["可動用保證金_採用"].fillna(0.0),
+                    account_data["現金餘額"],
+                )
+                total_cash = float(np.nansum(free_cash))
                 total_debt = float(account_data["融資/質押借款"].sum())
                 global_leverage = round(total_exposure / total_net_liq, 2) if total_net_liq > 0 else 0.0
                 global_cash_pct = round((total_cash / total_net_liq) * 100.0, 1) if total_net_liq > 0 else 0.0
@@ -956,7 +1318,7 @@ elif page == "第四頁：部位監控與量化風控":
                 c2.metric("總實質曝險 (TWD)", f"NT$ {total_exposure:,.0f}", "")
                 c3.metric("總借款負債 (TWD)", f"NT$ {total_debt:,.0f}", "")
                 c4.metric("🌍 合併總槓桿率", f"{global_leverage}x", "警戒線: 1.5x")
-                c5.metric("💰 總現金水位", f"{global_cash_pct}%", "健康區間: >40%")
+                c5.metric("💰 總現金水位", f"{global_cash_pct}%", "健康區間 >40%；期貨計可動用")
                 
                 if global_leverage > 1.5:
                     st.error("🚨 **【全局風控警告】合併總槓桿率已超過 1.5x 警戒線，請注意流動性與融資維持率風險！**")
@@ -974,11 +1336,78 @@ elif page == "第四頁：部位監控與量化風控":
                             st.error(f"❌ 錯誤: {e}")
 
                 display_account = account_data[['帳戶名稱', '現金餘額', '融資/質押借款', '名目曝險', '帳戶淨值', '槓桿率 (倍)', '權益比率%/現金水位%']].copy()
+                display_account.rename(columns={
+                    "現金餘額": "現金餘額（期貨＝可動用保證金）",
+                    "帳戶淨值": "帳戶淨值（期貨＝權益數）",
+                }, inplace=True)
                 styled_df = display_account.style.format({
-                    "現金餘額": "NT$ {:,.0f}", "融資/質押借款": "NT$ {:,.0f}", "名目曝險": "NT$ {:,.0f}",
-                    "帳戶淨值": "NT$ {:,.0f}", "槓桿率 (倍)": "{:.2f}x", "權益比率%/現金水位%": "{:.1f}%"
-                }).background_gradient(subset=["槓桿率 (倍)"], cmap="Reds").background_gradient(subset=["權益比率%/現金水位%"], cmap="RdYlGn")
+                    "現金餘額（期貨＝可動用保證金）": "NT$ {:,.0f}", "融資/質押借款": "NT$ {:,.0f}", "名目曝險": "NT$ {:,.0f}",
+                    "帳戶淨值（期貨＝權益數）": "NT$ {:,.0f}", "槓桿率 (倍)": "{:.2f}x", "權益比率%/現金水位%": "{:.1f}%"
+                }, na_rep="—").background_gradient(subset=["槓桿率 (倍)"], cmap="Reds").background_gradient(subset=["權益比率%/現金水位%"], cmap="RdYlGn")
                 st.dataframe(styled_df, use_container_width=True, hide_index=True)
+                st.caption(
+                    "期貨帳戶（名稱含「期貨」）沿用試算表現有五欄，不重算權益數。"
+                    "現金餘額＝券商可動用保證金；帳戶淨值＝券商權益數；"
+                    "名目曝險＝即時契約名目（乘數 × 價格 × 口數的絕對值），不是試算表「名目曝險」欄；"
+                    "槓桿＝名目曝險 ÷ 權益數；「權益比率%/現金水位%」＝權益數 ÷ 原始保證金。"
+                    "證券帳戶的最後一欄仍是現金餘額 ÷ 帳戶淨值。總現金水位的期貨部分就是可動用保證金。"
+                )
+
+                futures_accounts = account_data[account_data["是期貨帳戶"]].copy()
+                if not futures_accounts.empty:
+                    st.markdown("#### 期貨帳戶保證金")
+                    st.caption(
+                        "權益數直接採用試算表「帳戶淨值」，可動用保證金直接採用「現金餘額」。"
+                        "權益比率＝權益數 ÷ 原始保證金 × 100%。"
+                        "原始保證金來自持倉：FMF／TMF 每口 35,050、MTX 175,250、TX 701,000，持倉列若填「原始保證金」總額則覆寫。"
+                        "契約名目曝險＝乘數 × 價格 × 口數（FMF／TMF 每點 10 元、MTX 50、TX 200）；槓桿＝契約名目曝險 ÷ 權益數。"
+                        "未平倉損益＝（價格 − 平均成本）× 口數 × 乘數，只供對照，不加入權益數。"
+                        "選填欄「權益數」「可動用保證金」只有在有填數字時才覆寫上面兩欄。不必把本日餘額填進現金餘額，也不必新增欄位。"
+                    )
+                    futures_view = pd.DataFrame({
+                        "帳戶": futures_accounts["帳戶名稱"],
+                        "權益數": futures_accounts["帳戶淨值"],
+                        "權益來源": futures_accounts["權益來源"],
+                        "可動用保證金": futures_accounts["可動用保證金_採用"],
+                        "可動用來源": futures_accounts["可動用來源"],
+                        "原始保證金": futures_accounts["原始保證金_期貨"],
+                        "維持保證金": futures_accounts["維持保證金_期貨"],
+                        "未平倉損益": futures_accounts["未平倉損益_期貨"],
+                        "權益比率 (%)": futures_accounts["權益比率_期貨"],
+                        "契約名目曝險": futures_accounts["契約名目_期貨"],
+                        "試算表名目曝險": futures_accounts["試算表名目曝險"],
+                        "槓桿 (倍)": futures_accounts["槓桿率 (倍)"],
+                    })
+                    futures_styled = futures_view.style.format({
+                        "權益數": "NT$ {:,.0f}",
+                        "可動用保證金": "NT$ {:,.0f}",
+                        "原始保證金": "NT$ {:,.0f}",
+                        "維持保證金": "NT$ {:,.0f}",
+                        "未平倉損益": "NT$ {:,.0f}",
+                        "權益比率 (%)": "{:.2f}%",
+                        "契約名目曝險": "NT$ {:,.0f}",
+                        "試算表名目曝險": "NT$ {:,.0f}",
+                        "槓桿 (倍)": "{:.2f}x",
+                    }, na_rep="—")
+                    st.dataframe(futures_styled, use_container_width=True, hide_index=True)
+                    missing_equity = futures_accounts[futures_accounts["帳戶淨值"].isna()]
+                    if not missing_equity.empty:
+                        names = "、".join(missing_equity["帳戶名稱"].astype(str).tolist())
+                        st.warning(
+                            f"⚠️ {names} 的「帳戶淨值」是空的，權益數無法顯示。"
+                            "請把券商權益數填在 Active_Positions 的「帳戶淨值」，可動用保證金填在「現金餘額」。不必新增欄位。"
+                        )
+                    gap = futures_accounts["名目差異"]
+                    wide_gap = futures_accounts[gap.notna() & (gap > FUTURES_NOTIONAL_GAP_RATIO)]
+                    if not wide_gap.empty:
+                        bits = [
+                            f"{row['帳戶名稱']}（試算表 {row['試算表名目曝險']:,.0f}，即時 {row['名目曝險']:,.0f}，差 {row['名目差異'] * 100:.1f}%）"
+                            for _, row in wide_gap.iterrows()
+                        ]
+                        st.warning(
+                            "⚠️ 以下期貨帳戶的試算表「名目曝險」與即時契約名目相差超過 5%，畫面採用即時計算（乘數 × 價格 × 口數）："
+                            + "；".join(bits)
+                        )
 
             st.markdown("---")
             st.subheader("🎯 微觀持倉、Beta 值與精細產業即時損益追蹤")
@@ -991,15 +1420,16 @@ elif page == "第四頁：部位監控與量化風控":
                 c_a.metric("全帳戶持倉投入總金額 (TWD)", f"NT$ {total_invested_twd:,.0f}", "")
                 c_b.metric("總淨未實現損益 (TWD)", f"NT$ {total_pnl_twd:,.0f}", f"{total_roi_pct:+.2f}%")
                 
-                display_df = df[['帳戶', '產業別', '種類', '標的', '名稱', 'Beta值', '真實風險權重 (%)', '標的槓桿', '持有數量', '平均成本', '即時報價', '顯示_投入總金額(原幣)', '顯示_即時市值(原幣)', '淨未實現損益(原幣)', '報酬率 (%)', '最大虧損比例']].copy()
-                display_df.rename(columns={'顯示_投入總金額(原幣)': '投入總金額', '顯示_即時市值(原幣)': '即時市值(原幣)', '淨未實現損益(原幣)': '淨損益(原幣)'}, inplace=True)
+                display_df = df[['帳戶', '產業別', '種類', '標的', '名稱', 'Beta值', '真實風險權重 (%)', '標的槓桿', '持有數量', '平均成本', '即時報價', '契約名目曝險(原幣)', '顯示_投入總金額(原幣)', '顯示_即時市值(原幣)', '淨未實現損益(原幣)', '報酬率 (%)', '最大虧損比例']].copy()
+                display_df.rename(columns={'顯示_投入總金額(原幣)': '投入總金額', '顯示_即時市值(原幣)': '即時市值(原幣)', '淨未實現損益(原幣)': '淨損益(原幣)', '契約名目曝險(原幣)': '契約名目曝險'}, inplace=True)
                 display_df['最大虧損比例'] = display_df['最大虧損比例'].apply(lambda x: f"{x:.0f}%" if x > -100 else "未設定")
 
                 styled_quant_df = display_df.style.format({
                     "Beta值": "{:.2f}", "真實風險權重 (%)": "{:.2f}%", "標的槓桿": "{:.1f}x", "持有數量": "{:,.0f}",
-                    "平均成本": "{:,.2f}", "即時報價": "{:,.2f}", "投入總金額": "{:,.0f}",
+                    "平均成本": "{:,.2f}", "即時報價": "{:,.2f}", "契約名目曝險": "{:,.0f}", "投入總金額": "{:,.0f}",
                     "即時市值(原幣)": "{:,.0f}", "淨損益(原幣)": "{:,.0f}", "報酬率 (%)": "{:+.2f}%"
-                }, precision=2).background_gradient(subset=["Beta值"], cmap="Purples").background_gradient(subset=["報酬率 (%)"], cmap="RdYlGn") 
+                }, precision=2).background_gradient(subset=["Beta值"], cmap="Purples").background_gradient(subset=["報酬率 (%)"], cmap="RdYlGn")
+                st.caption("期貨列：契約名目曝險＝乘數 × 價格 × 口數（空單為負）；即時市值＝契約名目曝險的絕對值；投入總金額＝原始保證金；報酬率＝未平倉損益 ÷ 原始保證金。證券列的契約名目曝險為 0。")
                 st.dataframe(styled_quant_df, use_container_width=True, hide_index=True)
 
             st.markdown("---")
@@ -1010,7 +1440,8 @@ elif page == "第四頁：部位監控與量化風控":
                     try:
                         gemini_key = os.environ.get("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")
                         client = genai.Client(api_key=gemini_key)
-                        positions_summary = df[['標的', '名稱', '產業別', 'Beta值', '真實風險權重 (%)', '標的槓桿', '報酬率 (%)']].to_string(index=False) if not df.empty else "無持倉"
+                        ai_cols = [c for c in ['標的', '名稱', '產業別', 'Beta值', '真實風險權重 (%)', '契約名目曝險(原幣)', '淨未實現損益(原幣)', '標的槓桿', '報酬率 (%)'] if c in df.columns]
+                        positions_summary = df[ai_cols].to_string(index=False) if not df.empty else "無持倉"
                         prompt_text = f"總帳戶淨值: NT$ {total_net_liq:,.0f}\n合併總槓桿率: {global_leverage}x\n投資組合加權Beta: {portfolio_beta:.2f}\n總現金水位: {global_cash_pct}%\n持倉明細:\n{positions_summary}\n請給予 3 點風控建議。"
                         response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt_text)
                         st.session_state.ai_memo_p4["text"] = response.text
