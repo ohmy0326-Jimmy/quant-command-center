@@ -976,6 +976,7 @@ elif page == "第四頁：部位監控與量化風控":
                     try:
                         t_upper = str(ticker).upper()
                         if t_upper in ['TX', 'MTX', 'FMF', 'TMF']:
+                            # 這四個商品用加權指數現貨當計價。它和期貨成交價、券商結算價可能不同，未平倉損益會跟著差一截。
                             prices[ticker] = twii_price
                             betas[ticker] = 1.0
                             sectors[ticker] = "微型臺指期" if t_upper == 'FMF' else ("小型臺指" if t_upper == 'MTX' else "臺指期貨")
