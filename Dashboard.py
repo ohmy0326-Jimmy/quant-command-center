@@ -7,11 +7,19 @@ import yfinance as yf
 import gspread
 import requests
 import re
+from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime, timedelta
-from google import genai
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from oauth2client.service_account import ServiceAccountCredentials
+
+from ai_report import (
+    bind_streamlit_cache,
+    format_ai_error,
+    format_position_lines,
+    format_sector_lines,
+    run_ai_report,
+)
 
 logger = logging.getLogger("trading_dashboard")
 
@@ -231,6 +239,162 @@ def send_to_telegram(title, text_content):
     except Exception as e:
         st.error(f"❌ 發生例外錯誤：{e}")
 
+# AI 報告：預設模型 gemini-2.5-flash-lite（GEMINI_MODEL 可改）、
+# 硬逾時 GEMINI_TIMEOUT_SEC（預設 30 秒）、快取 GEMINI_CACHE_TTL_SEC（預設 1800 秒）。
+# 金鑰仍只讀 GEMINI_API_KEY 環境變數或 st.secrets，不改讀取方式。
+cached_ai_report = bind_streamlit_cache(st.cache_data)
+MACRO_SNAPSHOT_TIMEOUT_SEC = 12
+
+
+def _history_5d(ticker):
+    try:
+        return yf.Ticker(ticker).history(period="5d", timeout=8)
+    except TypeError:
+        return yf.Ticker(ticker).history(period="5d")
+
+
+def _format_indicator_move(name, ticker):
+    frame = _history_5d(ticker)
+    if frame is None or getattr(frame, "empty", True) or "Close" not in getattr(frame, "columns", []):
+        raise ValueError("歷史資料不足")
+    closes = tnx_series_to_yield_percent(frame["Close"]) if ticker == "^TNX" else frame["Close"]
+    valid = pd.to_numeric(closes, errors="coerce").dropna()
+    if len(valid) < 2:
+        raise ValueError("有效收盤價不足")
+    latest = float(valid.iloc[-1])
+    prev = float(valid.iloc[-2])
+    if prev == 0:
+        raise ValueError("前收為 0")
+    pct = ((latest - prev) / prev) * 100
+    unit = "%" if ticker == "^TNX" else ""
+    return f"- {name}: {latest:,.2f}{unit} ({pct:+.2f}%)"
+
+
+def _known_indicator_line(name, ticker, vix_val, tnx_val, vix_is_fallback, tnx_is_fallback):
+    if ticker == "^VIX":
+        note = "（預設回退值，非即時報價）" if vix_is_fallback else "（日漲跌幅暫缺，數值沿用風險計分板）"
+        return f"- {name}: {vix_val:.2f}{note}"
+    if ticker == "^TNX":
+        note = "（預設回退值，非即時報價）" if tnx_is_fallback else "（日漲跌幅暫缺，數值沿用風險計分板）"
+        return f"- {name}: {tnx_val:.2f}%{note}"
+    return None
+
+
+def collect_macro_snapshot(indicators, vix_val, tnx_val, vix_is_fallback, tnx_is_fallback):
+    """並行抓各商品近 5 日漲跌，整段最多等 MACRO_SNAPSHOT_TIMEOUT_SEC 秒，避免晨報在呼叫模型前卡住。"""
+    ordered = list(indicators.items())
+    results = {}
+    missing = []
+    reused = []
+    pool = ThreadPoolExecutor(max_workers=6)
+    futures = {}
+    try:
+        for name, ticker in ordered:
+            if (ticker == "^VIX" and vix_is_fallback) or (ticker == "^TNX" and tnx_is_fallback):
+                results[ticker] = _known_indicator_line(
+                    name, ticker, vix_val, tnx_val, vix_is_fallback, tnx_is_fallback
+                )
+                continue
+            futures[pool.submit(_format_indicator_move, name, ticker)] = (name, ticker)
+        done, pending = wait(set(futures), timeout=MACRO_SNAPSHOT_TIMEOUT_SEC) if futures else (set(), set())
+        for fut in pending:
+            name, ticker = futures[fut]
+            logger.error("總經快照 %s（%s）超過 %s 秒", name, ticker, MACRO_SNAPSHOT_TIMEOUT_SEC)
+            _store_snapshot_failure(results, missing, reused, name, ticker, vix_val, tnx_val, vix_is_fallback, tnx_is_fallback)
+        for fut in done:
+            name, ticker = futures[fut]
+            try:
+                results[ticker] = fut.result()
+            except Exception:
+                logger.exception("總經快照 %s（%s）抓取失敗", name, ticker)
+                _store_snapshot_failure(
+                    results, missing, reused, name, ticker, vix_val, tnx_val, vix_is_fallback, tnx_is_fallback
+                )
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+    lines = [results[ticker] for _, ticker in ordered if ticker in results]
+    return "\n".join(lines), missing, reused
+
+
+def _store_snapshot_failure(results, missing, reused, name, ticker, vix_val, tnx_val, vix_is_fallback, tnx_is_fallback):
+    known = _known_indicator_line(name, ticker, vix_val, tnx_val, vix_is_fallback, tnx_is_fallback)
+    if known and ticker in {"^VIX", "^TNX"}:
+        results[ticker] = known
+        reused.append((name, ticker))
+        return
+    results[ticker] = f"- {name}: 抓取失敗（未納入，無預設值）"
+    missing.append((name, ticker))
+
+
+def _position_prompt_rows(df):
+    if df is None or getattr(df, "empty", True):
+        return []
+    rows = []
+    for _, row in df.iterrows():
+        def num(col):
+            if col not in df.columns:
+                return None
+            value = row[col]
+            try:
+                if pd.isna(value):
+                    return None
+            except (TypeError, ValueError):
+                return None
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+        def cell(col):
+            if col not in df.columns:
+                return ""
+            value = row[col]
+            try:
+                if pd.isna(value):
+                    return ""
+            except (TypeError, ValueError):
+                return ""
+            return value
+
+        rows.append({
+            "ticker": cell("標的"),
+            "name": cell("名稱"),
+            "sector": cell("產業別"),
+            "beta": num("Beta值"),
+            "weight": num("真實風險權重 (%)"),
+            "notional": num("契約名目曝險(原幣)"),
+            "pnl": num("淨未實現損益(原幣)"),
+            "leverage": num("標的槓桿"),
+            "ret": num("報酬率 (%)"),
+        })
+    return rows
+
+
+def _markdown_slot(slot):
+    def on_chunk(text):
+        if text:
+            slot.markdown(text)
+        else:
+            slot.empty()
+    return on_chunk
+
+
+def stream_ai_into(prompt, slot=None):
+    """串流到頁面。失敗時顯示繁體中文原因，並回傳空字串，不覆蓋舊報告。"""
+    if slot is None:
+        slot = st.empty()
+    try:
+        return run_ai_report(
+            os.environ.get("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", ""),
+            prompt,
+            on_chunk=_markdown_slot(slot),
+            cached_func=cached_ai_report,
+        )
+    except Exception as exc:
+        logger.exception("AI 分析失敗")
+        st.error(format_ai_error(exc))
+        return ""
+
+
 # 初始化 Session State
 if 'ai_memo_p1' not in st.session_state:
     st.session_state.ai_memo_p1 = {"text": "", "time": ""}
@@ -354,58 +518,41 @@ if page == "第一頁：總經與風險鬧鐘":
             st.markdown("---")
             
             with st.expander("🤖 點擊展開：AI 避險基金經理人今日總經晨報與操盤提醒", expanded=True):
+                generated_p1 = False
                 if st.button("🧠 一鍵生成今日總經盤勢速覽", use_container_width=True):
-                    with st.spinner("AI 經理人正在解讀各大總經指標..."):
+                    live_p1 = st.empty()
+                    with st.spinner("AI 經理人正在解讀各大總經指標，回覆會直接顯示..."):
                         try:
-                            gemini_key = os.environ.get("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")
-                            client = genai.Client(api_key=gemini_key)
-                            vix_note = "（預設回退值，非即時報價）" if vix_is_fallback else ""
-                            tnx_note = "（預設回退值，非即時報價）" if tnx_is_fallback else ""
-                            snapshot_str = (
-                                f"- VIX恐慌指數: {vix_val:.2f}{vix_note}\n"
-                                f"- 10年公債殖利率: {tnx_val:.2f}%{tnx_note}\n"
+                            snapshot_str, missing, reused = collect_macro_snapshot(
+                                indicators, vix_val, tnx_val, vix_is_fallback, tnx_is_fallback
                             )
-                            
-                            for k, t in indicators.items():
-                                try:
-                                    s_df = yf.Ticker(t).history(period="5d")
-                                    if s_df.empty or "Close" not in s_df.columns or len(s_df) < 2:
-                                        raise ValueError("歷史資料不足")
-                                    closes = tnx_series_to_yield_percent(s_df["Close"]) if t == "^TNX" else s_df["Close"]
-                                    valid_closes = pd.to_numeric(closes, errors="coerce").dropna()
-                                    if len(valid_closes) < 2:
-                                        raise ValueError("有效收盤價不足")
-                                    c_val = float(valid_closes.iloc[-1])
-                                    p_val = float(valid_closes.iloc[-2])
-                                    if p_val == 0:
-                                        raise ValueError("前收為 0")
-                                    pct_chg = ((c_val - p_val) / p_val) * 100
-                                    snapshot_str += f"- {k}: {c_val:,.2f} ({pct_chg:+.2f}%)\n"
-                                except Exception:
-                                    logger.exception("總經快照 %s（%s）抓取失敗", k, t)
-                                    snapshot_str += f"- {k}: 抓取失敗（未納入，無預設值）\n"
-                                    st.warning(f"⚠️ {k}（{t}）即時快照抓取失敗，AI 晨報不含此項即時數據，且未代入預設數字。")
-                                    
-                            p_text = f"""
-                            你是一位頂級美股對沖基金經理人。以下是我剛剛抓取的今日市場核心總經數據即時快照：
-                            {snapshot_str}
-                            
-                            其中「VIX恐慌指數」與「10年公債殖利率」是風險計分實際採用的百分比數值（若標註預設回退值，代表該來源抓取失敗）。
-                            請針對目前的波動率、債市殖利率與跨市場表現，為我提供一份精煉的「今日總經晨報」，包含：
-                            1. 宏觀解讀（資金流向與潛在風險）。
-                            2. 今日操作提醒（應對當前環境的現金水位或避險方針）。
-                            請給出專業、直擊重點的繁體中文建議。
-                            """
-                            res = client.models.generate_content(model='gemini-2.5-flash', contents=p_text)
-                            st.session_state.ai_memo_p1["text"] = res.text
-                            st.session_state.ai_memo_p1["time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            for name, ticker in missing:
+                                st.warning(f"⚠️ {name}（{ticker}）即時快照抓取失敗，AI 晨報不含此項即時數據，且未代入預設數字。")
+                            for name, ticker in reused:
+                                st.warning(f"⚠️ {name}（{ticker}）日漲跌幅抓取失敗，晨報改用風險計分板已有的數值，未另代入預設數字。")
+                            p_text = (
+                                "你是一位頂級美股對沖基金經理人。以下是今日市場核心總經數據（每行一個商品）：\n"
+                                f"{snapshot_str}\n\n"
+                                "其中 VIX 與美國 10 年公債是風險計分實際採用的數值（若標註預設回退值，代表該來源抓取失敗，數字不是即時報價）。"
+                                "10 年公債這一行的數字是百分比殖利率，不是指數點位。\n"
+                                "請用繁體中文寫一份精煉的「今日總經晨報」，只含：\n"
+                                "1. 宏觀解讀（資金流向與潛在風險）。\n"
+                                "2. 今日操作提醒（現金水位或避險方針）。"
+                            )
+                            text = stream_ai_into(p_text, slot=live_p1)
+                            if text:
+                                st.session_state.ai_memo_p1["text"] = text
+                                st.session_state.ai_memo_p1["time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                generated_p1 = True
                         except Exception as e:
-                            st.error(f"晨報生成失敗: {e}")
+                            logger.exception("晨報生成失敗")
+                            st.error(format_ai_error(e))
                 
                 if st.session_state.ai_memo_p1["text"]:
                     st.markdown("---")
                     st.info(f"📌 **最新總經晨報 (生成時間：{st.session_state.ai_memo_p1['time']})**")
-                    st.markdown(st.session_state.ai_memo_p1["text"])
+                    if not generated_p1:
+                        st.markdown(st.session_state.ai_memo_p1["text"])
                     
                     if st.button("📤 推播此總經晨報到 Telegram", key="btn_tg_p1"):
                         send_to_telegram("AI 總經晨報與操盤提醒", st.session_state.ai_memo_p1["text"])
@@ -647,23 +794,40 @@ elif page == "第二頁：板塊與主題資金輪動":
             st.markdown("---")
             st.subheader("🤖 AI 避險基金經理人：板塊與焦點主題資金輪動深度分析")
             
+            generated_p2 = False
             if st.button("🧠 啟動 AI 板塊與主題資金輪動解析", use_container_width=True):
-                with st.spinner("AI 經理人正在解析各板塊及軟/硬/太空 ETF 強弱排行與持股佔比..."):
+                live_p2 = st.empty()
+                with st.spinner("AI 經理人正在解析各板塊及軟/硬/太空 ETF 強弱排行與持股佔比，回覆會直接顯示..."):
                     try:
-                        gemini_key = os.environ.get("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")
-                        client = genai.Client(api_key=gemini_key)
-                        summary_table = df_sectors[['代號', '板塊名稱', '日漲跌幅 (%)', '月漲跌幅 (%)', '前十大核心持股與佔比 (1-10 排序)']].to_string(index=False)
-                        prompt_p2 = f"身為頂級美股對沖基金經理人。以下是我剛剛透過華爾街即時抓取整理的 11 大板塊與軟體(IGV)/硬體(SOXX)/太空(UFO)主題ETF數據：\n{summary_table}\n請給予我 1.資金流向與主題輪動解讀 2.強勢板塊/主題推薦 3.脆弱板塊風險提示。"
-                        res_p2 = client.models.generate_content(model='gemini-2.5-flash', contents=prompt_p2)
-                        st.session_state.ai_memo_p2["text"] = res_p2.text
-                        st.session_state.ai_memo_p2["time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        sector_rows = []
+                        for _, row in df_sectors.iterrows():
+                            sector_rows.append({
+                                "ticker": row["代號"],
+                                "name": row["板塊名稱"],
+                                "daily": row["日漲跌幅 (%)"],
+                                "monthly": row["月漲跌幅 (%)"],
+                                "holdings": row["前十大核心持股與佔比 (1-10 排序)"],
+                            })
+                        prompt_p2 = (
+                            "身為頂級美股對沖基金經理人。以下是 11 大板塊與軟體(IGV)、硬體(SOXX)、太空(UFO)主題 ETF，"
+                            "每行含代號、名稱、日漲跌幅、月漲跌幅、前十大持股：\n"
+                            f"{format_sector_lines(sector_rows)}\n"
+                            "請用繁體中文給我：1.資金流向與主題輪動解讀 2.強勢板塊/主題推薦 3.脆弱板塊風險提示。"
+                        )
+                        text = stream_ai_into(prompt_p2, slot=live_p2)
+                        if text:
+                            st.session_state.ai_memo_p2["text"] = text
+                            st.session_state.ai_memo_p2["time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            generated_p2 = True
                     except Exception as e:
-                        st.error(f"AI 分析生成失敗: {e}")
+                        logger.exception("AI 分析生成失敗")
+                        st.error(format_ai_error(e))
             
             if st.session_state.ai_memo_p2["text"]:
                 st.markdown("---")
                 st.info(f"📌 **最新板塊與主題分析 (生成時間：{st.session_state.ai_memo_p2['time']})**")
-                st.markdown(st.session_state.ai_memo_p2["text"])
+                if not generated_p2:
+                    st.markdown(st.session_state.ai_memo_p2["text"])
                 
                 if st.button("📤 推播此板塊分析到 Telegram", key="btn_tg_p2"):
                     send_to_telegram("AI 板塊與主題資金輪動深度分析", st.session_state.ai_memo_p2["text"])
@@ -766,21 +930,11 @@ elif page == "第三頁：重大行事曆與會展":
                 cols[1].markdown(f"**{ev['項目']}**")
                 cols[2].markdown(f"⚡ {ev['影響']}")
                 
+                ai_clicked = False
                 with cols[3]:
                     sub_c1, sub_c2 = st.columns(2)
                     with sub_c1:
-                        if st.button(f"🧠 AI 解析", key=f"ai_event_btn_{idx}"):
-                            with st.spinner("AI 經理人正在生成戰術..."):
-                                try:
-                                    gemini_key = os.environ.get("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")
-                                    client = genai.Client(api_key=gemini_key)
-                                    res = client.models.generate_content(
-                                        model='gemini-2.5-flash', 
-                                        contents=f"身為避險基金經理人，面對即將到來的重大財報或總經事件：【{ev['項目']}】（影響層面：{ev['影響']}），請給我 2 點精煉、具體且直接可執行的資產配置與風控建議。"
-                                    )
-                                    st.session_state.ai_memo_p3[event_key] = {"text": res.text, "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-                                except Exception as e:
-                                    st.error(f"生成失敗: {e}")
+                        ai_clicked = st.button(f"🧠 AI 解析", key=f"ai_event_btn_{idx}")
                     with sub_c2:
                         if st.button(f"📲 推播TG", key=f"tg_event_btn_{idx}"):
                             try:
@@ -795,10 +949,31 @@ elif page == "第三頁：重大行事曆與會展":
                             except Exception as e:
                                 st.error(f"❌ 錯誤: {e}")
                 
+                showed_live = False
+                if ai_clicked:
+                    live_p3 = st.empty()
+                    with st.spinner("AI 經理人正在生成戰術，回覆會直接顯示..."):
+                        try:
+                            prompt_p3 = (
+                                f"身為避險基金經理人，面對即將到來的重大財報或總經事件：【{ev['項目']}】"
+                                f"（影響層面：{ev['影響']}），請給我 2 點精煉、具體且直接可執行的資產配置與風控建議。"
+                            )
+                            text = stream_ai_into(prompt_p3, slot=live_p3)
+                            if text:
+                                st.session_state.ai_memo_p3[event_key] = {
+                                    "text": text,
+                                    "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                }
+                                showed_live = True
+                        except Exception as e:
+                            logger.exception("行事曆 AI 解析失敗")
+                            st.error(format_ai_error(e))
+                
                 if event_key in st.session_state.ai_memo_p3:
                     memo = st.session_state.ai_memo_p3[event_key]
                     st.info(f"📌 **最新戰術建議 (生成時間：{memo['time']})**")
-                    st.markdown(memo["text"])
+                    if not showed_live:
+                        st.markdown(memo["text"])
                     
                     if st.button(f"📤 推播此事件戰術建議到 Telegram", key=f"btn_tg_p3_{idx}"):
                         send_to_telegram(f"行事曆戰術建議：{ev['項目']}", memo["text"])
@@ -1435,24 +1610,34 @@ elif page == "第四頁：部位監控與量化風控":
             st.markdown("---")
             st.subheader("🤖 AI 避險基金經理人即時壓力測試與風控審查")
             
+            generated_p4 = False
             if st.button("🧠 啟動 AI 經理人風控與壓力測試", use_container_width=True):
-                with st.spinner("AI 經理人正在分析中..."):
+                live_p4 = st.empty()
+                with st.spinner("AI 經理人正在分析中，回覆會直接顯示..."):
                     try:
-                        gemini_key = os.environ.get("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")
-                        client = genai.Client(api_key=gemini_key)
-                        ai_cols = [c for c in ['標的', '名稱', '產業別', 'Beta值', '真實風險權重 (%)', '契約名目曝險(原幣)', '淨未實現損益(原幣)', '標的槓桿', '報酬率 (%)'] if c in df.columns]
-                        positions_summary = df[ai_cols].to_string(index=False) if not df.empty else "無持倉"
-                        prompt_text = f"總帳戶淨值: NT$ {total_net_liq:,.0f}\n合併總槓桿率: {global_leverage}x\n投資組合加權Beta: {portfolio_beta:.2f}\n總現金水位: {global_cash_pct}%\n持倉明細:\n{positions_summary}\n請給予 3 點風控建議。"
-                        response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt_text)
-                        st.session_state.ai_memo_p4["text"] = response.text
-                        st.session_state.ai_memo_p4["time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        prompt_text = (
+                            f"總帳戶淨值: NT$ {total_net_liq:,.0f}\n"
+                            f"合併總槓桿率: {global_leverage}x\n"
+                            f"投資組合加權Beta: {portfolio_beta:.2f}\n"
+                            f"總現金水位: {global_cash_pct}%\n"
+                            "持倉明細（依風險權重絕對值由高到低，超過 25 檔會省略）：\n"
+                            f"{format_position_lines(_position_prompt_rows(df))}\n"
+                            "請給予 3 點風控建議。"
+                        )
+                        text = stream_ai_into(prompt_text, slot=live_p4)
+                        if text:
+                            st.session_state.ai_memo_p4["text"] = text
+                            st.session_state.ai_memo_p4["time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            generated_p4 = True
                     except Exception as e:
-                        st.error(f"AI 呼叫失敗: {e}")
+                        logger.exception("AI 呼叫失敗")
+                        st.error(format_ai_error(e))
             
             if st.session_state.ai_memo_p4["text"]:
                 st.markdown("---")
                 st.info(f"📌 **最新風控審查 (生成時間：{st.session_state.ai_memo_p4['time']})**")
-                st.markdown(st.session_state.ai_memo_p4["text"])
+                if not generated_p4:
+                    st.markdown(st.session_state.ai_memo_p4["text"])
                 
                 if st.button("📤 推播此風控審查到 Telegram", key="btn_tg_p4"):
                     send_to_telegram("AI 經理人風控與壓力測試審查", st.session_state.ai_memo_p4["text"])
