@@ -1,4 +1,5 @@
 import os
+import logging
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -11,6 +12,47 @@ from google import genai
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from oauth2client.service_account import ServiceAccountCredentials
+
+logger = logging.getLogger("trading_dashboard")
+
+# Yahoo ^TNX（CBOE 10 年期公債）有兩種報價：
+# 舊制是殖利率指數，收盤價 = 殖利率（%）× 10，例如 49.86 代表 4.986%。
+# 新制直接以百分比報價，例如 4.986 代表 4.986%。
+# 2026-10 實測 chart API 的 regularMarketPrice 約 4.99，近五年日線約在 1.3–5.4，
+# 一律除以 10 會顯示成約 0.50%，並讓「殖利率 > 4.5 加分」不會觸發。
+# 現代 10 年債殖利率未曾站上 20%（1981 年高點約 15.8%），
+# 因此原始報價 > 20 才視為舊制指數並除以 10；否則已是百分比。
+# 舊制在殖利率低於 2% 時原始報價也會 <= 20，無法從單一數字分辨，這種情況維持不除。
+TNX_INDEX_QUOTE_THRESHOLD = 20.0
+DEFAULT_VIX = 15.0
+DEFAULT_TNX_YIELD_PERCENT = 4.0
+
+
+def tnx_quote_to_yield_percent(raw_close):
+    """把單筆 Yahoo ^TNX 收盤價轉成百分比殖利率，相容舊制指數與新制百分比。"""
+    value = float(raw_close)
+    if value > TNX_INDEX_QUOTE_THRESHOLD:
+        return value / 10.0
+    return value
+
+
+def tnx_series_to_yield_percent(series):
+    """整段歷史沿用最新有效報價的慣例，避免逐筆門檻把同一序列拆成兩種刻度。"""
+    values = pd.to_numeric(series, errors="coerce")
+    valid = values.dropna()
+    if not valid.empty and float(valid.iloc[-1]) > TNX_INDEX_QUOTE_THRESHOLD:
+        return values / 10.0
+    return values
+
+
+def last_valid_close(history_df):
+    """回傳最後一筆有效收盤價。空表或全為空值時丟出 ValueError，讓呼叫端改走預設值並示警。"""
+    if history_df is None or getattr(history_df, "empty", True) or "Close" not in getattr(history_df, "columns", []):
+        raise ValueError("歷史資料為空")
+    closes = pd.to_numeric(history_df["Close"], errors="coerce").dropna()
+    if closes.empty:
+        raise ValueError("收盤價為空")
+    return float(closes.iloc[-1])
 
 # ==========================================
 # 網頁基本設定與密碼驗證防護（支援環境變數與 Secret）
@@ -118,28 +160,51 @@ if page == "第一頁：總經與風險鬧鐘":
 
     with st.spinner('📡 正在從華爾街精準抓取 1 年期總經日K與風險指標...'):
         try:
-            vix_df = yf.Ticker("^VIX").history(period="5d")
-            vix_val = float(vix_df['Close'].iloc[-1]) if not vix_df.empty else 15.0
-            
-            tnx_df = yf.Ticker("^TNX").history(period="5d")
-            tnx_val = float(tnx_df['Close'].iloc[-1]) / 10.0 if not tnx_df.empty else 4.0
-            
-            risk_score = 0
+            vix_is_fallback = False
+            tnx_is_fallback = False
+
+            try:
+                vix_val = last_valid_close(yf.Ticker("^VIX").history(period="5d"))
+            except Exception:
+                logger.exception("抓取 VIX 恐慌指數（^VIX）失敗，改用預設值 %.2f", DEFAULT_VIX)
+                vix_val = DEFAULT_VIX
+                vix_is_fallback = True
+                st.warning("⚠️ VIX 恐慌指數（^VIX）抓取失敗，已改用預設值 15.00。此數值為回退預設，不代表即時市價，風險分數可能失真。")
+
+            try:
+                tnx_val = tnx_quote_to_yield_percent(last_valid_close(yf.Ticker("^TNX").history(period="5d")))
+            except Exception:
+                logger.exception("抓取美國 10 年公債殖利率（^TNX）失敗，改用預設值 %.2f%%", DEFAULT_TNX_YIELD_PERCENT)
+                tnx_val = DEFAULT_TNX_YIELD_PERCENT
+                tnx_is_fallback = True
+                st.warning("⚠️ 美國 10 年公債殖利率（^TNX）抓取失敗，已改用預設值 4.00%。此數值為回退預設，不代表即時殖利率，風險分數可能失真。")
+
+            # 分數只來自兩項：VIX 最高 4 分、10 年債殖利率最高 2 分，滿分 6。
+            vix_points = 4 if vix_val > 25 else (2 if vix_val > 20 else 0)
+            tnx_points = 2 if tnx_val > 4.5 else 0
+            risk_score = vix_points + tnx_points
+            risk_score_max = 6
             risk_labels = []
-            
-            if vix_val > 25:
-                risk_score += 4
-                risk_labels.append(f"🚨 VIX 市場極度恐慌 ({vix_val:.2f} > 25)")
-            elif vix_val > 20:
-                risk_score += 2
-                risk_labels.append(f"⚠️ VIX 恐慌指數偏高 ({vix_val:.2f} > 20)")
-                
-            if tnx_val > 4.5:
-                risk_score += 2
-                risk_labels.append(f"⚠️ 10年債殖利率處於高檔 ({tnx_val:.2f}% > 4.5%)")
-                
-            st.markdown("### 🛡️ 宏觀市場風險計分板 (標準化評估)")
-            rc1, rc2, rc3 = st.columns([1.5, 2, 4.5])
+
+            if vix_points == 4:
+                risk_labels.append(f"🚨 VIX 市場極度恐慌 ({vix_val:.2f} > 25，+4 分)")
+            elif vix_points == 2:
+                risk_labels.append(f"⚠️ VIX 恐慌指數偏高 ({vix_val:.2f} > 20，+2 分)")
+
+            if tnx_points == 2:
+                risk_labels.append(f"⚠️ 10年債殖利率處於高檔 ({tnx_val:.2f}% > 4.5%，+2 分)")
+
+            vix_tag = "（預設值）" if vix_is_fallback else ""
+            tnx_tag = "（預設值）" if tnx_is_fallback else ""
+
+            st.markdown("### 🛡️ 宏觀市場風險計分板（僅 VIX 與美國 10 年債）")
+            st.caption(
+                "此分數不是全市場綜合評分，只計入兩個因子，滿分 6 分："
+                "VIX 恐慌指數最高 4 分（>25 得 4 分、>20 得 2 分、其餘 0 分）；"
+                "美國 10 年公債殖利率最高 2 分（>4.5% 得 2 分、其餘 0 分）。"
+                "美元指數、匯率、美股、台股、原油與黃金都不計入。"
+            )
+            rc1, rc2, rc3 = st.columns([1.5, 2.2, 4.3])
             with rc1:
                 if risk_score <= 1:
                     st.success("🟢 市場氣氛：【風險偏好 (Risk-On)】")
@@ -148,12 +213,23 @@ if page == "第一頁：總經與風險鬧鐘":
                 else:
                     st.error("🔴 市場氣氛：【高風險警戒 (Risk-Off)】")
             with rc2:
-                st.metric("當前綜合風險評分", f"{risk_score} / 6 分", f"VIX: {vix_val:.2f} | 債息: {tnx_val:.2f}%")
+                st.metric(
+                    "VIX＋10年債風險評分",
+                    f"{risk_score} / {risk_score_max} 分",
+                    f"VIX {vix_points}/4 分 + 10年債 {tnx_points}/2 分",
+                    delta_color="off",
+                    help="只計 VIX（最高 4 分）與美國 10 年公債殖利率（最高 2 分），滿分 6 分。",
+                )
             with rc3:
+                st.markdown(
+                    f"- **VIX 恐慌指數**：{vix_val:.2f}{vix_tag} → **{vix_points} / 4 分**\n"
+                    f"- **10 年公債殖利率**：{tnx_val:.2f}%{tnx_tag} → **{tnx_points} / 2 分**\n"
+                    f"- **合計**：{risk_score} / {risk_score_max} 分"
+                )
                 if risk_labels:
                     st.error(" | ".join(risk_labels))
                 else:
-                    st.info("✅ 目前無重大宏觀警訊，市場流動性與波動率維持健康 (Risk-On)。")
+                    st.info("✅ 上述兩項因子目前皆未達加分門檻（VIX ≤ 20，且 10 年債殖利率 ≤ 4.5%）。")
                     
             st.markdown("---")
             
@@ -163,23 +239,38 @@ if page == "第一頁：總經與風險鬧鐘":
                         try:
                             gemini_key = os.environ.get("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")
                             client = genai.Client(api_key=gemini_key)
-                            snapshot_str = f"- VIX恐慌指數: {vix_val:.2f}\n- 10年公債殖利率: {tnx_val:.2f}%\n"
+                            vix_note = "（預設回退值，非即時報價）" if vix_is_fallback else ""
+                            tnx_note = "（預設回退值，非即時報價）" if tnx_is_fallback else ""
+                            snapshot_str = (
+                                f"- VIX恐慌指數: {vix_val:.2f}{vix_note}\n"
+                                f"- 10年公債殖利率: {tnx_val:.2f}%{tnx_note}\n"
+                            )
                             
                             for k, t in indicators.items():
                                 try:
                                     s_df = yf.Ticker(t).history(period="5d")
-                                    if not s_df.empty:
-                                        c_val = float(s_df['Close'].iloc[-1])
-                                        p_val = float(s_df['Close'].iloc[-2])
-                                        pct_chg = ((c_val - p_val) / p_val) * 100
-                                        snapshot_str += f"- {k}: {c_val:,.2f} ({pct_chg:+.2f}%)\n"
-                                except:
-                                    pass
+                                    if s_df.empty or "Close" not in s_df.columns or len(s_df) < 2:
+                                        raise ValueError("歷史資料不足")
+                                    closes = tnx_series_to_yield_percent(s_df["Close"]) if t == "^TNX" else s_df["Close"]
+                                    valid_closes = pd.to_numeric(closes, errors="coerce").dropna()
+                                    if len(valid_closes) < 2:
+                                        raise ValueError("有效收盤價不足")
+                                    c_val = float(valid_closes.iloc[-1])
+                                    p_val = float(valid_closes.iloc[-2])
+                                    if p_val == 0:
+                                        raise ValueError("前收為 0")
+                                    pct_chg = ((c_val - p_val) / p_val) * 100
+                                    snapshot_str += f"- {k}: {c_val:,.2f} ({pct_chg:+.2f}%)\n"
+                                except Exception:
+                                    logger.exception("總經快照 %s（%s）抓取失敗", k, t)
+                                    snapshot_str += f"- {k}: 抓取失敗（未納入，無預設值）\n"
+                                    st.warning(f"⚠️ {k}（{t}）即時快照抓取失敗，AI 晨報不含此項即時數據，且未代入預設數字。")
                                     
                             p_text = f"""
                             你是一位頂級美股對沖基金經理人。以下是我剛剛抓取的今日市場核心總經數據即時快照：
                             {snapshot_str}
                             
+                            其中「VIX恐慌指數」與「10年公債殖利率」是風險計分實際採用的百分比數值（若標註預設回退值，代表該來源抓取失敗）。
                             請針對目前的波動率、債市殖利率與跨市場表現，為我提供一份精煉的「今日總經晨報」，包含：
                             1. 宏觀解讀（資金流向與潛在風險）。
                             2. 今日操作提醒（應對當前環境的現金水位或避險方針）。
@@ -205,7 +296,13 @@ if page == "第一頁：總經與風險鬧鐘":
             for idx, (name, ticker) in enumerate(indicators.items()):
                 try:
                     df_item = yf.Ticker(ticker).history(period="1y")
-                    if not df_item.empty:
+                    if df_item.empty:
+                        logger.error("總經指標 %s（%s）歷史資料為空，圖表略過", name, ticker)
+                        st.warning(f"⚠️ {name}（{ticker}）資料抓取失敗或為空，此圖表已略過，未使用預設價格。")
+                    else:
+                        if ticker == "^TNX":
+                            df_item = df_item.copy()
+                            df_item["Close"] = tnx_series_to_yield_percent(df_item["Close"])
                         df_item['MA5'] = df_item['Close'].rolling(window=5).mean()
                         df_item['MA20'] = df_item['Close'].rolling(window=20).mean()
                         df_item['MA60'] = df_item['Close'].rolling(window=60).mean()
@@ -213,6 +310,14 @@ if page == "第一頁：總經與風險鬧鐘":
                         
                         curr = float(df_item['Close'].iloc[-1])
                         prev = float(df_item['Close'].iloc[-2])
+                        if pd.isna(curr) or pd.isna(prev):
+                            valid_close = pd.to_numeric(df_item['Close'], errors='coerce').dropna()
+                            if len(valid_close) < 2:
+                                raise ValueError("有效收盤價不足")
+                            curr = float(valid_close.iloc[-1])
+                            prev = float(valid_close.iloc[-2])
+                        # BZ=F（布蘭特原油）換月時，Yahoo 連續合約的前後收盤可能來自不同月份，
+                        # 單日漲跌幅會出現與現貨不符的假性跳動；此處仍依原始收盤價計算，不另作調整。
                         pct = ((curr - prev) / prev) * 100
                         
                         with cols[idx % 2]:
@@ -233,8 +338,9 @@ if page == "第一頁：總經與風險鬧鐘":
                                 template="plotly_dark"
                             )
                             st.plotly_chart(fig, use_container_width=True)
-                except:
-                    pass
+                except Exception:
+                    logger.exception("總經指標 %s（%s）圖表載入失敗", name, ticker)
+                    st.warning(f"⚠️ {name}（{ticker}）資料抓取失敗，此圖表已略過，未使用預設價格。")
         except Exception as e:
             st.error(f"總經圖表載入失敗: {e}")
 
@@ -305,9 +411,15 @@ elif page == "第二頁：板塊與主題資金輪動":
                 formatted_str = ", ".join([f"{idx+1}. {s} ({w:.1f}%)" for idx, (s, w) in enumerate(holdings_list[:10])])
                 if formatted_str:
                     return formatted_str
-        except:
-            pass
-        return fallback_top10.get(ticker_symbol, "資料同步中...")
+            logger.warning("ETF %s 前十大持股為空，改用內建預設名單", ticker_symbol)
+        except Exception:
+            logger.exception("抓取 ETF %s 前十大持股失敗，改用內建預設名單", ticker_symbol)
+        fallback = fallback_top10.get(ticker_symbol)
+        if fallback:
+            st.warning(f"⚠️ {ticker_symbol} 前十大持股抓取失敗，已改用內建預設名單（非即時持股）。")
+            return f"（預設名單）{fallback}"
+        st.warning(f"⚠️ {ticker_symbol} 前十大持股抓取失敗，且無內建預設名單。")
+        return "資料同步中（抓取失敗，無預設名單）"
 
     with st.spinner("📡 正在從華爾街同步板塊與主題 ETF 之日K、多均線與持股結構數據..."):
         try:
@@ -350,6 +462,9 @@ elif page == "第二頁：板塊與主題資金輪動":
                         "月漲跌幅 (%)": round(monthly_pct, 2),
                         "前十大核心持股與佔比 (1-10 排序)": top10_str
                     })
+                else:
+                    logger.error("板塊 ETF %s（%s）歷史資料為空，已略過", ticker, name)
+                    st.warning(f"⚠️ {name}（{ticker}）歷史資料抓取失敗或為空，此板塊已略過，未使用估算漲跌幅。")
             
             df_sectors = pd.DataFrame(performance_list).sort_values(by="月漲跌幅 (%)", ascending=False)
             
@@ -465,6 +580,7 @@ elif page == "第三頁：重大行事曆與會展":
             "TSLA": "Tesla (特斯拉)"
         }
         events = []
+        failed = []
         for ticker, name in m7_dict.items():
             try:
                 t_obj = yf.Ticker(ticker)
@@ -490,9 +606,12 @@ elif page == "第三頁：重大行事曆與會展":
                         "項目": f"美股 M7 財報：{name} ({ticker})",
                         "影響": f"左右全球 AI 資本支出、科技股情緒與相關供應鏈（如半導體、伺服器）連動"
                     })
-            except:
-                pass
-        return events
+                else:
+                    logger.warning("%s（%s）財報日為空，未列入行事曆", name, ticker)
+            except Exception:
+                logger.exception("抓取 %s（%s）財報日失敗，此事件不列入行事曆", name, ticker)
+                failed.append(f"{name}（{ticker}）")
+        return events, failed
 
     base_events = [
         {"日期": "2026-10-25", "項目": "美國 PCE 物價指數公佈", "影響": "Fed 通膨目標核心觀測與降息路徑判定"},
@@ -509,7 +628,9 @@ elif page == "第三頁：重大行事曆與會展":
         {"日期": "2027-01-15", "項目": "台積電 (2330) 法人說明會", "影響": "台股大盤、半導體供應鏈、全球 AI 資本支出風向"}
     ]
 
-    m7_events = get_m7_earnings_events()
+    m7_events, m7_failed = get_m7_earnings_events()
+    if m7_failed:
+        st.warning("⚠️ 以下 M7 財報日抓取失敗，未列入行事曆，也未填入預設日期：" + "、".join(m7_failed))
     all_events = base_events + m7_events
 
     filtered_events = [ev for ev in all_events if today <= datetime.strptime(ev["日期"], "%Y-%m-%d").date() <= three_months_later]
@@ -596,6 +717,7 @@ elif page == "第四頁：部位監控與量化風控":
         }
         
         t_upper = str(ticker).upper()
+        sector_is_fallback = False
         if t_upper in detailed_sector_map:
             refined_sector = detailed_sector_map[t_upper]
         else:
@@ -610,11 +732,13 @@ elif page == "第四頁：部位監控與量化風控":
                     refined_sector = yf_sector
                 else:
                     refined_sector = "其他"
-            except:
+            except Exception:
+                logger.exception("抓取 %s 產業分類失敗，改用預設「其他與衍生品」", ticker)
                 refined_sector = "其他與衍生品"
+                sector_is_fallback = True
 
         if t_upper in ['TX', 'MTX', 'FMF']:
-            return 1.0, str(refined_sector)
+            return 1.0, str(refined_sector), sector_is_fallback, False
 
         try:
             benchmark = "^TWII" if is_tw else "^GSPC"
@@ -629,9 +753,10 @@ elif page == "第四頁：部位監控與量化風控":
                 beta = cov / var_bench if var_bench != 0 else 1.0
             else:
                 beta = 1.0
-            return float(round(beta, 2)), str(refined_sector)
-        except:
-            return 1.0, str(refined_sector)
+            return float(round(beta, 2)), str(refined_sector), sector_is_fallback, False
+        except Exception:
+            logger.exception("計算 %s Beta 失敗，改用預設 Beta 1.0", ticker)
+            return 1.0, str(refined_sector), sector_is_fallback, True
 
     @st.cache_data(ttl=60)
     def load_quant_database():
@@ -682,9 +807,11 @@ elif page == "第四頁：部位監控與量化風控":
         try:
             account_data, nav_data, quant_data = load_quant_database()
             try:
-                usdtwd_rate = float(yf.Ticker("USDTWD=X").history(period="1d")['Close'].iloc[-1])
-            except:
-                usdtwd_rate = 32.5 
+                usdtwd_rate = last_valid_close(yf.Ticker("USDTWD=X").history(period="1d"))
+            except Exception:
+                logger.exception("美元/台幣匯率（USDTWD=X）抓取失敗，改用預設值 32.5")
+                usdtwd_rate = 32.5
+                st.warning("⚠️ 美元/台幣匯率（USDTWD=X）抓取失敗，已改用預設值 32.50（預設值）。以下台幣換算使用此回退匯率，並非即時匯率。")
             
             df = quant_data.copy()
             df['標的'] = df['標的'].astype(str).str.strip().str.upper()
@@ -725,11 +852,16 @@ elif page == "第四頁：部位監控與量化風控":
                             df.at[idx, '維持保證金(原幣)'] = abs(row['名目合約總值(原幣)']) * 0.11
 
                 try:
-                    twii_price = float(yf.Ticker("^TWII").history(period="1d")['Close'].iloc[-1])
-                except:
+                    twii_price = last_valid_close(yf.Ticker("^TWII").history(period="1d"))
+                except Exception:
+                    logger.exception("台灣加權指數（^TWII）抓取失敗，改用預設值 23000")
                     twii_price = 23000.0
+                    st.warning("⚠️ 台灣加權指數（^TWII）抓取失敗，期貨計價已改用預設值 23000（預設值），並非即時指數。")
 
                 tickers, prices, betas, sectors = df['標的'].unique().tolist(), {}, {}, {}
+                beta_fallback_notes = {}
+                price_fallback_tickers = []
+                quote_failure_tickers = []
                 for ticker in tickers:
                     try:
                         t_upper = str(ticker).upper()
@@ -740,10 +872,17 @@ elif page == "第四頁：部位監控與量化風控":
                             continue
 
                         is_tw_market = (t_upper in ['TE', 'TF']) or ('.TW' in t_upper) or ('.TWO' in t_upper) or (len(t_upper) == 3 and t_upper.isalpha())
-                        b_val, s_val = get_market_beta_and_sector(ticker, is_tw_market)
+                        b_val, s_val, sector_is_fallback, beta_is_fallback = get_market_beta_and_sector(ticker, is_tw_market)
                         
                         betas[ticker] = b_val
                         sectors[ticker] = s_val
+                        if beta_is_fallback or sector_is_fallback:
+                            parts = []
+                            if beta_is_fallback:
+                                parts.append("Beta 1.0（預設值）")
+                            if sector_is_fallback:
+                                parts.append(f"產業別「{s_val}」（預設值）")
+                            beta_fallback_notes[str(ticker)] = f"{ticker}：{'、'.join(parts)}"
                         
                         if is_tw_market:
                             try:
@@ -754,15 +893,30 @@ elif page == "第四頁：部位監控與量化風控":
                                     prices[ticker] = float(match.group(1))
                                 else:
                                     prices[ticker] = float(yf.Ticker(ticker).history(period="1d")['Close'].iloc[-1])
-                            except:
+                            except Exception:
+                                logger.exception("台股 %s 網頁報價解析失敗，改以 yfinance 取得", ticker)
                                 prices[ticker] = float(yf.Ticker(ticker).history(period="1d")['Close'].iloc[-1])
                         else:
                             hist = yf.Ticker(ticker).history(period="5d")
                             prices[ticker] = float(hist['Close'].iloc[-1]) if not hist.empty else np.nan
-                    except:
+                        if pd.isna(prices.get(ticker, np.nan)):
+                            logger.error("%s 即時報價為空，將回退至平均成本", ticker)
+                            price_fallback_tickers.append(str(ticker))
+                    except Exception:
+                        logger.exception("抓取 %s 即時報價失敗，將回退至平均成本，Beta 暫以 1.0、產業別暫以「其他」", ticker)
                         prices[ticker] = np.nan
                         betas[ticker] = 1.0
                         sectors[ticker] = "其他"
+                        quote_failure_tickers.append(str(ticker))
+
+                for failed_ticker in quote_failure_tickers:
+                    beta_fallback_notes.pop(failed_ticker, None)
+                if beta_fallback_notes:
+                    st.warning("⚠️ 以下標的的市場資料抓取失敗，已改用預設值：" + "、".join(beta_fallback_notes.values()))
+                if price_fallback_tickers:
+                    st.warning("⚠️ 以下標的即時報價抓取失敗或為空，已改用平均成本作為回退價格（預設值，非即時市價）：" + "、".join(price_fallback_tickers))
+                if quote_failure_tickers:
+                    st.warning("⚠️ 以下標的報價抓取失敗：即時報價回退為平均成本（預設值），Beta 暫以 1.0（預設值）、產業別暫以「其他」（預設值）：" + "、".join(quote_failure_tickers))
                 
                 df['即時報價'] = df['標的'].map(prices)
                 df['即時報價'] = df['即時報價'].fillna(df['平均成本'])
