@@ -112,41 +112,62 @@ def series_optional_number(frame, column):
     return pd.to_numeric(raw, errors="coerce")
 
 
-def futures_account_metrics(balance, unrealized_pnl, initial_margin, maintenance_margin, reported_equity=None, reported_excess=None):
-    """期貨帳戶權益與保證金。
+# 試算表「名目曝險」與即時契約名目差超過這個比例才提示。盤中價格小幅移動不提示。
+FUTURES_NOTIONAL_GAP_RATIO = 0.05
 
-    估算權益數＝本日餘額＋未平倉損益。
-    盤中可動用（無掛單、無加收、無選擇權）＝估算權益數－未實現利得－原始保證金。
-    未實現利得只在未平倉損益為正時扣除，所以獲利不會增加可動用、虧損會減少可動用。
-    權益比率＝採用權益數÷原始保證金×100%。採用權益數優先用券商填報的「權益數」。
-    風險指標＝估算權益數÷原始保證金×100%（無選擇權、無加收保證金時與期交所公式相同）。
+
+def resolve_futures_account(
+    sheet_equity,
+    sheet_excess,
+    initial_margin,
+    maintenance_margin,
+    unrealized_pnl,
+    live_notional,
+    sheet_notional=None,
+    override_equity=None,
+    override_excess=None,
+):
+    """期貨帳戶沿用試算表現有欄位，不重算權益數。
+
+    預設（Active_Positions 的五欄）：權益數＝帳戶淨值，可動用保證金＝現金餘額。
+    權益比率＝權益數 ÷ 原始保證金 × 100%。槓桿＝即時名目曝險 ÷ 權益數。
+    選填欄「權益數」「可動用保證金」只有在有填數字時才覆寫。
+    未平倉損益只回傳供對照，不加入權益數。
     """
-    balance = float(balance)
-    unrealized_pnl = float(unrealized_pnl)
-    initial_margin = float(initial_margin)
-    maintenance_margin = float(maintenance_margin)
-    computed_equity = balance + unrealized_pnl
-    supplied_equity = _supplied_number(reported_equity)
-    supplied_excess = _supplied_number(reported_excess)
-    equity = supplied_equity if supplied_equity is not None else computed_equity
-    unrealized_gain = max(unrealized_pnl, 0.0)
-    computed_excess = computed_equity - unrealized_gain - initial_margin
-    excess = supplied_excess if supplied_excess is not None else computed_excess
-    equity_ratio = (equity / initial_margin * 100.0) if initial_margin else float("nan")
-    risk_indicator = (computed_equity / initial_margin * 100.0) if initial_margin else float("nan")
+    supplied_equity = _supplied_number(override_equity)
+    supplied_excess = _supplied_number(override_excess)
+    equity = supplied_equity if supplied_equity is not None else _supplied_number(sheet_equity)
+    excess = supplied_excess if supplied_excess is not None else _supplied_number(sheet_excess)
+    initial_margin = float(initial_margin or 0.0)
+    maintenance_margin = float(maintenance_margin or 0.0)
+    unrealized_pnl = float(unrealized_pnl or 0.0)
+    live = float(live_notional or 0.0)
+    sheet_n = _supplied_number(sheet_notional)
+    if equity is None or initial_margin == 0:
+        equity_ratio = float("nan")
+    else:
+        equity_ratio = equity / initial_margin * 100.0
+    if equity is None or equity == 0:
+        leverage = float("nan")
+    else:
+        leverage = live / equity
+    if sheet_n is None or sheet_n == 0:
+        gap = float("nan")
+    else:
+        gap = abs(live - sheet_n) / abs(sheet_n)
     return {
-        "balance": balance,
-        "unrealized_pnl": unrealized_pnl,
-        "computed_equity": computed_equity,
-        "equity": equity,
-        "equity_reported": supplied_equity is not None,
+        "equity": float("nan") if equity is None else float(equity),
+        "equity_source": "選填欄「權益數」" if supplied_equity is not None else "試算表「帳戶淨值」",
+        "excess": float("nan") if excess is None else float(excess),
+        "excess_source": "選填欄「可動用保證金」" if supplied_excess is not None else "試算表「現金餘額」",
         "initial_margin": initial_margin,
         "maintenance_margin": maintenance_margin,
-        "computed_excess": computed_excess,
-        "excess": excess,
-        "excess_reported": supplied_excess is not None,
+        "unrealized_pnl": unrealized_pnl,
+        "live_notional": live,
+        "sheet_notional": float("nan") if sheet_n is None else float(sheet_n),
+        "notional_gap": gap,
         "equity_ratio": equity_ratio,
-        "risk_indicator": risk_indicator,
+        "leverage": leverage,
     }
 
 
@@ -1096,6 +1117,9 @@ elif page == "第四頁：部位監控與量化風控":
                 acc_fut_notional = df.groupby('帳戶')['期貨名目曝險(台幣)'].sum()
 
             if not account_data.empty:
+                # 先留下試算表原值。期貨的帳戶淨值是券商權益數、名目曝險欄之後會被即時契約名目蓋掉。
+                sheet_equity_col = series_optional_number(account_data, "帳戶淨值")
+                sheet_notional_col = series_optional_number(account_data, "名目曝險")
                 for col in ["現金餘額", "融資/質押借款"]:
                     if col in account_data.columns:
                         account_data[col] = series_optional_number(account_data, col).fillna(0.0).astype(float)
@@ -1103,22 +1127,20 @@ elif page == "第四頁：部位監控與量化風控":
                 account_data['即時持股市值'] = account_data['帳戶名稱'].map(acc_market_val_twd).fillna(0.0).astype(float)
                 account_data['名目曝險'] = account_data['帳戶名稱'].map(acc_exp_twd).fillna(0.0).astype(float)
                 account_data['維持保證金總額'] = account_data['帳戶名稱'].map(acc_maint_margin).fillna(0.0).astype(float)
-                account_data['帳戶淨值'] = 0.0
+                account_data['帳戶淨值'] = np.nan
                 account_data['是期貨帳戶'] = account_data['帳戶名稱'].astype(str).map(is_futures_account_name)
                 reported_equity_col = series_optional_number(account_data, "權益數")
                 reported_excess_col = series_optional_number(account_data, "可動用保證金")
-                reported_balance_col = series_optional_number(account_data, "本日餘額")
-                account_data['估算權益數'] = np.nan
                 account_data['可動用保證金_採用'] = np.nan
                 account_data['權益來源'] = ""
                 account_data['可動用來源'] = ""
                 account_data['原始保證金_期貨'] = 0.0
                 account_data['維持保證金_期貨'] = 0.0
                 account_data['未平倉損益_期貨'] = 0.0
-                account_data['採用本日餘額'] = np.nan
                 account_data['權益比率_期貨'] = np.nan
-                account_data['風險指標_期貨'] = np.nan
                 account_data['契約名目_期貨'] = 0.0
+                account_data['試算表名目曝險'] = sheet_notional_col
+                account_data['名目差異'] = np.nan
                 
                 for idx, row in account_data.iterrows():
                     acc_name = str(row['帳戶名稱']).strip()
@@ -1126,31 +1148,29 @@ elif page == "第四頁：部位監控與量化風控":
                         pnl = float(acc_fut_pnl.get(acc_name, 0.0) or 0.0)
                         initial_m = float(acc_fut_initial.get(acc_name, 0.0) or 0.0)
                         maint_m = float(acc_fut_maint.get(acc_name, 0.0) or 0.0)
-                        if pd.notna(reported_balance_col.at[idx]):
-                            balance = float(reported_balance_col.at[idx])
-                        else:
-                            balance = float(row['現金餘額'])
-                        metrics = futures_account_metrics(
-                            balance,
-                            pnl,
+                        metrics = resolve_futures_account(
+                            sheet_equity_col.at[idx],
+                            row.get('現金餘額', 0.0),
                             initial_m,
                             maint_m,
-                            reported_equity=reported_equity_col.at[idx],
-                            reported_excess=reported_excess_col.at[idx],
+                            pnl,
+                            row['名目曝險'],
+                            sheet_notional=sheet_notional_col.at[idx],
+                            override_equity=reported_equity_col.at[idx],
+                            override_excess=reported_excess_col.at[idx],
                         )
                         account_data.at[idx, '帳戶淨值'] = metrics["equity"]
-                        account_data.at[idx, '現金餘額'] = metrics["balance"]
-                        account_data.at[idx, '採用本日餘額'] = metrics["balance"]
-                        account_data.at[idx, '估算權益數'] = metrics["computed_equity"]
-                        account_data.at[idx, '未平倉損益_期貨'] = metrics["unrealized_pnl"]
+                        account_data.at[idx, '現金餘額'] = metrics["excess"]
+                        account_data.at[idx, '可動用保證金_採用'] = metrics["excess"]
+                        account_data.at[idx, '權益來源'] = metrics["equity_source"]
+                        account_data.at[idx, '可動用來源'] = metrics["excess_source"]
                         account_data.at[idx, '原始保證金_期貨'] = metrics["initial_margin"]
                         account_data.at[idx, '維持保證金_期貨'] = metrics["maintenance_margin"]
-                        account_data.at[idx, '可動用保證金_採用'] = metrics["excess"]
+                        account_data.at[idx, '未平倉損益_期貨'] = metrics["unrealized_pnl"]
                         account_data.at[idx, '權益比率_期貨'] = metrics["equity_ratio"]
-                        account_data.at[idx, '風險指標_期貨'] = metrics["risk_indicator"]
                         account_data.at[idx, '契約名目_期貨'] = float(acc_fut_notional.get(acc_name, 0.0) or 0.0)
-                        account_data.at[idx, '權益來源'] = "券商填報" if metrics["equity_reported"] else "估算：本日餘額＋未平倉損益"
-                        account_data.at[idx, '可動用來源'] = "券商填報" if metrics["excess_reported"] else "估算：本日餘額－未實現損失－原始保證金"
+                        account_data.at[idx, '試算表名目曝險'] = metrics["sheet_notional"]
+                        account_data.at[idx, '名目差異'] = metrics["notional_gap"]
                     else:
                         cash = float(row['現金餘額'])
                         mkt_val = float(row['即時持股市值'])
@@ -1316,72 +1336,78 @@ elif page == "第四頁：部位監控與量化風控":
                             st.error(f"❌ 錯誤: {e}")
 
                 display_account = account_data[['帳戶名稱', '現金餘額', '融資/質押借款', '名目曝險', '帳戶淨值', '槓桿率 (倍)', '權益比率%/現金水位%']].copy()
+                display_account.rename(columns={
+                    "現金餘額": "現金餘額（期貨＝可動用保證金）",
+                    "帳戶淨值": "帳戶淨值（期貨＝權益數）",
+                }, inplace=True)
                 styled_df = display_account.style.format({
-                    "現金餘額": "NT$ {:,.0f}", "融資/質押借款": "NT$ {:,.0f}", "名目曝險": "NT$ {:,.0f}",
-                    "帳戶淨值": "NT$ {:,.0f}", "槓桿率 (倍)": "{:.2f}x", "權益比率%/現金水位%": "{:.1f}%"
+                    "現金餘額（期貨＝可動用保證金）": "NT$ {:,.0f}", "融資/質押借款": "NT$ {:,.0f}", "名目曝險": "NT$ {:,.0f}",
+                    "帳戶淨值（期貨＝權益數）": "NT$ {:,.0f}", "槓桿率 (倍)": "{:.2f}x", "權益比率%/現金水位%": "{:.1f}%"
                 }, na_rep="—").background_gradient(subset=["槓桿率 (倍)"], cmap="Reds").background_gradient(subset=["權益比率%/現金水位%"], cmap="RdYlGn")
                 st.dataframe(styled_df, use_container_width=True, hide_index=True)
                 st.caption(
-                    "期貨帳戶（名稱含「期貨」）：現金餘額＝本日餘額；帳戶淨值＝權益數；名目曝險＝契約名目曝險絕對值合計（乘數 × 價格 × 口數）；"
+                    "期貨帳戶（名稱含「期貨」）沿用試算表現有五欄，不重算權益數。"
+                    "現金餘額＝券商可動用保證金；帳戶淨值＝券商權益數；"
+                    "名目曝險＝即時契約名目（乘數 × 價格 × 口數的絕對值），不是試算表「名目曝險」欄；"
                     "槓桿＝名目曝險 ÷ 權益數；「權益比率%/現金水位%」＝權益數 ÷ 原始保證金。"
-                    "證券帳戶的最後一欄仍是現金餘額 ÷ 帳戶淨值。總現金水位的期貨部分改計可動用保證金，不把已占用的原始保證金算成閒置現金。"
+                    "證券帳戶的最後一欄仍是現金餘額 ÷ 帳戶淨值。總現金水位的期貨部分就是可動用保證金。"
                 )
 
                 futures_accounts = account_data[account_data["是期貨帳戶"]].copy()
                 if not futures_accounts.empty:
                     st.markdown("#### 期貨帳戶保證金")
                     st.caption(
-                        "公式（臺指期、無選擇權、無掛單、無加收保證金）："
-                        "契約名目曝險＝乘數 × 價格 × 口數（FMF／TMF 每點 10 元、MTX 50、TX 200）；"
-                        "未平倉損益＝（價格 − 平均成本）× 口數 × 乘數；"
-                        "估算權益數＝本日餘額＋未平倉損益；"
-                        "權益比率＝採用權益數 ÷ 原始保證金 × 100%；"
-                        "風險指標＝估算權益數 ÷ 原始保證金 × 100%；"
-                        "估算可動用＝估算權益數 − 未實現利得 − 原始保證金（虧損時未實現利得為 0）。"
-                        "試算表 Active_Positions 若填了「權益數」或「可動用保證金」，該欄改顯示券商數字。"
-                        "每日結算後，券商權益數通常只再加上「現價 − 前日結算價」的浮動損益，所以會和「本日餘額＋以均價計算的未平倉損益」不同。"
+                        "權益數直接採用試算表「帳戶淨值」，可動用保證金直接採用「現金餘額」。"
+                        "權益比率＝權益數 ÷ 原始保證金 × 100%。"
+                        "原始保證金來自持倉：FMF／TMF 每口 35,050、MTX 175,250、TX 701,000，持倉列若填「原始保證金」總額則覆寫。"
+                        "契約名目曝險＝乘數 × 價格 × 口數（FMF／TMF 每點 10 元、MTX 50、TX 200）；槓桿＝契約名目曝險 ÷ 權益數。"
+                        "未平倉損益＝（價格 − 平均成本）× 口數 × 乘數，只供對照，不加入權益數。"
+                        "選填欄「權益數」「可動用保證金」只有在有填數字時才覆寫上面兩欄。不必把本日餘額填進現金餘額，也不必新增欄位。"
                     )
                     futures_view = pd.DataFrame({
                         "帳戶": futures_accounts["帳戶名稱"],
-                        "本日餘額": futures_accounts["採用本日餘額"],
-                        "未平倉損益": futures_accounts["未平倉損益_期貨"],
-                        "估算權益數": futures_accounts["估算權益數"],
                         "權益數": futures_accounts["帳戶淨值"],
                         "權益來源": futures_accounts["權益來源"],
-                        "原始保證金": futures_accounts["原始保證金_期貨"],
-                        "維持保證金": futures_accounts["維持保證金_期貨"],
                         "可動用保證金": futures_accounts["可動用保證金_採用"],
                         "可動用來源": futures_accounts["可動用來源"],
+                        "原始保證金": futures_accounts["原始保證金_期貨"],
+                        "維持保證金": futures_accounts["維持保證金_期貨"],
+                        "未平倉損益": futures_accounts["未平倉損益_期貨"],
                         "權益比率 (%)": futures_accounts["權益比率_期貨"],
-                        "風險指標 (%)": futures_accounts["風險指標_期貨"],
                         "契約名目曝險": futures_accounts["契約名目_期貨"],
+                        "試算表名目曝險": futures_accounts["試算表名目曝險"],
                         "槓桿 (倍)": futures_accounts["槓桿率 (倍)"],
                     })
                     futures_styled = futures_view.style.format({
-                        "本日餘額": "NT$ {:,.0f}",
-                        "未平倉損益": "NT$ {:,.0f}",
-                        "估算權益數": "NT$ {:,.0f}",
                         "權益數": "NT$ {:,.0f}",
+                        "可動用保證金": "NT$ {:,.0f}",
                         "原始保證金": "NT$ {:,.0f}",
                         "維持保證金": "NT$ {:,.0f}",
-                        "可動用保證金": "NT$ {:,.0f}",
+                        "未平倉損益": "NT$ {:,.0f}",
                         "權益比率 (%)": "{:.2f}%",
-                        "風險指標 (%)": "{:.2f}%",
                         "契約名目曝險": "NT$ {:,.0f}",
+                        "試算表名目曝險": "NT$ {:,.0f}",
                         "槓桿 (倍)": "{:.2f}x",
                     }, na_rep="—")
                     st.dataframe(futures_styled, use_container_width=True, hide_index=True)
-                    estimated = futures_accounts[futures_accounts["權益來源"].astype(str).str.startswith("估算")]
-                    if not estimated.empty:
-                        names = "、".join(estimated["帳戶名稱"].astype(str).tolist())
+                    missing_equity = futures_accounts[futures_accounts["帳戶淨值"].isna()]
+                    if not missing_equity.empty:
+                        names = "、".join(missing_equity["帳戶名稱"].astype(str).tolist())
                         st.warning(
-                            f"⚠️ {names} 的權益數是估算值（本日餘額＋未平倉損益），尚未採用券商填報。"
-                            "請在 Google 試算表 Active_Positions 加上選填欄「權益數」「可動用保證金」，"
-                            "並確認「現金餘額」或「本日餘額」是券商的本日餘額，不是可動用保證金。"
+                            f"⚠️ {names} 的「帳戶淨值」是空的，權益數無法顯示。"
+                            "請把券商權益數填在 Active_Positions 的「帳戶淨值」，可動用保證金填在「現金餘額」。不必新增欄位。"
                         )
-                    missing_balance = futures_accounts[futures_accounts["採用本日餘額"].fillna(0.0) == 0.0]
-                    if not missing_balance.empty and not missing_balance["權益來源"].astype(str).eq("券商填報").all():
-                        st.warning("⚠️ 有期貨帳戶的本日餘額為 0。權益數會只剩未平倉損益，請填入券商「本日餘額」。")
+                    gap = futures_accounts["名目差異"]
+                    wide_gap = futures_accounts[gap.notna() & (gap > FUTURES_NOTIONAL_GAP_RATIO)]
+                    if not wide_gap.empty:
+                        bits = [
+                            f"{row['帳戶名稱']}（試算表 {row['試算表名目曝險']:,.0f}，即時 {row['名目曝險']:,.0f}，差 {row['名目差異'] * 100:.1f}%）"
+                            for _, row in wide_gap.iterrows()
+                        ]
+                        st.warning(
+                            "⚠️ 以下期貨帳戶的試算表「名目曝險」與即時契約名目相差超過 5%，畫面採用即時計算（乘數 × 價格 × 口數）："
+                            + "；".join(bits)
+                        )
 
             st.markdown("---")
             st.subheader("🎯 微觀持倉、Beta 值與精細產業即時損益追蹤")
