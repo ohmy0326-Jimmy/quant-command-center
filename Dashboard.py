@@ -12,6 +12,7 @@ from google import genai
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from oauth2client.service_account import ServiceAccountCredentials
+from ai_advice import generate_risk_manager_advice
 from app_secrets import read_secret
 from order_assistant_ui import render_order_assistant
 from portfolio_risk import (
@@ -764,11 +765,14 @@ elif page == "第四頁：部位監控與量化風控":
                 with st.spinner("AI 經理人正在分析中..."):
                     try:
                         gemini_key = os.environ.get("GEMINI_API_KEY") or read_secret("", "GEMINI_API_KEY")
-                        client = genai.Client(api_key=gemini_key)
-                        positions_summary = df[['標的', '名稱', '產業別', 'Beta值', '真實風險權重 (%)', '標的槓桿', '報酬率 (%)']].to_string(index=False) if not df.empty else "無持倉"
-                        prompt_text = f"總帳戶淨值: NT$ {total_net_liq:,.0f}\n合併總槓桿率: {global_leverage}x\n投資組合加權Beta: {portfolio_beta:.2f}\n總現金水位: {global_cash_pct}%\n持倉明細:\n{positions_summary}\n請給予 3 點風控建議。"
-                        response = client.models.generate_content(model='gemini-3.8-flash', contents=prompt_text)
-                        st.session_state.ai_memo_p4["text"] = response.text
+                        st.session_state.ai_memo_p4["text"] = generate_risk_manager_advice(
+                            df,
+                            total_net_liq,
+                            global_leverage,
+                            portfolio_beta,
+                            global_cash_pct,
+                            api_key=gemini_key,
+                        )
                         st.session_state.ai_memo_p4["time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     except Exception as e:
                         st.error(f"AI 呼叫失敗: {e}")

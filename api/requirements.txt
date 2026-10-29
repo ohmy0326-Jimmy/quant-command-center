@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+pydantic
+pandas
+numpy
+yfinance
+gspread
+requests
+oauth2client
+google-genai
+google-cloud-secret-manager
+tzdata
