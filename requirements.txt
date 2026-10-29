@@ -8,3 +8,4 @@ plotly
 oauth2client
 google-genai
 matplotlib
+google-cloud-secret-manager
