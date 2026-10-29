@@ -10,6 +10,8 @@ from jsonschema.validators import Draft202012Validator
 
 from macro_cycle import (
     AUTO_INDICATOR_IDS,
+    quadrant_shift,
+    week_change,
     DATA_PATH,
     REGIME_BANDS,
     REGIME_RISK,
@@ -27,13 +29,17 @@ from macro_cycle_live import clear_live_view, macro_view_for_orders, read_macro_
 from macro_cycle_sheet import (
     CYCLES,
     DIRECTIONS,
+    HISTORY_HEADERS,
     INDUSTRY_CYCLE_HEADERS,
     MACRO_SCORE_HEADERS,
     STANCES,
     compose_macro_view,
+    exposure_by_industry,
     headers_missing,
     parse_fred_csv,
+    parse_history_rows,
     parse_industry_rows,
+    underweight_warnings,
     score_auto_from_markets,
     score_hy_spread,
     score_ma_gap,
@@ -263,12 +269,13 @@ class SheetAndAutoTests(unittest.TestCase):
     def test_headers_and_allowed_values(self):
         self.assertEqual(
             MACRO_SCORE_HEADERS,
-            ("indicator_id", "name", "score", "source", "value", "note", "updated_at"),
+            ("indicator_id", "name", "score", "source", "value", "trend", "note", "updated_at"),
         )
         self.assertEqual(
             INDUSTRY_CYCLE_HEADERS,
-            ("industry", "cycle", "direction", "stance", "tickers", "note", "updated_at"),
+            ("industry", "cycle", "direction", "stance", "tickers", "rationale", "prev_cycle", "note", "updated_at"),
         )
+        self.assertEqual(HISTORY_HEADERS, ("week", "total", "regime"))
         self.assertEqual(headers_missing(["indicator_id", "name"], MACRO_SCORE_HEADERS)[0], "score")
         self.assertEqual(CYCLES, ("復甦", "成長", "趨緩", "衰退"))
         self.assertEqual(DIRECTIONS, ("上行", "持平", "下行"))
@@ -388,6 +395,33 @@ class SheetAndAutoTests(unittest.TestCase):
         remember_live_view({"ok": True, "data_origin": "sheet", "regime": "牛"}, now=1_000)
         self.assertEqual(macro_view_for_orders(now=1_100)["data_origin"], "sheet")
         self.assertEqual(macro_view_for_orders(now=1_000 + 15 * 60 + 1)["data_origin"], "json")
+
+    def test_history_week_change_and_quadrant_shift(self):
+        rows, warnings = parse_history_rows(
+            [
+                {"week": "2026-10-19", "total": 0, "regime": "中性"},
+                {"week": "壞掉", "total": 1, "regime": "中性"},
+                {"week": "2026-10-26", "total": 1, "regime": "中性"},
+            ]
+        )
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(len(warnings), 1)
+        self.assertEqual(week_change(1, rows, "2026-10-26"), 1)
+        self.assertEqual(quadrant_shift({"cycle": "趨緩", "prev_cycle": "成長"}), "成長→趨緩")
+        self.assertEqual(quadrant_shift({"cycle": "成長", "prev_cycle": "成長"}), "")
+        self.assertEqual(quadrant_shift({"cycle": "成長"}), "")
+        view = load_macro_cycle()
+        self.assertEqual(view["week_change"], 1)
+        exposure, grand = exposure_by_industry(
+            [{"ticker": "2330", "mv": 80}, {"ticker": "2408.TW", "mv": 20}, {"ticker": "SOXL", "mv": 50}],
+            view["industries"],
+        )
+        self.assertEqual(grand, 150)
+        self.assertAlmostEqual(exposure["先進製程"]["pct"], 80 / 150 * 100)
+        self.assertAlmostEqual(exposure["記憶體"]["pct"], 20 / 150 * 100)
+        self.assertNotIn("SOXL", str(exposure))
+        notes = underweight_warnings(view["industries"], {"記憶體": {"pct": 13.3}, "消費電子": {"pct": 9.9}})
+        self.assertEqual(notes, ["記憶體 是減碼，持股佔 13.3%"])
 
     def test_reader_does_not_create_missing_tabs(self):
         class Missing:

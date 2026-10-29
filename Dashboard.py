@@ -116,6 +116,27 @@ def cached_quote_bundle(tickers: tuple):
     return {"prices": prices, "betas": betas, "sectors": sectors, "twii": float(twii)}
 
 
+def load_book_for_page5():
+    """第四頁同一套快取與 finalize_valuation。第五頁用來對槓桿與現金。"""
+    account_data, _nav, quant = load_quant_database()
+    frame = normalize_positions(quant)
+    usdtwd = cached_usdtwd()
+    if not frame.empty and "標的" in frame.columns:
+        bundle = cached_quote_bundle(tuple(dict.fromkeys(frame["標的"].astype(str).tolist())))
+        frame = attach_quotes(frame, bundle["prices"], bundle["betas"], bundle["sectors"])
+    valued, _accounts, metrics = finalize_valuation(frame, account_data, usdtwd)
+    positions = []
+    if valued is not None and not valued.empty and "即時市值(台幣)" in valued.columns:
+        for _, row in valued.iterrows():
+            positions.append({"ticker": str(row.get("標的") or ""), "mv": float(row.get("即時市值(台幣)") or 0)})
+    return {
+        "ok": True,
+        "positions": positions,
+        "leverage": float(metrics.get("leverage") or 0),
+        "cash_pct": float(metrics.get("cash_pct") or 0),
+    }
+
+
 def load_market_for_page6(tickers: tuple):
     usdtwd = cached_usdtwd()
     if not tickers:
@@ -801,7 +822,7 @@ elif page == "第四頁：部位監控與量化風控":
 # 第五頁：總經週期與配置（本機 JSON，不打外部 API）
 # ==========================================
 elif page == "第五頁：總經週期與配置":
-    render_macro_cycle_page()
+    render_macro_cycle_page(load_book=load_book_for_page5)
 
 # ==========================================
 # 第六頁：下單輔助（只試算，不送委託）

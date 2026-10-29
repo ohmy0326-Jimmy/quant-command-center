@@ -9,9 +9,18 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from macro_cycle import industry_quadrant_points, load_macro_cycle, regime_rows, regime_scale_text
+from macro_cycle import industry_quadrant_points, load_macro_cycle, quadrant_shift, regime_rows, regime_scale_text
 from macro_cycle_live import fetch_auto_results, load_service_key, macro_view_for_orders, read_quant_macro_tabs, remember_live_view
-from macro_cycle_sheet import AUTO_CACHE_SECONDS, SHEET_CACHE_SECONDS, compose_macro_view
+from macro_cycle_sheet import (
+    AUTO_CACHE_SECONDS,
+    HEAVY_UNDERWEIGHT_PCT,
+    SHEET_CACHE_SECONDS,
+    compose_macro_view,
+    exposure_by_industry,
+    underweight_warnings,
+)
+
+RESEARCH_URL = "https://cursor.com/canvas/store-9fa877c7-1d47-4b9a-a8f8-eaeb67263eba/aaaf4e7c-fb03-4170-93ac-a7f93481fbb7"
 
 
 def cached_macro_cycle_view() -> dict:
@@ -19,46 +28,25 @@ def cached_macro_cycle_view() -> dict:
     return macro_view_for_orders()
 
 
-def render_macro_cycle_page():
+def render_macro_cycle_page(load_book=None):
     with st.spinner("正在讀試算表與自動指標…"):
         view = _page5_view()
+    book = _cached_book(load_book)
     st.title("第五頁：總經週期與配置")
-    origin = view.get("data_origin")
-    if origin == "sheet":
-        st.caption("平時改 Quant_Database 的 Macro_Score、Industry_Cycle 就好，不必為了每週數字重新部署。試算表快取 15 分鐘，自動指標快取 1 小時。這一頁才會抓資料。")
-    elif origin == "json":
-        st.caption("試算表這次沒可用，先用倉庫裡的 data/macro_cycle.json。第六頁不會為了這個再去抓。")
-    else:
-        st.caption("試算表和倉庫備援都沒有可用分數。")
-
+    st.markdown(f"[研究報告]({RESEARCH_URL})")
     _show_warnings(view)
     if not view.get("ok"):
-        st.warning("總經資料沒有套用。下單輔助的目標槓桿上限與最低現金會暫用中性：1.5 倍、現金 15%。")
+        st.warning("總經資料沒有套用。下單輔助暫用中性：1.5 倍、現金 15%。")
         return
-
-    commentary = view.get("commentary") or {} if view.get("data_origin") == "json" else {}
-    if commentary.get("score") or commentary.get("industries"):
-        lines = [text for text in (commentary.get("score"), commentary.get("industries")) if text]
-        st.info("\n\n".join(lines))
-
-    total = int(view["total"])
-    regime = view["regime"]
-    risk = view["risk"]
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("多空分數", f"{total:+d}", "區間 -18～+18")
-    c2.metric("多空狀態", regime)
-    c3.metric("分數更新", view["score_updated_at"], "每週")
-    c4.metric("產業圖更新", view["industry_updated_at"], "每月 12 日")
-    st.caption(
-        f"分數對照：{regime_scale_text()}。現在 {total:+d} 是{regime}。"
-        f"第六頁會以此為預設，目標槓桿上限 {risk['target_leverage']:.1f} 倍、最低現金水位 {risk['min_cash_pct']:.0f}%。進第六頁之後仍可手動改。"
-    )
-    st.caption(f"資料格式 {view['schema_version']}。")
-
+    _render_summary(view, book)
     _render_indicators(view["indicators"])
-    _render_industries(view["industries"])
     _render_quadrant(view["industries"])
-    _render_risk_table(regime)
+    _render_industries(view["industries"], book)
+    _render_framework(view["industries"], book)
+    _render_history(view)
+    with st.expander("制度對照"):
+        st.caption(regime_scale_text())
+        _render_risk_table(view["regime"])
 
 
 def _page5_view() -> dict:
@@ -120,64 +108,157 @@ def _show_warnings(view: dict) -> None:
             st.write(message)
 
 
+def _cached_book(load_book):
+    now = time.time()
+    hit = _cached_value("macro_book_cache", 180, now)
+    if hit is not None:
+        return hit
+    if load_book is None:
+        book = {"ok": False}
+    else:
+        try:
+            book = load_book()
+        except Exception:
+            book = {"ok": False}
+    st.session_state["macro_book_cache"] = {"t": now, "v": book}
+    return book
+
+
+def _render_summary(view: dict, book: dict):
+    regime = view["regime"]
+    total = int(view["total"])
+    risk = view["risk"]
+    change = view.get("week_change")
+    change_text = "尚無上週" if change is None else f"{change:+d}"
+    st.header(regime)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("總分", f"{total:+d}", change_text)
+    c2.metric("槓桿上限", f"{risk['target_leverage']:.1f}x")
+    c3.metric("現金下限", f"{risk['min_cash_pct']:.0f}%")
+    if book.get("ok"):
+        leverage = float(book["leverage"])
+        cash = float(book["cash_pct"])
+        leverage_ok = leverage <= float(risk["target_leverage"]) + 1e-9
+        cash_ok = cash + 1e-9 >= float(risk["min_cash_pct"])
+        c4.metric("目前槓桿 / 現金", f"{leverage:.2f}x", f"現金 {cash:.1f}%")
+        if leverage_ok and cash_ok:
+            st.success(f"綠燈。槓桿 {leverage:.2f}x 未過上限，現金 {cash:.1f}% 高於下限。")
+        else:
+            bits = []
+            if not leverage_ok:
+                bits.append(f"槓桿 {leverage:.2f}x 高於 {risk['target_leverage']:.1f}x")
+            if not cash_ok:
+                bits.append(f"現金 {cash:.1f}% 低於 {risk['min_cash_pct']:.0f}%")
+            st.error("紅燈。" + "，".join(bits) + "。")
+    else:
+        c4.metric("目前槓桿 / 現金", "—")
+        st.caption("持倉未讀到，只顯示制度上限。")
+
+
 def _render_indicators(indicators: list[dict]):
     st.subheader("多空指標")
-    st.caption("每項 -2 到 +2。來源「自動」是這一頁算出來的，「手動」來自試算表或倉庫備援。壞掉的列會略過，並寫在上面的檢查裡。")
-
     frame = pd.DataFrame(
         [
             {
                 "指標": item["name"],
+                "讀數": item.get("value") or "—",
                 "分數": int(item["score"]),
+                "趨勢": item.get("trend") or "—",
                 "來源": item.get("source_label") or ("自動" if item.get("source") == "auto" else "手動"),
                 "更新": item.get("updated_at") or "",
-                "觀測值": item.get("value") or "",
-                "備註": item.get("note") or "",
             }
             for item in indicators
         ]
     )
     st.dataframe(frame, width="stretch", hide_index=True)
 
-    names = [item["name"] for item in indicators][::-1]
-    scores = [int(item["score"]) for item in indicators][::-1]
-    colors = [_score_color(score) for score in scores]
-    fig = go.Figure(go.Bar(x=scores, y=names, orientation="h", marker_color=colors, hovertemplate="%{y}：%{x:+d}<extra></extra>"))
-    fig.update_layout(
-        title="九項分數",
-        template="plotly_dark",
-        height=420,
-        margin=dict(l=10, r=10, t=40, b=10),
-        xaxis=dict(title="分數", range=[-2.5, 2.5], dtick=1),
-        yaxis=dict(title=""),
-    )
-    st.plotly_chart(fig, width="stretch")
 
-
-def _render_industries(industries: list[dict]):
+def _render_industries(industries: list[dict], book: dict):
     st.subheader("二十個產業")
-    st.caption("試算表有的產業用試算表。沒有的列才沿用倉庫，那些列的備註會標示例。")
-    frame = pd.DataFrame(
-        [
+    positions = book.get("positions") or [] if book.get("ok") else []
+    exposure, _grand = exposure_by_industry(positions, industries)
+    choice = st.radio("立場", ["全部", "加碼", "中性", "減碼"], horizontal=True, key="macro_stance_filter")
+    rows = []
+    for item in industries:
+        if choice != "全部" and item.get("stance") != choice:
+            continue
+        held = exposure.get(item["name"], {})
+        shift = quadrant_shift(item)
+        rows.append(
             {
                 "產業": item["name"],
-                "標記": "示例" if item.get("example") else "立場已定",
-                "週期位置": item["cycle"],
+                "週期": item["cycle"],
                 "方向": item["direction"],
                 "立場": item["stance"],
-                "代表股": "、".join(item["tickers"]),
-                "備註": item.get("note") or "",
+                "一句話": item.get("rationale") or "—",
+                "換象限": shift or "—",
+                "你的持股": held.get("mv", 0.0),
+                "佔比": held.get("pct", 0.0),
+                "代表股": "、".join(item.get("tickers") or []),
             }
-            for item in industries
-        ]
-    )
+        )
+    if not rows:
+        st.caption("這個立場目前沒有產業。")
+        return
+    frame = pd.DataFrame(rows)
     styler = frame.style
     paint = _paint_stance
     if hasattr(styler, "map"):
         styler = styler.map(paint, subset=["立場"])
     else:
         styler = styler.applymap(paint, subset=["立場"])
-    st.dataframe(styler, width="stretch", hide_index=True)
+    st.dataframe(
+        styler.format({"你的持股": "NT$ {:,.0f}", "佔比": "{:.1f}%"}),
+        width="stretch",
+        hide_index=True,
+    )
+
+
+def _render_framework(industries: list[dict], book: dict):
+    st.subheader("持倉與框架")
+    if not book.get("ok"):
+        st.caption("持倉未讀到。")
+        return
+    exposure, _grand = exposure_by_industry(book.get("positions") or [], industries)
+    notes = underweight_warnings(industries, exposure)
+    for note in notes:
+        st.error(note)
+    if not notes:
+        st.success(f"減碼產業的持股都低於 {HEAVY_UNDERWEIGHT_PCT:.0f}%。")
+    rows = []
+    for item in industries:
+        held = exposure.get(item["name"])
+        if not held:
+            continue
+        rows.append({"產業": item["name"], "立場": item["stance"], "佔比": held["pct"], "市值": held["mv"]})
+    if not rows:
+        st.caption("代表股對不上目前持倉。")
+        return
+    frame = pd.DataFrame(rows).sort_values("佔比", ascending=False)
+    st.dataframe(
+        frame.style.format({"佔比": "{:.1f}%", "市值": "NT$ {:,.0f}"}),
+        width="stretch",
+        hide_index=True,
+    )
+
+
+def _render_history(view: dict):
+    st.subheader("總分歷史")
+    history = list(view.get("history") or [])
+    if not history:
+        st.caption("尚無週分數歷史。")
+        return
+    frame = pd.DataFrame(history).sort_values("week")
+    fig = go.Figure(go.Scatter(x=frame["week"], y=frame["total"], mode="lines+markers", name="總分"))
+    fig.update_layout(
+        title="每週總分",
+        template="plotly_dark",
+        height=320,
+        margin=dict(l=10, r=10, t=40, b=10),
+        xaxis_title="週",
+        yaxis_title="總分",
+    )
+    st.plotly_chart(fig, width="stretch")
 
 
 def _render_quadrant(industries: list[dict]):

@@ -308,6 +308,7 @@ class DashboardWiringTests(unittest.TestCase):
         with open(ui_path, encoding="utf-8") as handle:
             order_ui = handle.read()
         self.assertIn("把這份摘要推到 Telegram", order_ui)
+        self.assertIn("參數來自：", order_ui)
         self.assertIn("format_holding_tag", order_ui)
         self.assertIn("oa_apply_regime_defaults", order_ui)
         self.assertIn("@st.fragment", order_ui)

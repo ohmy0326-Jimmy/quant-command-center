@@ -269,6 +269,31 @@ def industry_quadrant_points(industries: list[dict]) -> list[dict]:
     return points
 
 
+def week_change(total: int, history: list[dict], as_of: str | None) -> int | None:
+    """本週總分減去上一筆更早的週分數。沒有上週就回 None。"""
+    prior = []
+    for row in history or []:
+        week = str(row.get("week") or "")
+        if not week or (as_of and week >= as_of):
+            continue
+        if row.get("total") is None:
+            continue
+        prior.append(row)
+    if not prior:
+        return None
+    prior.sort(key=lambda row: str(row["week"]))
+    return int(total) - int(prior[-1]["total"])
+
+
+def quadrant_shift(item: dict) -> str:
+    """上月週期不同才回傳『成長→趨緩』，否則空字串。"""
+    previous = str(item.get("prev_cycle") or "").strip()
+    current = str(item.get("cycle") or "").strip()
+    if not previous or previous == current:
+        return ""
+    return f"{previous}→{current}"
+
+
 def decorate_indicator(item: dict, updated_default: str, origin: str) -> dict:
     source = str(item.get("source") or "manual").strip().lower()
     if source not in {"auto", "manual"}:
@@ -282,6 +307,7 @@ def decorate_indicator(item: dict, updated_default: str, origin: str) -> dict:
         "source": source,
         "source_label": "自動" if source == "auto" else "手動",
         "value": str(item.get("value") or ""),
+        "trend": str(item.get("trend") or ""),
         "note": str(item.get("note") or ""),
         "updated_at": updated,
         "origin": origin,
@@ -333,6 +359,8 @@ def assemble_view(
         "risk": risk_params_for_regime(regime),
         "ticker_index": _ticker_index(industries),
         "commentary": dict(commentary or {}),
+        "history": [],
+        "week_change": None,
     }
 
 
@@ -340,7 +368,7 @@ def _view_from_valid(raw: dict) -> dict:
     updated = raw["score"]["updated_at"]
     indicators = [decorate_indicator(item, updated, "json") for item in raw["score"]["indicators"]]
     industries = [dict(item, origin="json") for item in raw["industries"]["items"]]
-    return assemble_view(
+    view = assemble_view(
         indicators,
         industries,
         origin="json",
@@ -350,6 +378,9 @@ def _view_from_valid(raw: dict) -> dict:
         industry_updated_at=raw["industries"]["updated_at"],
         industry_as_of_day=int(raw["industries"]["as_of_day"]),
     )
+    view["history"] = list(raw.get("history") or [])
+    view["week_change"] = week_change(view["total"], view["history"], updated)
+    return view
 
 
 def _ticker_index(industries: list[dict]) -> dict[str, dict]:

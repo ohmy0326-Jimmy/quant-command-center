@@ -11,6 +11,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from macro_cycle import load_macro_cycle
 from macro_cycle_sheet import (
     AUTO_CACHE_SECONDS,
+    HISTORY_HEADERS,
+    HISTORY_TAB,
     INDUSTRY_CYCLE_HEADERS,
     INDUSTRY_CYCLE_TAB,
     MACRO_SCORE_HEADERS,
@@ -58,22 +60,27 @@ def read_macro_tabs(spreadsheet) -> dict:
     """讀兩個分頁。分頁不存在或表頭不符時，該側帶錯誤，不建立分頁。"""
     scores, score_error = _read_tab(spreadsheet, MACRO_SCORE_TAB, MACRO_SCORE_HEADERS)
     industries, industry_error = _read_tab(spreadsheet, INDUSTRY_CYCLE_TAB, INDUSTRY_CYCLE_HEADERS)
+    history, history_error = _read_tab(spreadsheet, HISTORY_TAB, HISTORY_HEADERS)
     if score_error and industry_error:
         return {
             "ok": False,
             "error": f"{score_error}；{industry_error}",
             "scores": [],
             "industries": [],
+            "history": [],
             "score_error": score_error,
             "industry_error": industry_error,
+            "history_error": history_error,
         }
     return {
         "ok": True,
         "error": "",
         "scores": scores,
         "industries": industries,
+        "history": history,
         "score_error": score_error,
         "industry_error": industry_error,
+        "history_error": history_error,
     }
 
 
@@ -92,7 +99,16 @@ def read_quant_macro_tabs(key_data: dict, spreadsheet_id: str = QUANT_SPREADSHEE
         spreadsheet = client.open_by_key(spreadsheet_id)
         return read_macro_tabs(spreadsheet)
     except Exception as exc:
-        return {"ok": False, "error": f"試算表讀不到（{exc.__class__.__name__}）", "scores": [], "industries": [], "score_error": "", "industry_error": ""}
+        return {
+            "ok": False,
+            "error": f"試算表讀不到（{exc.__class__.__name__}）",
+            "scores": [],
+            "industries": [],
+            "history": [],
+            "score_error": "",
+            "industry_error": "",
+            "history_error": "",
+        }
     finally:
         socket.setdefaulttimeout(previous)
 

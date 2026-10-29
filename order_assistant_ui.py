@@ -111,8 +111,7 @@ def _render_rule_editor(view: dict):
                 f"總經檔沒有套用（{detail}）。目標槓桿上限與最低現金先用中性："
                 f"{risk['target_leverage']:.1f} 倍、{risk['min_cash_pct']:.0f}%。"
             )
-        if _regime_overridden(view):
-            st.caption("目標槓桿上限或最低現金目前是你手動調過的數字。")
+        st.caption("參數來自：" + ("手動" if _regime_overridden(view) else "牛熊等級"))
         if float(st.session_state["oa_stage2_leverage"]) > float(st.session_state["oa_target_leverage"]) + 1e-9:
             st.caption("第二階段槓桿比目標上限高。若要第二階段再壓低槓桿，把這個數字調到目標以下。")
         st.button("改回總經週期預設", on_click=_queue_regime_reset)
@@ -664,6 +663,7 @@ def render_order_assistant(send_to_telegram, load_sheets, beta_fn, load_market=N
         st.session_state["oa_apply_regime_defaults"] = False
     _init_rule_state(view)
     st.title("第六頁：下單輔助系統")
+    st.caption("參數來自：" + ("手動" if _regime_overridden(view) else "牛熊等級"))
     st.caption("下單前先看這一筆對整個部位的影響：槓桿、現金、Beta、保證金與壓力淨值。只做規劃，不會送出任何委託。")
 
     on_cloud = bool(os.environ.get("K_SERVICE"))

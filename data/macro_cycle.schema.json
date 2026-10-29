@@ -11,6 +11,20 @@
       "const": "1.0.0",
       "description": "資料格式版本。v1 即 1.0.0。欄位有破壞性變更時才升版，只改分數或產業內容不升版。"
     },
+    "history": {
+      "type": "array",
+      "description": "倉庫備援的週分數。正式歷史在試算表 Macro_Score_History。",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["week", "total", "regime"],
+        "properties": {
+          "week": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+          "total": { "type": "integer", "minimum": -18, "maximum": 18 },
+          "regime": { "enum": ["牛", "偏多", "中性", "偏空", "熊"] }
+        }
+      }
+    },
     "commentary": {
       "type": "object",
       "additionalProperties": false,
@@ -98,6 +112,7 @@
         },
         "value": { "type": "string" },
         "note": { "type": "string" },
+        "trend": { "type": "string", "description": "一句話趨勢，例如 下降、高於年線。" },
         "updated_at": {
           "type": "string",
           "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
@@ -136,7 +151,12 @@
           "type": "boolean",
           "description": "true 表示整列（含立場）都是示例。false 表示立場是目前配置；週期、方向與代表股仍可能是示例，請看 note。"
         },
-        "note": { "type": "string" }
+        "note": { "type": "string" },
+        "rationale": { "type": "string", "description": "一句話理由。" },
+        "prev_cycle": {
+          "enum": ["復甦", "成長", "趨緩", "衰退", ""],
+          "description": "上個月的週期位置。空白表示沒有上月。與 cycle 不同就標成換象限。"
+        }
       }
     }
   }

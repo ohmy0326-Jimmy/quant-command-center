@@ -11,9 +11,11 @@ from macro_cycle import (
     AUTO_INDICATOR_IDS,
     CANONICAL_IDS,
     CANONICAL_NAMES,
+    REGIME_BANDS,
     assemble_view,
     canonical_ticker,
     decorate_indicator,
+    week_change,
 )
 
 # Quant_Database（1nMpEaNcIqymaTHiqJDhMxm5gLzCWrlfk5wkpCMJMjGM）的分頁。
@@ -28,6 +30,7 @@ MACRO_SCORE_HEADERS = (
     "score",
     "source",
     "value",
+    "trend",
     "note",
     "updated_at",
 )
@@ -37,9 +40,14 @@ INDUSTRY_CYCLE_HEADERS = (
     "direction",
     "stance",
     "tickers",
+    "rationale",
+    "prev_cycle",
     "note",
     "updated_at",
 )
+HISTORY_TAB = "Macro_Score_History"
+HISTORY_HEADERS = ("week", "total", "regime")
+HEAVY_UNDERWEIGHT_PCT = 10.0
 
 CYCLES = ("復甦", "成長", "趨緩", "衰退")
 DIRECTIONS = ("上行", "持平", "下行")
@@ -99,6 +107,7 @@ def parse_score_row(row: dict) -> tuple[dict | None, str | None]:
         "source": source,
         "value": str(row.get("value") or "").strip(),
         "note": str(row.get("note") or "").strip(),
+        "trend": str(row.get("trend") or "").strip(),
         "updated_at": updated,
         "example": False,
     }, None
@@ -147,6 +156,9 @@ def parse_industry_row(row: dict) -> tuple[dict | None, str | None]:
     updated = parse_sheet_date(row.get("updated_at"))
     if updated is None:
         return None, f"{name} 的 updated_at 不是日期"
+    previous = str(row.get("prev_cycle") or "").strip()
+    if previous and previous not in CYCLES:
+        return None, f"{name} 的 prev_cycle 不是上月週期"
     return {
         "id": _industry_id(name),
         "name": name,
@@ -156,9 +168,66 @@ def parse_industry_row(row: dict) -> tuple[dict | None, str | None]:
         "tickers": tickers,
         "example": False,
         "note": str(row.get("note") or "").strip(),
+        "rationale": str(row.get("rationale") or "").strip(),
+        "prev_cycle": previous,
         "updated_at": updated,
         "origin": "sheet",
     }, None
+
+
+def parse_history_rows(rows: list[dict]) -> tuple[list[dict], list[str]]:
+    accepted = []
+    warnings = []
+    seen = set()
+    regimes = {name for name, _low, _high in REGIME_BANDS}
+    for index, row in enumerate(rows or [], start=2):
+        week = parse_sheet_date(row.get("week"))
+        total = _parse_history_total(row.get("total"))
+        regime = str(row.get("regime") or "").strip()
+        if week is None or total is None or regime not in regimes:
+            warnings.append(f"Macro_Score_History 第 {index} 列略過")
+            continue
+        if week in seen:
+            warnings.append(f"Macro_Score_History 第 {index} 列略過：{week} 重複")
+            continue
+        seen.add(week)
+        accepted.append({"week": week, "total": total, "regime": regime})
+    accepted.sort(key=lambda item: item["week"])
+    return accepted, warnings
+
+
+def exposure_by_industry(positions: list[dict], industries: list[dict]) -> tuple[dict[str, dict], float]:
+    """持倉市值對到代表股。回傳各產業市值與佔全部持股市值的百分比。"""
+    index = {}
+    for item in industries:
+        for ticker in item.get("tickers") or []:
+            index[canonical_ticker(ticker)] = item["name"]
+    totals: dict[str, float] = {}
+    grand = 0.0
+    for pos in positions or []:
+        mv = float(pos.get("mv") or 0)
+        if mv <= 0:
+            continue
+        grand += mv
+        name = index.get(canonical_ticker(pos.get("ticker")))
+        if not name:
+            continue
+        totals[name] = totals.get(name, 0.0) + mv
+    out = {}
+    for name, mv in totals.items():
+        out[name] = {"mv": mv, "pct": (mv / grand * 100.0) if grand else 0.0}
+    return out, grand
+
+
+def underweight_warnings(industries: list[dict], exposure: dict[str, dict], heavy: float = HEAVY_UNDERWEIGHT_PCT) -> list[str]:
+    notes = []
+    for item in industries:
+        if item.get("stance") != "減碼":
+            continue
+        pct = float(exposure.get(item["name"], {}).get("pct") or 0)
+        if pct >= heavy:
+            notes.append(f"{item['name']} 是減碼，持股佔 {pct:.1f}%")
+    return notes
 
 
 def parse_fred_csv(text: str) -> list[float]:
@@ -279,7 +348,19 @@ def compose_macro_view(json_view: dict, sheet: dict | None, auto: dict | None, t
     if not view.get("ok"):
         return view
     _apply_auto(view, auto, view["warnings"], today)
+    _attach_history(view, sheet, json_view)
     return _refresh_totals(view)
+
+
+def _attach_history(view: dict, sheet: dict, json_view: dict) -> None:
+    warnings = view.setdefault("warnings", [])
+    if sheet.get("history_error"):
+        warnings.append(str(sheet["history_error"]))
+        view["history"] = list(json_view.get("history") or [])
+        return
+    rows, extra = parse_history_rows(sheet.get("history") or [])
+    warnings.extend(extra)
+    view["history"] = rows or list(json_view.get("history") or [])
 
 
 def score_ma_gap(gap: float) -> int:
@@ -416,6 +497,8 @@ def _apply_auto(view: dict, auto: dict, warnings: list[str], today: str) -> None
         if result.get("ok"):
             item["score"] = int(result["score"])
             item["value"] = str(result.get("value") or "")
+            if result.get("trend"):
+                item["trend"] = str(result["trend"])
             item["source"] = "auto"
             item["source_label"] = "自動"
             item["updated_at"] = str(result.get("updated_at") or today)
@@ -445,7 +528,24 @@ def _refresh_totals(view: dict) -> dict:
         industry_updated_at=view.get("industry_updated_at"),
         industry_as_of_day=view.get("industry_as_of_day"),
     )
+    refreshed["history"] = list(view.get("history") or [])
+    refreshed["week_change"] = week_change(refreshed["total"], refreshed["history"], refreshed.get("score_updated_at"))
     return refreshed
+
+
+def _parse_history_total(value) -> int | None:
+    if isinstance(value, bool) or value is None or value == "":
+        return None
+    try:
+        number = float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    if number != int(number):
+        return None
+    total = int(number)
+    if total < -18 or total > 18:
+        return None
+    return total
 
 
 def _parse_score(value) -> int | None:
@@ -499,6 +599,7 @@ def _yield_result(markets: dict, today: str) -> dict:
         "score": score,
         "updated_at": today,
         "value": f"實質 {latest:.2f}%（約三個月 {delta:+.2f} 百分點）{extra}",
+        "trend": "下降" if delta <= -0.10 else ("上升" if delta >= 0.10 else "持平"),
         "note": "自動：FRED DFII10。實質利率下降加分。",
     }
 
@@ -513,6 +614,7 @@ def _hy_result(markets: dict, today: str) -> dict:
         "score": score_hy_spread(level),
         "updated_at": today,
         "value": f"OAS {level:.2f}%",
+        "trend": "偏緊" if level <= 4.5 else ("偏寬" if level > 5.5 else "中性"),
         "note": "自動：FRED BAMLH0A0HYM2。利差低加分。",
     }
 
@@ -527,6 +629,7 @@ def _vix_result(markets: dict, today: str) -> dict:
         "score": score_vix(level),
         "updated_at": today,
         "value": f"VIX {level:.1f}",
+        "trend": "偏低" if level < 20 else ("偏高" if level >= 25 else "中性"),
         "note": "自動：VIX 收盤。低波動加分。",
     }
 
@@ -549,6 +652,7 @@ def _equity_result(markets: dict, today: str) -> dict:
         "score": combined,
         "updated_at": today,
         "value": "、".join(labels) + "（相對 200 日）",
+        "trend": "高於年線" if combined > 0 else ("低於年線" if combined < 0 else "貼近年線"),
         "note": "自動：高於年線加分。兩市都有資料時取平均後四捨五入。",
     }
 
@@ -563,5 +667,6 @@ def _sox_result(markets: dict, today: str) -> dict:
         "score": score,
         "updated_at": today,
         "value": f"費半相對 200 日 {gap * 100:+.1f}%",
+        "trend": "高於年線" if score > 0 else ("低於年線" if score < 0 else "貼近年線"),
         "note": "自動：費半高於年線加分。",
     }
