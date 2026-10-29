@@ -6,11 +6,13 @@ import yfinance as yf
 import gspread
 import requests
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from google import genai
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from oauth2client.service_account import ServiceAccountCredentials
+from app_secrets import read_secret
 from order_assistant_ui import render_order_assistant
 from portfolio_risk import (
     attach_quotes,
@@ -21,7 +23,7 @@ from portfolio_risk import (
     load_service_account_info,
     market_beta_and_sector,
     normalize_positions,
-    populate_market_fields,
+    populate_market_fields_parallel,
 )
 
 # ==========================================
@@ -29,7 +31,8 @@ from portfolio_risk import (
 # ==========================================
 st.set_page_config(page_title="量化交易戰鬥艙", page_icon="⚔️", layout="wide", initial_sidebar_state="expanded")
 
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD") or st.secrets.get("passwords", {}).get("admin", "")
+_env_password = os.environ.get("ADMIN_PASSWORD")
+ADMIN_PASSWORD = _env_password if _env_password else read_secret("", "passwords", "admin")
 
 def check_password():
     def password_entered():
@@ -59,8 +62,8 @@ if not check_password():
 # ==========================================
 def send_to_telegram(title, text_content):
     try:
-        bot_token = os.environ.get("TELEGRAM_BOT_TOKEN") or st.secrets.get("telegram", {}).get("bot_token", "") or st.secrets.get("TELEGRAM_BOT_TOKEN", "")
-        chat_id = os.environ.get("TELEGRAM_CHAT_ID") or st.secrets.get("telegram", {}).get("chat_id", "") or st.secrets.get("TELEGRAM_CHAT_ID", "")
+        bot_token = os.environ.get("TELEGRAM_BOT_TOKEN") or read_secret("", "telegram", "bot_token") or read_secret("", "TELEGRAM_BOT_TOKEN")
+        chat_id = os.environ.get("TELEGRAM_CHAT_ID") or read_secret("", "telegram", "chat_id") or read_secret("", "TELEGRAM_CHAT_ID")
         
         if bot_token and chat_id:
             tg_msg = f"🤖 **【{title}】**\n\n{text_content}"
@@ -80,10 +83,106 @@ def get_market_beta_and_sector(ticker, is_tw):
     return market_beta_and_sector(ticker, bool(is_tw))
 
 
+def _google_key_from_secrets():
+    data = read_secret(None, "google_key")
+    if not isinstance(data, dict) and not hasattr(data, "items"):
+        raise RuntimeError("找不到 Google 服務帳戶金鑰")
+    return dict(data)
+
+
 @st.cache_data(ttl=60)
 def load_quant_database():
-    key_data = load_service_account_info(lambda: dict(st.secrets["google_key"]))
+    key_data = load_service_account_info(_google_key_from_secrets)
     return fetch_quant_sheets(key_data)
+
+
+@st.cache_data(ttl=180, show_spinner=False)
+def cached_usdtwd():
+    return fetch_usdtwd()
+
+
+@st.cache_data(ttl=180, show_spinner=False)
+def cached_twii():
+    return fetch_twii()
+
+
+@st.cache_data(ttl=180, show_spinner=False)
+def cached_quote_bundle(tickers: tuple):
+    """同一批持倉的報價與 Beta。180 秒內改數字不會重抓。"""
+    twii = fetch_twii()
+    frame = pd.DataFrame({"標的": list(tickers)})
+    prices, betas, sectors = populate_market_fields_parallel(frame, market_beta_and_sector, twii)
+    return {"prices": prices, "betas": betas, "sectors": sectors, "twii": float(twii)}
+
+
+def load_market_for_page6(tickers: tuple):
+    usdtwd = cached_usdtwd()
+    if not tickers:
+        return usdtwd, cached_twii(), {}, {}, {}
+    bundle = cached_quote_bundle(tuple(dict.fromkeys(tickers)))
+    return usdtwd, bundle["twii"], bundle["prices"], bundle["betas"], bundle["sectors"]
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def cached_history_map(pairs: tuple):
+    """多檔 K 線同時下載，之後 5 分鐘直接用記憶體。"""
+
+    def fetch(pair):
+        ticker, period = pair
+        try:
+            return pair, yf.Ticker(ticker).history(period=period)
+        except Exception:
+            return pair, pd.DataFrame()
+
+    workers = max(1, min(8, len(pairs)))
+    found = {}
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for pair, frame in pool.map(fetch, pairs):
+            found[pair] = frame
+    return found
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_top_holdings_map(tickers: tuple):
+    """ETF 前十大持股。抓不到時回傳空字串，由頁面改用內建備援。"""
+
+    def one(ticker):
+        try:
+            funds = yf.Ticker(ticker).funds_data
+            th = funds.top_holdings
+            if th is None or th.empty:
+                return ticker, ""
+            holdings_list = []
+            for idx, row in th.iterrows():
+                sym = str(idx) if isinstance(idx, str) else str(row.get("symbol", idx))
+                w_col = [c for c in th.columns if any(k in c.lower() for k in ["percent", "weight", "holding"])]
+                val = 0.0
+                if w_col:
+                    raw_val = float(row[w_col[0]])
+                    val = raw_val * 100 if raw_val <= 1.0 else raw_val
+                holdings_list.append((sym, val))
+            holdings_list.sort(key=lambda item: item[1], reverse=True)
+            text = ", ".join([f"{i+1}. {sym} ({weight:.1f}%)" for i, (sym, weight) in enumerate(holdings_list[:10])])
+            return ticker, text
+        except Exception:
+            return ticker, ""
+
+    found = {}
+    workers = max(1, min(8, len(tickers)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for ticker, text in pool.map(one, tickers):
+            found[ticker] = text
+    return found
+
+
+def clear_market_caches():
+    load_quant_database.clear()
+    cached_usdtwd.clear()
+    cached_twii.clear()
+    cached_quote_bundle.clear()
+    cached_history_map.clear()
+    cached_top_holdings_map.clear()
+    get_market_beta_and_sector.clear()
 
 
 # 初始化各頁面 AI 記憶狀態
@@ -116,6 +215,7 @@ if page == "第一頁：總經與風險鬧鐘":
     with c2:
         st.write("")
         if st.button("🔄 重新整理", key="refresh_p1", use_container_width=True):
+            cached_history_map.clear()
             st.rerun()
     st.markdown("---")
     
@@ -128,11 +228,13 @@ if page == "第一頁：總經與風險鬧鐘":
 
     with st.spinner('📡 正在從華爾街精準抓取 1 年期總經日K與風險指標...'):
         try:
-            vix_df = yf.Ticker("^VIX").history(period="5d")
-            vix_val = float(vix_df['Close'].iloc[-1]) if not vix_df.empty else 15.0
+            history_pairs = tuple(sorted({(ticker, "5d") for ticker in indicators.values()} | {(ticker, "1y") for ticker in indicators.values()}))
+            hist = cached_history_map(history_pairs)
+            vix_df = hist.get(("^VIX", "5d"), pd.DataFrame())
+            vix_val = float(vix_df['Close'].iloc[-1]) if vix_df is not None and not vix_df.empty else 15.0
             
-            tnx_df = yf.Ticker("^TNX").history(period="5d")
-            tnx_val = float(tnx_df['Close'].iloc[-1]) / 10.0 if not tnx_df.empty else 4.0
+            tnx_df = hist.get(("^TNX", "5d"), pd.DataFrame())
+            tnx_val = float(tnx_df['Close'].iloc[-1]) / 10.0 if tnx_df is not None and not tnx_df.empty else 4.0
             
             risk_score = 0
             risk_labels = []
@@ -171,14 +273,14 @@ if page == "第一頁：總經與風險鬧鐘":
                 if st.button("🧠 一鍵生成今日總經盤勢速覽", use_container_width=True):
                     with st.spinner("AI 經理人正在解讀各大總經指標..."):
                         try:
-                            gemini_key = os.environ.get("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")
+                            gemini_key = os.environ.get("GEMINI_API_KEY") or read_secret("", "GEMINI_API_KEY")
                             client = genai.Client(api_key=gemini_key)
                             snapshot_str = f"- VIX恐慌指數: {vix_val:.2f}\n- 10年公債殖利率: {tnx_val:.2f}%\n"
                             
                             for k, t in indicators.items():
                                 try:
-                                    s_df = yf.Ticker(t).history(period="5d")
-                                    if not s_df.empty:
+                                    s_df = hist.get((t, "5d"), pd.DataFrame())
+                                    if s_df is not None and not s_df.empty:
                                         c_val = float(s_df['Close'].iloc[-1])
                                         p_val = float(s_df['Close'].iloc[-2])
                                         pct_chg = ((c_val - p_val) / p_val) * 100
@@ -213,7 +315,11 @@ if page == "第一頁：總經與風險鬧鐘":
             cols = st.columns(2)
             for idx, (name, ticker) in enumerate(indicators.items()):
                 try:
-                    df_item = yf.Ticker(ticker).history(period="1y")
+                    df_item = hist.get((ticker, "1y"), pd.DataFrame())
+                    if df_item is None:
+                        df_item = pd.DataFrame()
+                    else:
+                        df_item = df_item.copy()
                     if not df_item.empty:
                         df_item['MA5'] = df_item['Close'].rolling(window=5).mean()
                         df_item['MA20'] = df_item['Close'].rolling(window=20).mean()
@@ -251,6 +357,8 @@ elif page == "第二頁：板塊與主題資金輪動":
     with c2:
         st.write("")
         if st.button("🔄 重新整理", key="refresh_p2", use_container_width=True):
+            cached_history_map.clear()
+            cached_top_holdings_map.clear()
             st.rerun()
     st.markdown("---")
     st.info("💡 追蹤 11 大核心 SPDR 行業 ETF 之外，同步解構焦點主題 ETF：軟體 (IGV)、硬體 (SOXX)、太空 (UFO) 之日／月漲跌幅與前十大持股。")
@@ -278,34 +386,18 @@ elif page == "第二頁：板塊與主題資金輪動":
         "UFO": "1. IRDM (8.2%), 2. PL (7.8%), 3. BKSY (7.2%)"
     }
 
-    def get_auto_top_holdings(ticker_symbol):
-        try:
-            funds = yf.Ticker(ticker_symbol).funds_data
-            th = funds.top_holdings
-            if th is not None and not th.empty:
-                holdings_list = []
-                for idx, row in th.iterrows():
-                    sym = str(idx) if isinstance(idx, str) else str(row.get("symbol", idx))
-                    w_col = [c for c in th.columns if any(k in c.lower() for k in ["percent", "weight", "holding"])]
-                    val = 0.0
-                    if w_col:
-                        raw_val = float(row[w_col[0]])
-                        val = raw_val * 100 if raw_val <= 1.0 else raw_val
-                    holdings_list.append((sym, val))
-                holdings_list.sort(key=lambda x: x[1], reverse=True)
-                formatted_str = ", ".join([f"{idx+1}. {s} ({w:.1f}%)" for idx, (s, w) in enumerate(holdings_list[:10])])
-                if formatted_str:
-                    return formatted_str
-        except:
-            pass
-        return fallback_top10.get(ticker_symbol, "資料同步中...")
-
     with st.spinner("📡 正在同步板塊與主題 ETF 數據..."):
         try:
             performance_list = []
             sector_data_cache = {}
+            etf_hist = cached_history_map(tuple((ticker, "1y") for ticker in sectors_dict))
+            holdings_map = cached_top_holdings_map(tuple(sectors_dict.keys()))
             for ticker, name in sectors_dict.items():
-                df_k = yf.Ticker(ticker).history(period="1y")
+                df_k = etf_hist.get((ticker, "1y"), pd.DataFrame())
+                if df_k is None:
+                    df_k = pd.DataFrame()
+                else:
+                    df_k = df_k.copy()
                 if not df_k.empty:
                     df_k['MA5'] = df_k['Close'].rolling(window=5).mean()
                     df_k['MA20'] = df_k['Close'].rolling(window=20).mean()
@@ -322,7 +414,7 @@ elif page == "第二頁：板塊與主題資金輪動":
                     performance_list.append({
                         "代號": ticker, "板塊名稱": name, "收盤價": latest_close,
                         "日漲跌幅 (%)": round(daily_pct, 2), "月漲跌幅 (%)": round(monthly_pct, 2),
-                        "前十大核心持股與佔比": get_auto_top_holdings(ticker)
+                        "前十大核心持股與佔比": holdings_map.get(ticker) or fallback_top10.get(ticker, "資料同步中...")
                     })
             
             df_sectors = pd.DataFrame(performance_list).sort_values(by="月漲跌幅 (%)", ascending=False)
@@ -371,7 +463,7 @@ elif page == "第二頁：板塊與主題資金輪動":
             if st.button("🧠 啟動 AI 板塊與主題資金輪動解析", use_container_width=True):
                 with st.spinner("AI 經理人正在解析..."):
                     try:
-                        gemini_key = os.environ.get("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")
+                        gemini_key = os.environ.get("GEMINI_API_KEY") or read_secret("", "GEMINI_API_KEY")
                         client = genai.Client(api_key=gemini_key)
                         summary_table = df_sectors.to_string(index=False)
                         res_p2 = client.models.generate_content(model='gemini-3.8-flash', contents=f"身為對沖基金經理人，解析以下板塊與主題ETF數據：\n{summary_table}\n請提供資金流向與強勢/弱勢板塊解讀。")
@@ -408,7 +500,7 @@ elif page == "第三頁：重大行事曆與會展":
     # 1. 動態透過 FMP 抓取經濟行事曆
     @st.cache_data(ttl=3600)
     def get_fmp_economic_calendar():
-        fmp_key = os.environ.get("FMP_API_KEY") or st.secrets.get("FMP_API_KEY", "")
+        fmp_key = os.environ.get("FMP_API_KEY") or read_secret("", "FMP_API_KEY")
         if not fmp_key:
             return []
         
@@ -505,7 +597,7 @@ elif page == "第三頁：重大行事曆與會展":
                         if st.button(f"🧠 AI 解析", key=f"ai_event_btn_{idx}"):
                             with st.spinner("AI 經理人正在生成戰術..."):
                                 try:
-                                    gemini_key = os.environ.get("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")
+                                    gemini_key = os.environ.get("GEMINI_API_KEY") or read_secret("", "GEMINI_API_KEY")
                                     client = genai.Client(api_key=gemini_key)
                                     res = client.models.generate_content(model='gemini-3.8-flash', contents=f"身為避險基金經理人，面對事件：【{ev['項目']}】（影響：{ev['影響']}），請給出具體資產配置與風控建議。")
                                     st.session_state.ai_memo_p3[event_key] = {"text": res.text, "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
@@ -535,7 +627,7 @@ elif page == "第四頁：部位監控與量化風控":
     with c2:
         st.write("")
         if st.button("🔄 重新整理", key="refresh_p4", use_container_width=True):
-            load_quant_database.clear()
+            clear_market_caches()
             st.rerun()
             
     st.write("數據來源：Notion 交易日誌 ➔ Make.com ➔ Google Sheets (基礎計價幣別：TWD 台幣)")
@@ -544,11 +636,11 @@ elif page == "第四頁：部位監控與量化風控":
     with st.spinner('📡 正在穿透雲端，即時連線抓取各個持股報價與計算動態風險...'):
         try:
             account_data, nav_data, quant_data = load_quant_database()
-            usdtwd_rate = fetch_usdtwd()
+            usdtwd_rate = cached_usdtwd()
             df = normalize_positions(quant_data)
             if not df.empty:
-                prices, betas, sectors = populate_market_fields(df, get_market_beta_and_sector, fetch_twii())
-                df = attach_quotes(df, prices, betas, sectors)
+                bundle = cached_quote_bundle(tuple(dict.fromkeys(df["標的"].astype(str).tolist())))
+                df = attach_quotes(df, bundle["prices"], bundle["betas"], bundle["sectors"])
             df, account_data, metrics = finalize_valuation(df, account_data, usdtwd_rate)
             total_net_liq = metrics["nav"]
             portfolio_beta = metrics["beta"]
@@ -671,7 +763,7 @@ elif page == "第四頁：部位監控與量化風控":
             if st.button("🧠 啟動 AI 經理人風控與壓力測試", use_container_width=True):
                 with st.spinner("AI 經理人正在分析中..."):
                     try:
-                        gemini_key = os.environ.get("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")
+                        gemini_key = os.environ.get("GEMINI_API_KEY") or read_secret("", "GEMINI_API_KEY")
                         client = genai.Client(api_key=gemini_key)
                         positions_summary = df[['標的', '名稱', '產業別', 'Beta值', '真實風險權重 (%)', '標的槓桿', '報酬率 (%)']].to_string(index=False) if not df.empty else "無持倉"
                         prompt_text = f"總帳戶淨值: NT$ {total_net_liq:,.0f}\n合併總槓桿率: {global_leverage}x\n投資組合加權Beta: {portfolio_beta:.2f}\n總現金水位: {global_cash_pct}%\n持倉明細:\n{positions_summary}\n請給予 3 點風控建議。"
@@ -707,4 +799,10 @@ elif page == "第五頁：Telegram 戰情推播":
 # 第六頁：下單輔助（只試算，不送委託）
 # ==========================================
 elif page == "第六頁：下單輔助系統":
-    render_order_assistant(send_to_telegram, load_quant_database, get_market_beta_and_sector)
+    render_order_assistant(
+        send_to_telegram,
+        load_quant_database,
+        get_market_beta_and_sector,
+        load_market=load_market_for_page6,
+        clear_caches=clear_market_caches,
+    )

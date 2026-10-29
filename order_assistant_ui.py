@@ -28,11 +28,11 @@ from order_assistant import (
     positions_as_dicts,
     propose_rebalance,
     order_rule_warnings,
-    run_stress,
     standard_stress,
     strategy_summary,
     suggest_addback_text,
     taiex_dollar_delta,
+    taiex_shock_state,
 )
 from portfolio_risk import attach_quotes, fetch_twii, fetch_usdtwd, is_taiex_future, normalize_positions, populate_market_fields
 
@@ -115,13 +115,19 @@ def _public_error(exc: Exception) -> str:
     return f"線上持倉讀取失敗，下面改用示範持倉。原因：{text[:300]}"
 
 
-def _load_live(load_sheets, beta_fn):
+def _load_live(load_sheets, beta_fn, load_market=None):
     accounts, _nav_hist, quant = load_sheets()
-    usdtwd = fetch_usdtwd()
     raw = normalize_positions(quant)
-    twii = fetch_twii()
+    tickers = tuple(raw["標的"].tolist()) if not raw.empty and "標的" in raw.columns else tuple()
+    if load_market is not None:
+        usdtwd, twii, prices, betas, sectors = load_market(tickers)
+    else:
+        usdtwd = fetch_usdtwd()
+        twii = fetch_twii()
+        prices, betas, sectors = ({}, {}, {})
+        if not raw.empty:
+            prices, betas, sectors = populate_market_fields(raw, beta_fn, twii)
     if not raw.empty:
-        prices, betas, sectors = populate_market_fields(raw, beta_fn, twii)
         raw = attach_quotes(raw, prices, betas, sectors)
     return build_snapshot_from_frames(raw, accounts, usdtwd, twii)
 
@@ -229,6 +235,7 @@ def _order_kind(snapshot, ticker: str, held):
     return "美股" if choice == "美股" else "台股"
 
 
+@st.fragment
 def _render_order(snapshot, rules: Rules):
     st.caption("輸入後立即重算整組淨值、槓桿、Beta、現金、保證金與產業。數量 0 代表還沒有要試的單。")
     if st.button("帶入範例：買進 2330 共 1000 股"):
@@ -299,8 +306,8 @@ def _render_order(snapshot, rules: Rules):
 
     stress_view = []
     for move, label in ((-0.10, "台指 -10%"), (-0.20, "台指 -20%")):
-        b = run_stress(snapshot, label, taiex=move)
-        a = run_stress(after, label, taiex=move)
+        b = taiex_shock_state(snapshot, move)
+        a = taiex_shock_state(after, move)
         stress_view.append(
             {
                 "情境": label,
@@ -361,6 +368,7 @@ def _leg(kind: str, strike: float, lots: float, premium: float, iv: float) -> di
     return {"kind": kind, "strike": float(strike), "signed_lots": float(lots), "premium": float(premium), "iv": float(iv)}
 
 
+@st.fragment
 def _render_hedge(snapshot, rules: Rules):
     spot = float(snapshot.twii) if snapshot.twii else 23000.0
     st.caption("台指選擇權（TXO）乘數 NT$50／點。三個策略並排，是替代方案，權利金不要加總。預設用 Black-Scholes，權利金填 0 代表用理論價。")
@@ -533,7 +541,47 @@ def _render_hedge(snapshot, rules: Rules):
     return "\n".join(plan_lines)
 
 
-def render_order_assistant(send_to_telegram, load_sheets, beta_fn):
+@st.fragment
+def _fragment_plan(snapshot, rules: Rules):
+    st.subheader("調倉建議")
+    st.caption("先賣槓桿型（同樣一塊錢砍掉最多曝險），還不夠再賣弱勢的非核心持股。核心預設不賣。換股是另外一筆，把弱勢股換成你指定的核心。")
+    p1, p2, p3 = st.columns(3)
+    p1.text_input("核心代號", key="oa_core_names")
+    p2.number_input("弱勢股換股比例（%）", min_value=0.0, max_value=100.0, step=5.0, key="oa_rotate_pct")
+    p3.checkbox("嚴格同產業（沒有同業核心就先不換）", key="oa_strict_sector")
+    cores = parse_tickers(st.session_state["oa_core_names"])
+    plan = propose_rebalance(
+        snapshot,
+        rules,
+        core_tickers=cores,
+        rotate_fraction=float(st.session_state["oa_rotate_pct"]) / 100.0,
+        strict_sector=bool(st.session_state["oa_strict_sector"]),
+    )
+    st.markdown(f"**目標槓桿 {rules.target_leverage:.2f}x 執行後**")
+    _metric_row(plan["before"], plan["after"])
+    _show_action_table(plan["actions"])
+    for note in plan["notes"]:
+        st.caption(note)
+    gap = max(0.0, snapshot.metrics["exposure"] - rules.stage2_leverage * snapshot.metrics["nav"])
+    st.info(f"若改走第二階段 {rules.stage2_leverage:.2f}x，以現在的曝險還要再降約 NT$ {gap:,.0f}。這是另一套方案，不是接在上面繼續賣。")
+    if st.checkbox(f"計算第二階段明細（槓桿上限 {rules.stage2_leverage:.2f}x）", key="oa_show_stage2"):
+        plan2 = propose_rebalance(
+            snapshot,
+            rules,
+            core_tickers=cores,
+            rotate_fraction=float(st.session_state["oa_rotate_pct"]) / 100.0,
+            strict_sector=bool(st.session_state["oa_strict_sector"]),
+            target_leverage=rules.stage2_leverage,
+        )
+        _metric_row(plan2["before"], plan2["after"])
+        _show_action_table(plan2["actions"])
+    st.subheader("條件式回補")
+    st.text(st.session_state["oa_addback_text"])
+    st.session_state["oa_plan"] = plan
+    return plan
+
+
+def render_order_assistant(send_to_telegram, load_sheets, beta_fn, load_market=None, clear_caches=None):
     _init_rule_state()
     st.title("第六頁：下單輔助系統")
     st.caption("下單前先看這一筆對整個部位的影響：槓桿、現金、Beta、保證金與壓力淨值。只做規劃，不會送出任何委託。")
@@ -547,13 +595,15 @@ def render_order_assistant(send_to_telegram, load_sheets, beta_fn):
     if refresh_col.button("重新讀取持倉", key="oa_reload"):
         load_sheets.clear()
         beta_fn.clear()
+        if clear_caches is not None:
+            clear_caches()
         st.rerun()
 
     using_sample = source.startswith("示範")
     if not using_sample:
         try:
             with st.spinner("正在用第四頁同一套算法讀持倉..."):
-                snapshot = _load_live(load_sheets, beta_fn)
+                snapshot = _load_live(load_sheets, beta_fn, load_market)
             st.caption(f"線上持倉。美元／台幣 {snapshot.usdtwd:.2f}，台指 {snapshot.twii:,.0f}。槓桿定義與第四頁相同。")
         except Exception as exc:
             st.warning(_public_error(exc))
@@ -632,40 +682,7 @@ def render_order_assistant(send_to_telegram, load_sheets, beta_fn):
             st.caption("減碼數量 = 持有數量 ×（1 − 上限 ÷ 目前損失）。減完之後，這檔的損失金額會回到淨值上限以內。")
 
     with tab_plan:
-        st.subheader("調倉建議")
-        st.caption("先賣槓桿型（同樣一塊錢砍掉最多曝險），還不夠再賣弱勢的非核心持股。核心預設不賣。換股是另外一筆，把弱勢股換成你指定的核心。")
-        p1, p2, p3 = st.columns(3)
-        p1.text_input("核心代號", key="oa_core_names")
-        p2.number_input("弱勢股換股比例（%）", min_value=0.0, max_value=100.0, step=5.0, key="oa_rotate_pct")
-        p3.checkbox("嚴格同產業（沒有同業核心就先不換）", key="oa_strict_sector")
-        cores = parse_tickers(st.session_state["oa_core_names"])
-        plan = propose_rebalance(
-            snapshot,
-            rules,
-            core_tickers=cores,
-            rotate_fraction=float(st.session_state["oa_rotate_pct"]) / 100.0,
-            strict_sector=bool(st.session_state["oa_strict_sector"]),
-        )
-        st.markdown(f"**目標槓桿 {rules.target_leverage:.2f}x 執行後**")
-        _metric_row(plan["before"], plan["after"])
-        _show_action_table(plan["actions"])
-        for note in plan["notes"]:
-            st.caption(note)
-        gap = max(0.0, snapshot.metrics["exposure"] - rules.stage2_leverage * snapshot.metrics["nav"])
-        st.info(f"若改走第二階段 {rules.stage2_leverage:.2f}x，以現在的曝險還要再降約 NT$ {gap:,.0f}。下面是另一套方案，不是接在上面繼續賣。")
-        with st.expander(f"第二階段方案（槓桿上限 {rules.stage2_leverage:.2f}x）"):
-            plan2 = propose_rebalance(
-                snapshot,
-                rules,
-                core_tickers=cores,
-                rotate_fraction=float(st.session_state["oa_rotate_pct"]) / 100.0,
-                strict_sector=bool(st.session_state["oa_strict_sector"]),
-                target_leverage=rules.stage2_leverage,
-            )
-            _metric_row(plan2["before"], plan2["after"])
-            _show_action_table(plan2["actions"])
-        st.subheader("條件式回補")
-        st.text(st.session_state["oa_addback_text"])
+        plan = _fragment_plan(snapshot, rules)
 
     with tab_order:
         st.subheader("單筆下單試算")

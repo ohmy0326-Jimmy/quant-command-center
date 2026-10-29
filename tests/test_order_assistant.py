@@ -20,6 +20,7 @@ from order_assistant import (
     propose_rebalance,
     run_stress,
     suggest_addback_text,
+    taiex_shock_state,
 )
 from portfolio_risk import YUANTA_FUTURES_BASE_EQUITY, finalize_valuation
 
@@ -239,6 +240,27 @@ class StressTests(unittest.TestCase):
         stressed = run_stress(snap, "貶值", fx=0.05)
         self.assertAlmostEqual(stressed["nav"], 10 * 100 * 30 * 1.05, places=4)
         self.assertGreater(stressed["drawdown_pct"], 0)
+
+
+class FastPathTests(unittest.TestCase):
+    def test_taiex_curve_matches_full_revaluation(self):
+        snap = build_sample_snapshot()
+        for step in (-30, -20, -10, 0, 15):
+            move = step / 100.0
+            fast = taiex_shock_state(snap, move)
+            slow = run_stress(snap, "x", taiex=move)
+            self.assertAlmostEqual(fast["nav"], slow["nav"], places=4)
+            self.assertAlmostEqual(fast["futures_equity"], slow["futures_equity"], places=4)
+            self.assertEqual(fast["margin_call"], slow["margin_call"])
+
+
+class SecretFallbackTests(unittest.TestCase):
+    def test_missing_secrets_file_returns_default(self):
+        from app_secrets import read_secret
+
+        self.assertEqual(read_secret("", "passwords", "admin"), "")
+        self.assertIsNone(read_secret(None, "google_key"))
+        self.assertEqual(read_secret("nope", "GEMINI_API_KEY"), "nope")
 
 
 class TextTests(unittest.TestCase):

@@ -13,6 +13,9 @@ import pandas as pd
 
 from portfolio_risk import (
     FUTURES_MARGIN,
+    STOCK_TAX_RATE,
+    YUANTA_FUTURES_BASE_EQUITY,
+    _futures_margin_row,
     finalize_valuation,
     futures_multiplier,
     is_taiex_future,
@@ -880,23 +883,135 @@ def standard_stress(snapshot: Snapshot, rules: Rules) -> list[dict]:
     ]
 
 
+def _taiex_book(snapshot: Snapshot):
+    """把持倉攤成純數字，給損益圖一次準備、沿用第四頁的淨值公式。"""
+    rows = []
+    positions = snapshot.positions
+    if positions is not None and not positions.empty:
+        usdtwd = float(snapshot.usdtwd)
+        for _, row in positions.iterrows():
+            kind = str(row.get("種類", ""))
+            rows.append(
+                {
+                    "account": str(row.get("帳戶", "")).strip(),
+                    "kind": kind,
+                    "ticker": str(row.get("標的", "")).upper(),
+                    "price": float(row["即時報價"]),
+                    "qty": float(row["持有數量"]),
+                    "cost": float(row["平均成本"]),
+                    "notional": float(row.get("投入總金額", 0) or 0),
+                    "lev": float(row.get("標的槓桿", 1) or 1),
+                    "beta": float(row.get("Beta值", 1) or 1),
+                    "is_fut": "期" in kind,
+                    "is_us": "美" in kind,
+                    "fx": usdtwd if "美" in kind else 1.0,
+                }
+            )
+    accounts = []
+    frame = snapshot.accounts
+    if frame is not None and not frame.empty and "帳戶名稱" in frame.columns:
+        for _, row in frame.iterrows():
+            accounts.append(
+                {
+                    "name": str(row["帳戶名稱"]).strip(),
+                    "cash": float(row.get("現金餘額", 0) or 0),
+                    "debt": float(row.get("融資/質押借款", 0) or 0),
+                }
+            )
+    return rows, accounts
+
+
+def _price_after_taiex(item: dict, move: float) -> float:
+    price = item["price"]
+    if item["is_fut"] and is_taiex_future(item["ticker"]):
+        return max(price * (1.0 + move), 0.01)
+    if item["is_us"] or abs(move) < 1e-12:
+        return price
+    mult = item["lev"] if item["lev"] > 1 else item["beta"]
+    return max(price * (1.0 + _clip_return(move * mult)), 0.01)
+
+
+def _row_pnl_and_mv(item: dict, price: float) -> tuple[float, float]:
+    if item["is_fut"]:
+        occupied, _maint = _futures_margin_row(item["ticker"], abs(item["qty"]), abs(item["notional"]))
+        pnl = (price - item["cost"]) * item["qty"] * futures_multiplier(item["ticker"])
+        display_mv = occupied + pnl
+    else:
+        notional = item["notional"]
+        cost = item["cost"]
+        latest = notional * (price / cost) if cost != 0 else notional
+        pnl = (latest - notional) - (abs(latest) * STOCK_TAX_RATE)
+        display_mv = price * item["qty"]
+    return pnl, abs(display_mv) * item["fx"]
+
+
+def taiex_shock_state(snapshot: Snapshot, move: float, book=None) -> dict:
+    """台指漲跌後的淨值與期貨權益。數字對齊 run_stress，但不重建 DataFrame。"""
+    rows, accounts = book if book is not None else _taiex_book(snapshot)
+    grouped: dict[str, list[tuple[float, float, float, float]]] = {}
+    for item in rows:
+        pnl, mv_twd = _row_pnl_and_mv(item, _price_after_taiex(item, move))
+        _occupied, maint = (0.0, 0.0)
+        if item["is_fut"]:
+            _occupied, maint = _futures_margin_row(item["ticker"], abs(item["qty"]), abs(item["notional"]))
+        grouped.setdefault(item["account"], []).append((pnl, mv_twd, item["fx"], maint))
+    nav = 0.0
+    futures_equity = 0.0
+    futures_maint = 0.0
+    saw_futures = False
+    for account in accounts:
+        name = account["name"]
+        subset = grouped.get(name, [])
+        if "元大期貨" in name:
+            saw_futures = True
+            if subset:
+                contrib = sum(pnl for pnl, _mv, _fx, _maint in subset) * subset[0][2]
+                futures_maint += sum(maint for _pnl, _mv, _fx, maint in subset)
+            else:
+                contrib = 0.0
+            equity = YUANTA_FUTURES_BASE_EQUITY + contrib
+            futures_equity += equity
+            nav += equity
+        else:
+            market = sum(mv for _pnl, mv, _fx, _maint in subset)
+            nav += account["cash"] + market - account["debt"]
+    ratio = (futures_equity / futures_maint * 100.0) if saw_futures and futures_maint > 0 else None
+    base = float(snapshot.metrics["nav"])
+    drawdown = ((nav - base) / base * 100.0) if base else 0.0
+    return {
+        "nav": nav,
+        "drawdown_pct": drawdown,
+        "futures_equity": futures_equity,
+        "futures_maint": futures_maint,
+        "margin_ratio": ratio,
+        "margin_call": bool(saw_futures and futures_maint > 0 and futures_equity < futures_maint),
+    }
+
+
+def nav_after_taiex_move(snapshot: Snapshot, move: float, book=None) -> float:
+    """台指漲跌後的淨值。公式與 finalize_valuation 相同，但不重建整張表。"""
+    return taiex_shock_state(snapshot, move, book)["nav"]
+
+
 def portfolio_pnl_at_taiex_move(snapshot: Snapshot, move: float) -> float:
     """台指漲跌 move（-0.1 = -10%）時，台股與臺指期的損益。美股在這張圖上不變。"""
-    shocked = run_stress(snapshot, "move", taiex=move)
-    return float(shocked["nav"] - snapshot.metrics["nav"])
+    return nav_after_taiex_move(snapshot, move) - float(snapshot.metrics["nav"])
 
 
 def build_payoff_curve(snapshot: Snapshot, strategies: dict[str, list[dict]], multiplier: float = TXO_MULTIPLIER) -> pd.DataFrame:
     """指數從 -30% 到 +15%，投組損益加上各避險到期損益。"""
     spot0 = float(snapshot.twii) if snapshot.twii else 0.0
+    book = _taiex_book(snapshot)
+    base_nav = float(snapshot.metrics["nav"])
     rows = []
     for step in range(-30, 16):
         move = step / 100.0
         spot = spot0 * (1.0 + move) if spot0 else 0.0
-        row = {"漲跌幅%": step, "指數": spot, "投組": portfolio_pnl_at_taiex_move(snapshot, move)}
+        port = nav_after_taiex_move(snapshot, move, book) - base_nav
+        row = {"漲跌幅%": step, "指數": spot, "投組": port}
         for name, legs in strategies.items():
             hedge = option_expiry_pnl(spot, legs, multiplier) if spot0 else 0.0
-            row[name] = row["投組"] + hedge
+            row[name] = port + hedge
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -944,8 +1059,9 @@ def hedge_stress_table(snapshot: Snapshot, summary: dict, moves=(-0.10, -0.20, -
     rows = []
     spot0 = float(snapshot.twii)
     debit = float(summary["net_debit"])
+    book = _taiex_book(snapshot)
     for move in moves:
-        stress = run_stress(snapshot, f"{move:.0%}", taiex=move)
+        stress = taiex_shock_state(snapshot, move, book)
         spot = spot0 * (1.0 + move)
         hedge_pnl = option_expiry_pnl(spot, summary["legs"], summary["multiplier"])
         intrinsic_cash = hedge_pnl + debit  # 加回權利金，得到避險合約的到期內含價值

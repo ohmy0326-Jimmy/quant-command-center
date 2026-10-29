@@ -221,41 +221,61 @@ def _page4_is_tw_market(ticker: str) -> bool:
     return (t_upper in ["TE", "TF"]) or (".TW" in t_upper) or (".TWO" in t_upper) or (len(t_upper) == 3 and t_upper.isalpha())
 
 
+def _quote_one(ticker, twii_price: float, beta_fn):
+    """單一代號的報價、Beta、產業。例外時的回退與第四頁逐檔迴圈相同。"""
+    try:
+        t_upper = str(ticker).upper()
+        if t_upper in ["TX", "MTX", "FMF", "TMF"]:
+            sector = "微型臺指期" if t_upper == "FMF" else ("小型臺指" if t_upper == "MTX" else "臺指期貨")
+            return ticker, twii_price, 1.0, sector
+
+        is_tw_market = _page4_is_tw_market(ticker)
+        b_val, s_val = beta_fn(ticker, is_tw_market)
+        if is_tw_market:
+            try:
+                headers = {"User-Agent": "Mozilla/5.0"}
+                res = requests.get(f"https://tw.stock.yahoo.com/quote/{ticker}", headers=headers, timeout=5)
+                match = re.search(r'"regularMarketPrice":(?:{"raw":)?([0-9.]+)', res.text)
+                price = float(match.group(1)) if match else float(yf.Ticker(ticker).history(period="1d")["Close"].iloc[-1])
+            except Exception:
+                price = float(yf.Ticker(ticker).history(period="1d")["Close"].iloc[-1])
+        else:
+            hist = yf.Ticker(ticker).history(period="5d")
+            price = float(hist["Close"].iloc[-1]) if not hist.empty else np.nan
+        return ticker, price, b_val, s_val
+    except Exception:
+        return ticker, np.nan, 1.0, "其他"
+
+
 def populate_market_fields(df: pd.DataFrame, beta_fn, twii_price: float):
     """抓即時報價、Beta、產業。期貨用台指現貨，其餘路徑與第四頁相同。"""
     prices, betas, sectors = {}, {}, {}
     if df is None or df.empty or "標的" not in df.columns:
         return prices, betas, sectors
-
     for ticker in df["標的"].unique().tolist():
-        try:
-            t_upper = str(ticker).upper()
-            if t_upper in ["TX", "MTX", "FMF", "TMF"]:
-                prices[ticker] = twii_price
-                betas[ticker] = 1.0
-                sectors[ticker] = "微型臺指期" if t_upper == "FMF" else ("小型臺指" if t_upper == "MTX" else "臺指期貨")
-                continue
+        ticker, price, beta, sector = _quote_one(ticker, twii_price, beta_fn)
+        prices[ticker] = price
+        betas[ticker] = beta
+        sectors[ticker] = sector
+    return prices, betas, sectors
 
-            is_tw_market = _page4_is_tw_market(ticker)
-            b_val, s_val = beta_fn(ticker, is_tw_market)
-            betas[ticker] = b_val
-            sectors[ticker] = s_val
 
-            if is_tw_market:
-                try:
-                    headers = {"User-Agent": "Mozilla/5.0"}
-                    res = requests.get(f"https://tw.stock.yahoo.com/quote/{ticker}", headers=headers, timeout=5)
-                    match = re.search(r'"regularMarketPrice":(?:{"raw":)?([0-9.]+)', res.text)
-                    prices[ticker] = float(match.group(1)) if match else float(yf.Ticker(ticker).history(period="1d")["Close"].iloc[-1])
-                except Exception:
-                    prices[ticker] = float(yf.Ticker(ticker).history(period="1d")["Close"].iloc[-1])
-            else:
-                hist = yf.Ticker(ticker).history(period="5d")
-                prices[ticker] = float(hist["Close"].iloc[-1]) if not hist.empty else np.nan
-        except Exception:
-            prices[ticker] = np.nan
-            betas[ticker] = 1.0
-            sectors[ticker] = "其他"
+def populate_market_fields_parallel(df: pd.DataFrame, beta_fn, twii_price: float, max_workers: int = 8):
+    """同一套逐檔公式，只是同時下載。回傳的價格與 Beta 與序列版相同。"""
+    if df is None or df.empty or "標的" not in df.columns:
+        return {}, {}, {}
+    tickers = df["標的"].unique().tolist()
+    if len(tickers) <= 1:
+        return populate_market_fields(df, beta_fn, twii_price)
+    from concurrent.futures import ThreadPoolExecutor
+
+    prices, betas, sectors = {}, {}, {}
+    workers = max(1, min(max_workers, len(tickers)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for ticker, price, beta, sector in pool.map(lambda ticker: _quote_one(ticker, twii_price, beta_fn), tickers):
+            prices[ticker] = price
+            betas[ticker] = beta
+            sectors[ticker] = sector
     return prices, betas, sectors
 
 
