@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "macro_cycle.schema.json",
+  "title": "總經週期與配置",
+  "description": "schema_version 1.0.0。八項指標分數每週更新，二十個產業的週期圖每月 12 日更新。加總與多空狀態不寫進檔案，由指標分數計算，避免和明細對不上。狀態對應的槓桿上限與現金水位定義在 macro_cycle.py 的 REGIME_BANDS、REGIME_RISK。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "score", "industries"],
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0",
+      "description": "資料格式版本。v1 即 1.0.0。欄位有破壞性變更時才升版，只改分數或產業內容不升版。"
+    },
+    "commentary": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "給畫面顯示的說明。不參與分數計算。",
+      "properties": {
+        "score": { "type": "string" },
+        "industries": { "type": "string" }
+      }
+    },
+    "score": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["updated_at", "cadence", "indicators"],
+      "properties": {
+        "updated_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+          "description": "這次週更的日期（YYYY-MM-DD）。每週改分數時一起改。"
+        },
+        "cadence": {
+          "const": "weekly",
+          "description": "分數更新頻率：每週。"
+        },
+        "indicators": {
+          "type": "array",
+          "minItems": 8,
+          "maxItems": 8,
+          "description": "固定八項。每項整數 -2 到 +2，加總範圍 -16 到 +16。",
+          "items": { "$ref": "#/$defs/indicator" }
+        }
+      }
+    },
+    "industries": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["updated_at", "cadence", "as_of_day", "items"],
+      "properties": {
+        "updated_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-12$",
+          "description": "產業圖更新日期，必須是當月 12 日（YYYY-MM-12）。"
+        },
+        "cadence": {
+          "const": "monthly",
+          "description": "產業圖更新頻率：每月。"
+        },
+        "as_of_day": {
+          "const": 12,
+          "description": "每月固定在 12 日更新產業圖。"
+        },
+        "items": {
+          "type": "array",
+          "minItems": 20,
+          "maxItems": 20,
+          "description": "固定二十個產業。代表股在全部產業之間不可重複（含去掉 .TW/.TWO/.US/.HK 後相同者）。",
+          "items": { "$ref": "#/$defs/industry" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "indicator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "score", "example"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "description": "穩定代號，畫面不顯示。"
+        },
+        "name": { "type": "string", "minLength": 1 },
+        "score": {
+          "type": "integer",
+          "minimum": -2,
+          "maximum": 2
+        },
+        "example": {
+          "type": "boolean",
+          "description": "true 表示這格分數仍是示例，不是正式週報。"
+        },
+        "note": { "type": "string" }
+      }
+    },
+    "industry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "cycle", "direction", "stance", "tickers", "example"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
+        "name": { "type": "string", "minLength": 1 },
+        "cycle": {
+          "enum": ["復甦", "成長", "趨緩", "衰退"],
+          "description": "產業時鐘的位置，也是四象限的象限。"
+        },
+        "direction": {
+          "enum": ["上行", "持平", "下行"],
+          "description": "在該象限裡的走向。上行往下一階段（順時針），下行往回。"
+        },
+        "stance": {
+          "enum": ["加碼", "中性", "減碼"]
+        },
+        "tickers": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 },
+          "description": "代表股代號。2330 與 2330.TW 視為同一檔。"
+        },
+        "example": {
+          "type": "boolean",
+          "description": "true 表示整列（含立場）都是示例。false 表示立場是目前配置；週期、方向與代表股仍可能是示例，請看 note。"
+        },
+        "note": { "type": "string" }
+      }
+    }
+  }
+}

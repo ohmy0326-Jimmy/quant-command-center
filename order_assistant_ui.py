@@ -34,14 +34,28 @@ from order_assistant import (
     taiex_dollar_delta,
     taiex_shock_state,
 )
+from macro_cycle import format_holding_tag, holding_tag
+from macro_cycle_ui import cached_macro_cycle_view
 from portfolio_risk import attach_quotes, fetch_twii, fetch_usdtwd, is_taiex_future, normalize_positions, populate_market_fields
 
 
-def _init_rule_state():
+def _queue_regime_reset():
+    st.session_state["oa_apply_regime_defaults"] = True
+
+
+def _regime_overridden(view: dict) -> bool:
+    risk = view["risk"]
+    leverage = float(st.session_state["oa_target_leverage"])
+    cash = float(st.session_state["oa_min_cash_pct"])
+    return abs(leverage - float(risk["target_leverage"])) > 1e-9 or abs(cash - float(risk["min_cash_pct"])) > 1e-9
+
+
+def _init_rule_state(view: dict):
+    risk = view["risk"]
     defaults = {
-        "oa_target_leverage": 1.8,
+        "oa_target_leverage": float(risk["target_leverage"]),
         "oa_stage2_leverage": 1.5,
-        "oa_min_cash_pct": 15.0,
+        "oa_min_cash_pct": float(risk["min_cash_pct"]),
         "oa_max_loss_pct": 2.0,
         "oa_hedge_budget_pct": 1.5,
         "oa_beta_low": 1.5,
@@ -62,7 +76,7 @@ def _init_rule_state():
         if key not in st.session_state:
             st.session_state[key] = value
     if "oa_addback_text" not in st.session_state:
-        st.session_state["oa_addback_text"] = suggest_addback_text(Rules(), st.session_state["oa_core_names"])
+        st.session_state["oa_addback_text"] = suggest_addback_text(_rules_from_state(), st.session_state["oa_core_names"])
 
 
 def _rules_from_state() -> Rules:
@@ -82,9 +96,27 @@ def _rules_from_state() -> Rules:
     )
 
 
-def _render_rule_editor():
+def _render_rule_editor(view: dict):
+    risk = view["risk"]
     with st.expander("風控規則設定（存在這次工作階段，重新整理仍會留著）", expanded=False):
-        st.caption("改完之後，下面的健檢、調倉與試算會用同一組數字。不會寫進試算表，也不會下單。")
+        if view.get("ok"):
+            st.caption(
+                f"多空狀態是{view['regime']}（分數 {view['total']:+d}，分數更新 {view['score_updated_at']}，產業圖 {view['industry_updated_at']}）。"
+                f"第一次進來會把目標槓桿上限設成 {risk['target_leverage']:.1f} 倍、最低現金水位設成 {risk['min_cash_pct']:.0f}%。"
+                "第二階段槓桿維持原來的設定。你之後改的數字會留在這次工作階段。"
+            )
+        else:
+            detail = (view.get("errors") or ["總經檔無法使用"])[0]
+            st.caption(
+                f"總經檔沒有套用（{detail}）。目標槓桿上限與最低現金先用中性："
+                f"{risk['target_leverage']:.1f} 倍、{risk['min_cash_pct']:.0f}%。"
+            )
+        if _regime_overridden(view):
+            st.caption("目標槓桿上限或最低現金目前是你手動調過的數字。")
+        if float(st.session_state["oa_stage2_leverage"]) > float(st.session_state["oa_target_leverage"]) + 1e-9:
+            st.caption("第二階段槓桿比目標上限高。若要第二階段再壓低槓桿，把這個數字調到目標以下。")
+        st.button("改回總經週期預設", on_click=_queue_regime_reset)
+        st.caption("改完之後，下面的健檢、調倉與試算會用同一組數字。不會寫進試算表，也不會下單。回補文字要跟著新數字改，按「依目前規則重寫回補計畫」。")
         c1, c2, c3 = st.columns(3)
         c1.number_input("目標槓桿上限（倍）", min_value=0.2, max_value=10.0, step=0.1, key="oa_target_leverage")
         c2.number_input("第二階段槓桿上限（倍）", min_value=0.2, max_value=10.0, step=0.1, key="oa_stage2_leverage")
@@ -252,6 +284,10 @@ def _render_order(snapshot, rules: Rules):
     if price_key not in st.session_state:
         st.session_state[price_key] = float(market_px)
     price = c4.number_input("成交價", min_value=0.0, step=0.5, key=price_key)
+    if ticker:
+        tag = format_holding_tag(holding_tag(cached_macro_cycle_view(), ticker))
+        if tag:
+            st.caption(f"總經配置：{tag}")
     kind = _order_kind(snapshot, ticker, held) if ticker else "台股"
     beta = held["beta"] if held else 1.0
     lev = held["lev"] if held else (3.0 if ticker in {"SOXL", "TQQQ"} else 1.0)
@@ -581,8 +617,52 @@ def _fragment_plan(snapshot, rules: Rules):
     return plan
 
 
+def _render_holding_tags(snapshot, view: dict):
+    st.subheader("持倉的產業立場")
+    if not view.get("ok"):
+        st.caption("總經檔沒有套用，這次先不標加碼或減碼。")
+        return
+    st.caption("用總經配置裡的代表股對應產業，標在代號旁邊。對不上的不標。標了「示例」的是占位產業，不是目前定案。")
+    rows = []
+    for pos in positions_as_dicts(snapshot.valued):
+        rows.append(
+            {
+                "標的": pos["ticker"],
+                "產業立場": format_holding_tag(holding_tag(view, pos["ticker"])),
+                "名稱": pos["name"],
+                "市值": pos["mv_twd"],
+            }
+        )
+    if not rows:
+        st.info("目前沒有持倉。")
+        return
+    frame = pd.DataFrame(rows)
+
+    def paint(value):
+        text = str(value)
+        if "減碼" in text:
+            return "background-color: #b71c1c; color: white"
+        if "加碼" in text:
+            return "background-color: #1b5e20; color: white"
+        if "中性" in text:
+            return "background-color: #f9a825; color: #1a1a1a"
+        return ""
+
+    styler = frame.style.format({"市值": "NT$ {:,.0f}"})
+    if hasattr(styler, "map"):
+        styler = styler.map(paint, subset=["產業立場"])
+    else:
+        styler = styler.applymap(paint, subset=["產業立場"])
+    st.dataframe(styler, width="stretch", hide_index=True)
+
+
 def render_order_assistant(send_to_telegram, load_sheets, beta_fn, load_market=None, clear_caches=None):
-    _init_rule_state()
+    view = cached_macro_cycle_view()
+    if st.session_state.get("oa_apply_regime_defaults"):
+        st.session_state["oa_target_leverage"] = float(view["risk"]["target_leverage"])
+        st.session_state["oa_min_cash_pct"] = float(view["risk"]["min_cash_pct"])
+        st.session_state["oa_apply_regime_defaults"] = False
+    _init_rule_state(view)
     st.title("第六頁：下單輔助系統")
     st.caption("下單前先看這一筆對整個部位的影響：槓桿、現金、Beta、保證金與壓力淨值。只做規劃，不會送出任何委託。")
 
@@ -615,7 +695,7 @@ def render_order_assistant(send_to_telegram, load_sheets, beta_fn, load_market=N
     if using_sample:
         st.info("現在是示範持倉（台股、美股、SOXL／00663L、元大期貨），用來熟悉流程。數字不是你的真實帳戶，也不會寫回 Google 試算表。")
 
-    _render_rule_editor()
+    _render_rule_editor(view)
     rules = _rules_from_state()
     stress_rows = standard_stress(snapshot, rules)
     flags = health_flags(snapshot, rules, stress_rows)
@@ -652,6 +732,7 @@ def render_order_assistant(send_to_telegram, load_sheets, beta_fn, load_market=N
             f"經濟槓桿 {economic_leverage(snapshot):.2f}x：股票沿用第四頁曝險，臺指期改以指數 × 乘數 × 口數。"
             "合併槓桿則與第四頁完全相同。"
         )
+        _render_holding_tags(snapshot, view)
         _flag_table(flags)
         breaches = loss_breaches(snapshot, rules)
         st.subheader("超過單一部位虧損上限的持倉")

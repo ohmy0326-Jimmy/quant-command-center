@@ -1,0 +1,276 @@
+{
+  "schema_version": "1.0.0",
+  "commentary": {
+    "score": "這八項分數都是示例，加總 +1，用來對上中性。正式週報請改分數，並把 example 設為 false。",
+    "industries": "加碼：半導體設備、光通訊/CPO、重電電網、先進製程。減碼：消費電子、生技醫療、記憶體。AI 算力為中性。這八個立場是目前配置；它們的週期位置、方向與代表股仍是示例。其餘十二個產業整列都是示例。"
+  },
+  "score": {
+    "updated_at": "2026-10-26",
+    "cadence": "weekly",
+    "indicators": [
+      {
+        "id": "global_liquidity",
+        "name": "全球流動性",
+        "score": 1,
+        "example": true,
+        "note": "示例：金融條件略鬆。"
+      },
+      {
+        "id": "growth_momentum",
+        "name": "成長動能",
+        "score": 1,
+        "example": true,
+        "note": "示例：景氣新訂單略高於榮枯線。"
+      },
+      {
+        "id": "inflation_path",
+        "name": "通膨路徑",
+        "score": 1,
+        "example": true,
+        "note": "示例：核心通膨續降。"
+      },
+      {
+        "id": "credit_spreads",
+        "name": "信用利差",
+        "score": 0,
+        "example": true,
+        "note": "示例：利差大致持平。"
+      },
+      {
+        "id": "yield_curve",
+        "name": "殖利率曲線",
+        "score": 0,
+        "example": true,
+        "note": "示例：曲線平坦。"
+      },
+      {
+        "id": "earnings_revisions",
+        "name": "企業獲利修正",
+        "score": 1,
+        "example": true,
+        "note": "示例：獲利修正略為上修。"
+      },
+      {
+        "id": "risk_appetite",
+        "name": "風險情緒",
+        "score": -1,
+        "example": true,
+        "note": "示例：波動略升。"
+      },
+      {
+        "id": "dollar_liquidity",
+        "name": "美元流動性",
+        "score": -2,
+        "example": true,
+        "note": "示例：美元偏強，資金回流美國。"
+      }
+    ]
+  },
+  "industries": {
+    "updated_at": "2026-10-12",
+    "cadence": "monthly",
+    "as_of_day": 12,
+    "items": [
+      {
+        "id": "semi_equip",
+        "name": "半導體設備",
+        "cycle": "成長",
+        "direction": "上行",
+        "stance": "加碼",
+        "tickers": ["ASML", "AMAT", "LRCX", "KLAC"],
+        "example": false,
+        "note": "立場為目前配置。週期位置、方向與代表股為示例。"
+      },
+      {
+        "id": "optical_cpo",
+        "name": "光通訊/CPO",
+        "cycle": "成長",
+        "direction": "上行",
+        "stance": "加碼",
+        "tickers": ["COHR", "LITE", "3081.TW", "4979.TWO"],
+        "example": false,
+        "note": "立場為目前配置。週期位置、方向與代表股為示例。"
+      },
+      {
+        "id": "power_grid",
+        "name": "重電電網",
+        "cycle": "復甦",
+        "direction": "上行",
+        "stance": "加碼",
+        "tickers": ["1513.TW", "1503.TW", "1519.TW", "ETN"],
+        "example": false,
+        "note": "立場為目前配置。週期位置、方向與代表股為示例。"
+      },
+      {
+        "id": "advanced_node",
+        "name": "先進製程",
+        "cycle": "成長",
+        "direction": "上行",
+        "stance": "加碼",
+        "tickers": ["2330.TW", "TSM"],
+        "example": false,
+        "note": "立場為目前配置。週期位置、方向與代表股為示例。"
+      },
+      {
+        "id": "ai_compute",
+        "name": "AI 算力",
+        "cycle": "成長",
+        "direction": "持平",
+        "stance": "中性",
+        "tickers": ["NVDA", "AMD", "AVGO"],
+        "example": false,
+        "note": "立場為目前配置。週期位置、方向與代表股為示例。"
+      },
+      {
+        "id": "consumer_electronics",
+        "name": "消費電子",
+        "cycle": "趨緩",
+        "direction": "下行",
+        "stance": "減碼",
+        "tickers": ["AAPL", "2317.TW", "4938.TW", "2353.TW"],
+        "example": false,
+        "note": "立場為目前配置。週期位置、方向與代表股為示例。"
+      },
+      {
+        "id": "biotech",
+        "name": "生技醫療",
+        "cycle": "衰退",
+        "direction": "下行",
+        "stance": "減碼",
+        "tickers": ["6446.TW", "XBI", "JNJ"],
+        "example": false,
+        "note": "立場為目前配置。週期位置、方向與代表股為示例。"
+      },
+      {
+        "id": "memory",
+        "name": "記憶體",
+        "cycle": "趨緩",
+        "direction": "下行",
+        "stance": "減碼",
+        "tickers": ["MU", "2408.TW", "2337.TW", "2344.TW"],
+        "example": false,
+        "note": "立場為目前配置。週期位置、方向與代表股為示例。"
+      },
+      {
+        "id": "server_odm",
+        "name": "伺服器組裝",
+        "cycle": "成長",
+        "direction": "上行",
+        "stance": "中性",
+        "tickers": ["2382.TW", "3231.TW", "6669.TW"],
+        "example": true,
+        "note": "示例值。週期、方向、立場與代表股都是占位，每月 12 日再換上正式判斷。"
+      },
+      {
+        "id": "ic_design",
+        "name": "IC 設計",
+        "cycle": "成長",
+        "direction": "持平",
+        "stance": "中性",
+        "tickers": ["2454.TW", "3034.TW", "2379.TW"],
+        "example": true,
+        "note": "示例值。週期、方向、立場與代表股都是占位，每月 12 日再換上正式判斷。"
+      },
+      {
+        "id": "osat",
+        "name": "封測",
+        "cycle": "趨緩",
+        "direction": "持平",
+        "stance": "中性",
+        "tickers": ["3711.TW", "AMKR", "6239.TW"],
+        "example": true,
+        "note": "示例值。週期、方向、立場與代表股都是占位，每月 12 日再換上正式判斷。"
+      },
+      {
+        "id": "semi_materials",
+        "name": "半導體材料",
+        "cycle": "復甦",
+        "direction": "上行",
+        "stance": "加碼",
+        "tickers": ["ENTG", "1560.TW", "MKSI"],
+        "example": true,
+        "note": "示例值。週期、方向、立場與代表股都是占位，每月 12 日再換上正式判斷。"
+      },
+      {
+        "id": "pcb",
+        "name": "PCB/載板",
+        "cycle": "成長",
+        "direction": "上行",
+        "stance": "加碼",
+        "tickers": ["8046.TW", "3037.TW", "3189.TW"],
+        "example": true,
+        "note": "示例值。週期、方向、立場與代表股都是占位，每月 12 日再換上正式判斷。"
+      },
+      {
+        "id": "passives",
+        "name": "被動元件",
+        "cycle": "趨緩",
+        "direction": "下行",
+        "stance": "減碼",
+        "tickers": ["2327.TW", "2492.TW"],
+        "example": true,
+        "note": "示例值。週期、方向、立場與代表股都是占位，每月 12 日再換上正式判斷。"
+      },
+      {
+        "id": "panel",
+        "name": "面板",
+        "cycle": "衰退",
+        "direction": "下行",
+        "stance": "減碼",
+        "tickers": ["2409.TW", "3481.TW"],
+        "example": true,
+        "note": "示例值。週期、方向、立場與代表股都是占位，每月 12 日再換上正式判斷。"
+      },
+      {
+        "id": "software_cloud",
+        "name": "軟體雲端",
+        "cycle": "成長",
+        "direction": "持平",
+        "stance": "中性",
+        "tickers": ["MSFT", "CRM", "NOW"],
+        "example": true,
+        "note": "示例值。週期、方向、立場與代表股都是占位，每月 12 日再換上正式判斷。"
+      },
+      {
+        "id": "financials",
+        "name": "金融",
+        "cycle": "復甦",
+        "direction": "持平",
+        "stance": "中性",
+        "tickers": ["2881.TW", "2882.TW", "2891.TW"],
+        "example": true,
+        "note": "示例值。週期、方向、立場與代表股都是占位，每月 12 日再換上正式判斷。"
+      },
+      {
+        "id": "shipping",
+        "name": "航運",
+        "cycle": "衰退",
+        "direction": "下行",
+        "stance": "減碼",
+        "tickers": ["2603.TW", "2609.TW", "2615.TW"],
+        "example": true,
+        "note": "示例值。週期、方向、立場與代表股都是占位，每月 12 日再換上正式判斷。"
+      },
+      {
+        "id": "green_storage",
+        "name": "綠能儲能",
+        "cycle": "復甦",
+        "direction": "上行",
+        "stance": "中性",
+        "tickers": ["FSLR", "ENPH", "6806.TW"],
+        "example": true,
+        "note": "示例值。週期、方向、立場與代表股都是占位，每月 12 日再換上正式判斷。"
+      },
+      {
+        "id": "auto_parts",
+        "name": "汽車零組件",
+        "cycle": "趨緩",
+        "direction": "下行",
+        "stance": "減碼",
+        "tickers": ["2231.TW", "1319.TW", "2201.TW"],
+        "example": true,
+        "note": "示例值。週期、方向、立場與代表股都是占位，每月 12 日再換上正式判斷。"
+      }
+    ]
+  }
+}
