@@ -9,6 +9,7 @@ from pathlib import Path
 from jsonschema.validators import Draft202012Validator
 
 from macro_cycle import (
+    AUTO_INDICATOR_IDS,
     DATA_PATH,
     REGIME_BANDS,
     REGIME_RISK,
@@ -21,6 +22,24 @@ from macro_cycle import (
     regime_for_score,
     risk_params_for_regime,
     validate_macro_cycle,
+)
+from macro_cycle_live import clear_live_view, macro_view_for_orders, read_macro_tabs, remember_live_view
+from macro_cycle_sheet import (
+    CYCLES,
+    DIRECTIONS,
+    INDUSTRY_CYCLE_HEADERS,
+    MACRO_SCORE_HEADERS,
+    STANCES,
+    compose_macro_view,
+    headers_missing,
+    parse_fred_csv,
+    parse_industry_rows,
+    score_auto_from_markets,
+    score_hy_spread,
+    score_ma_gap,
+    score_real_yield_change,
+    score_vs_ma200,
+    score_vix,
 )
 
 
@@ -64,8 +83,8 @@ class SchemaTests(unittest.TestCase):
         score = schema["properties"]["score"]["properties"]
         industries = schema["properties"]["industries"]["properties"]
         self.assertEqual(score["cadence"]["const"], "weekly")
-        self.assertEqual(score["indicators"]["minItems"], 8)
-        self.assertEqual(score["indicators"]["maxItems"], 8)
+        self.assertEqual(score["indicators"]["minItems"], 9)
+        self.assertEqual(score["indicators"]["maxItems"], 9)
         self.assertEqual(industries["cadence"]["const"], "monthly")
         self.assertEqual(industries["as_of_day"]["const"], 12)
         self.assertEqual(industries["items"]["minItems"], 20)
@@ -90,7 +109,18 @@ class SchemaTests(unittest.TestCase):
         self.assertEqual(view["regime"], "中性")
         self.assertEqual(view["risk"]["target_leverage"], 1.5)
         self.assertEqual(view["risk"]["min_cash_pct"], 15.0)
-        self.assertEqual(len(view["indicators"]), 8)
+        self.assertEqual(len(view["indicators"]), 9)
+        self.assertEqual([item["id"] for item in view["indicators"]], [
+            "us_real_yield",
+            "hy_spread",
+            "vix",
+            "equity_ma",
+            "sox_trend",
+            "pmi",
+            "earnings_revisions",
+            "valuation",
+            "tw_activity",
+        ])
         self.assertTrue(all(-2 <= item["score"] <= 2 for item in view["indicators"]))
         self.assertTrue(all(item["example"] and "示例" in item["note"] for item in view["indicators"]))
         self.assertEqual(sum(item["score"] for item in view["indicators"]), 1)
@@ -154,7 +184,7 @@ class RegimeMappingTests(unittest.TestCase):
         covered = []
         for _name, low, high in REGIME_BANDS:
             covered.extend(range(low, high + 1))
-        self.assertEqual(sorted(covered), list(range(-16, 17)))
+        self.assertEqual(sorted(covered), list(range(-18, 19)))
         self.assertEqual([name for name, _low, _high in REGIME_BANDS], ["牛", "偏多", "中性", "偏空", "熊"])
         self.assertEqual(set(REGIME_RISK), {"牛", "偏多", "中性", "偏空", "熊"})
 
@@ -172,6 +202,8 @@ class RegimeMappingTests(unittest.TestCase):
             -8: "偏空",
             -9: "熊",
             -16: "熊",
+            -18: "熊",
+            18: "牛",
         }
         for score, regime in cases.items():
             self.assertEqual(regime_for_score(score), regime)
@@ -189,7 +221,7 @@ class RegimeMappingTests(unittest.TestCase):
             self.assertEqual(params["min_cash_pct"], cash)
             self.assertEqual(params["regime"], regime)
         with self.assertRaises(ValueError):
-            regime_for_score(17)
+            regime_for_score(19)
         with self.assertRaises(TypeError):
             regime_for_score(True)
 
@@ -219,6 +251,165 @@ class RegimeMappingTests(unittest.TestCase):
         for point in points:
             self.assertTrue(_in_quadrant(point["cycle"], point["x"], point["y"]), point)
             self.assertEqual(point["quadrant"], point["cycle"])
+
+
+class SheetAndAutoTests(unittest.TestCase):
+    def setUp(self):
+        clear_live_view()
+
+    def tearDown(self):
+        clear_live_view()
+
+    def test_headers_and_allowed_values(self):
+        self.assertEqual(
+            MACRO_SCORE_HEADERS,
+            ("indicator_id", "name", "score", "source", "value", "note", "updated_at"),
+        )
+        self.assertEqual(
+            INDUSTRY_CYCLE_HEADERS,
+            ("industry", "cycle", "direction", "stance", "tickers", "note", "updated_at"),
+        )
+        self.assertEqual(headers_missing(["indicator_id", "name"], MACRO_SCORE_HEADERS)[0], "score")
+        self.assertEqual(CYCLES, ("復甦", "成長", "趨緩", "衰退"))
+        self.assertEqual(DIRECTIONS, ("上行", "持平", "下行"))
+        self.assertEqual(STANCES, ("加碼", "中性", "減碼"))
+        self.assertEqual(AUTO_INDICATOR_IDS, {"us_real_yield", "hy_spread", "vix", "equity_ma", "sox_trend"})
+
+    def test_bad_rows_are_skipped_and_missing_indicators_use_json(self):
+        rows = [
+            _score_row("vix", 2, "auto"),
+            _score_row("pmi", 9, "manual"),
+            _score_row("not_a_real_id", 1, "manual"),
+            _score_row("valuation", 1, "手動"),
+        ]
+        sheet = {"ok": True, "scores": rows, "industries": [], "score_error": None, "industry_error": "這次不測產業"}
+        view = compose_macro_view(load_macro_cycle(), sheet, {}, today="2026-10-29")
+        self.assertTrue(view["ok"], view.get("warnings"))
+        by_id = {item["id"]: item for item in view["indicators"]}
+        self.assertEqual(by_id["vix"]["score"], 2)
+        self.assertEqual(by_id["vix"]["origin"], "sheet")
+        self.assertEqual(by_id["valuation"]["score"], 1)
+        self.assertEqual(by_id["valuation"]["source"], "manual")
+        self.assertEqual(by_id["pmi"]["origin"], "json")
+        self.assertTrue(any("pmi" in message and "略過" in message for message in view["warnings"]))
+        self.assertTrue(any("未知指標" in message for message in view["warnings"]))
+
+    def test_auto_overrides_sheet_and_failure_keeps_sheet(self):
+        sheet = {"ok": True, "scores": [_score_row("vix", 2, "manual")], "industries": [], "score_error": None, "industry_error": "略過產業"}
+        overridden = compose_macro_view(
+            load_macro_cycle(),
+            sheet,
+            {"vix": {"ok": True, "score": -2, "value": "VIX 33.0", "updated_at": "2026-10-29", "note": "自動"}},
+            today="2026-10-29",
+        )
+        vix = next(item for item in overridden["indicators"] if item["id"] == "vix")
+        self.assertEqual(vix["score"], -2)
+        self.assertEqual(vix["source_label"], "自動")
+        self.assertEqual(vix["updated_at"], "2026-10-29")
+
+        kept = compose_macro_view(load_macro_cycle(), sheet, {"vix": {"ok": False}}, today="2026-10-29")
+        vix_kept = next(item for item in kept["indicators"] if item["id"] == "vix")
+        self.assertEqual(vix_kept["score"], 2)
+        self.assertTrue(any("沿用試算表" in message for message in kept["warnings"]))
+
+    def test_missing_sheet_uses_json_then_neutral(self):
+        view = compose_macro_view(load_macro_cycle(), {"ok": False, "error": "讀不到分頁 Macro_Score"}, {}, today="2026-10-29")
+        self.assertEqual(view["data_origin"], "json")
+        self.assertEqual(view["total"], 1)
+        self.assertEqual(view["regime"], "中性")
+        neutral = compose_macro_view(
+            {"ok": False, "errors": ["壞掉"], "regime": "中性", "indicators": [], "industries": []},
+            {"ok": False, "error": "讀不到"},
+            {},
+        )
+        self.assertFalse(neutral["ok"])
+        self.assertEqual(neutral["data_origin"], "neutral")
+        self.assertEqual(neutral["regime"], "中性")
+
+    def test_industry_bad_row_skipped(self):
+        rows = [
+            {
+                "industry": "半導體設備",
+                "cycle": "成長",
+                "direction": "上行",
+                "stance": "加碼",
+                "tickers": "ASML, AMAT",
+                "note": "試算表",
+                "updated_at": "2026-10-12",
+            },
+            {
+                "industry": "壞列",
+                "cycle": "過熱",
+                "direction": "上行",
+                "stance": "加碼",
+                "tickers": "AAA",
+                "note": "",
+                "updated_at": "2026-10-12",
+            },
+        ]
+        accepted, warnings = parse_industry_rows(rows)
+        self.assertEqual(accepted[0]["tickers"], ["ASML", "AMAT"])
+        self.assertEqual(len(accepted), 1)
+        self.assertTrue(any("略過" in message for message in warnings))
+
+    def test_scoring_thresholds_and_fred_csv(self):
+        self.assertEqual(parse_fred_csv("observation_date,BAMLH0A0HYM2\n2024-01-02,3.5\n2024-01-03,.\n2024-01-04,4\n"), [3.5, 4.0])
+        self.assertEqual(score_hy_spread(3.5), 2)
+        self.assertEqual(score_hy_spread(4.5), 1)
+        self.assertEqual(score_hy_spread(5.5), 0)
+        self.assertEqual(score_hy_spread(7.5), -1)
+        self.assertEqual(score_hy_spread(7.6), -2)
+        self.assertEqual(score_vix(14.9), 2)
+        self.assertEqual(score_vix(15), 1)
+        self.assertEqual(score_vix(20), 0)
+        self.assertEqual(score_vix(25), -1)
+        self.assertEqual(score_vix(32), -2)
+        self.assertEqual(score_ma_gap(0.03), 2)
+        self.assertEqual(score_ma_gap(0.01), 1)
+        self.assertEqual(score_ma_gap(0.0), 0)
+        self.assertEqual(score_ma_gap(-0.02), -1)
+        self.assertEqual(score_ma_gap(-0.03), -2)
+        series = [2.30] + [2.0] * 62
+        score, latest, delta = score_real_yield_change(series)
+        self.assertEqual((score, latest, round(delta, 2)), (2, 2.0, -0.3))
+        flat = [100.0] * 200
+        scored = score_vs_ma200(flat)
+        self.assertEqual(scored[0], 0)
+        markets = score_auto_from_markets({"hy": [3.2], "vix": 18, "dfii10": series, "spx": flat, "twii": [], "sox": [], "dgs10": [4.2]}, "2026-10-29")
+        self.assertTrue(markets["hy_spread"]["ok"])
+        self.assertEqual(markets["hy_spread"]["score"], 2)
+        self.assertEqual(markets["vix"]["score"], 1)
+        self.assertFalse(markets["sox_trend"]["ok"])
+
+    def test_orders_page_never_fetches(self):
+        view = macro_view_for_orders()
+        self.assertEqual(view["data_origin"], "json")
+        self.assertEqual(view["total"], 1)
+        remember_live_view({"ok": True, "data_origin": "sheet", "regime": "牛"}, now=1_000)
+        self.assertEqual(macro_view_for_orders(now=1_100)["data_origin"], "sheet")
+        self.assertEqual(macro_view_for_orders(now=1_000 + 15 * 60 + 1)["data_origin"], "json")
+
+    def test_reader_does_not_create_missing_tabs(self):
+        class Missing:
+            def worksheet(self, title):
+                raise KeyError(title)
+
+        result = read_macro_tabs(Missing())
+        self.assertFalse(result["ok"])
+        self.assertIn("Macro_Score", result["error"])
+        self.assertIn("Industry_Cycle", result["error"])
+
+
+def _score_row(indicator_id, score, source):
+    return {
+        "indicator_id": indicator_id,
+        "name": "",
+        "score": score,
+        "source": source,
+        "value": "表",
+        "note": "試算表",
+        "updated_at": "2026-10-29",
+    }
 
 
 def _load_copy(raw: dict) -> dict:

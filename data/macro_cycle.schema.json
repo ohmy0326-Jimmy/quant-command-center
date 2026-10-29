@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "macro_cycle.schema.json",
   "title": "總經週期與配置",
-  "description": "schema_version 1.0.0。八項指標分數每週更新，二十個產業的週期圖每月 12 日更新。加總與多空狀態不寫進檔案，由指標分數計算，避免和明細對不上。狀態對應的槓桿上限與現金水位定義在 macro_cycle.py 的 REGIME_BANDS、REGIME_RISK。",
+  "description": "schema_version 1.0.0。這份 JSON 是試算表讀不到時的備援。九項指標、二十個產業。加總與多空狀態不寫進檔案。狀態門檻在 macro_cycle.py 的 REGIME_BANDS、REGIME_RISK。平時改 Quant_Database 的 Macro_Score 與 Industry_Cycle，不要為了每週更新而改這個檔。",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "score", "industries"],
@@ -36,9 +36,9 @@
         },
         "indicators": {
           "type": "array",
-          "minItems": 8,
-          "maxItems": 8,
-          "description": "固定八項。每項整數 -2 到 +2，加總範圍 -16 到 +16。",
+          "minItems": 9,
+          "maxItems": 9,
+          "description": "固定九項。每項整數 -2 到 +2，加總範圍 -18 到 +18。",
           "items": { "$ref": "#/$defs/indicator" }
         }
       }
@@ -92,7 +92,16 @@
           "type": "boolean",
           "description": "true 表示這格分數仍是示例，不是正式週報。"
         },
-        "note": { "type": "string" }
+        "source": {
+          "enum": ["auto", "manual"],
+          "description": "備援檔用。正式來源看試算表；auto 會被程式覆寫。"
+        },
+        "value": { "type": "string" },
+        "note": { "type": "string" },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+        }
       }
     },
     "industry": {

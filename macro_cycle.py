@@ -14,14 +14,31 @@ ROOT = Path(__file__).resolve().parent
 DATA_PATH = ROOT / "data" / "macro_cycle.json"
 SCHEMA_PATH = ROOT / "data" / "macro_cycle.schema.json"
 
-# 八項各 -2..+2，加總 -16..+16。+1 落在中性。
+# 九項各 -2..+2，加總 -18..+18。內部門檻與八項時期相同，+1 仍是中性。
+# 多出來的 ±17、±18 併入牛／熊。
 REGIME_BANDS: tuple[tuple[str, int, int], ...] = (
-    ("牛", 9, 16),
+    ("牛", 9, 18),
     ("偏多", 4, 8),
     ("中性", -3, 3),
     ("偏空", -8, -4),
-    ("熊", -16, -9),
+    ("熊", -18, -9),
 )
+
+# 試算表 Macro_Score 的列必須使用這些 indicator_id。自動項由程式覆寫分數。
+CANONICAL_INDICATORS: tuple[dict, ...] = (
+    {"id": "us_real_yield", "name": "美國實質利率", "kind": "auto"},
+    {"id": "hy_spread", "name": "高收益債利差", "kind": "auto"},
+    {"id": "vix", "name": "波動率 VIX", "kind": "auto"},
+    {"id": "equity_ma", "name": "美股與台股年線", "kind": "auto"},
+    {"id": "sox_trend", "name": "費半趨勢", "kind": "auto"},
+    {"id": "pmi", "name": "製造業 PMI", "kind": "manual"},
+    {"id": "earnings_revisions", "name": "企業獲利修正", "kind": "manual"},
+    {"id": "valuation", "name": "評價", "kind": "manual"},
+    {"id": "tw_activity", "name": "台灣景氣與出口", "kind": "manual"},
+)
+CANONICAL_IDS = tuple(item["id"] for item in CANONICAL_INDICATORS)
+AUTO_INDICATOR_IDS = frozenset(item["id"] for item in CANONICAL_INDICATORS if item["kind"] == "auto")
+CANONICAL_NAMES = {item["id"]: item["name"] for item in CANONICAL_INDICATORS}
 
 # 對應第六頁「目標槓桿上限（倍）」與「最低現金水位（%）」。
 # 第二階段槓桿不在這裡改。
@@ -69,7 +86,7 @@ def regime_for_score(total: int) -> str:
     for name, low, high in REGIME_BANDS:
         if low <= total <= high:
             return name
-    raise ValueError(f"分數 {total} 不在 -16 到 16")
+    raise ValueError(f"分數 {total} 不在 -18 到 18")
 
 
 def risk_params_for_regime(regime: str) -> dict:
@@ -252,29 +269,87 @@ def industry_quadrant_points(industries: list[dict]) -> list[dict]:
     return points
 
 
-def _view_from_valid(raw: dict) -> dict:
-    indicators = list(raw["score"]["indicators"])
-    industries = list(raw["industries"]["items"])
+def decorate_indicator(item: dict, updated_default: str, origin: str) -> dict:
+    source = str(item.get("source") or "manual").strip().lower()
+    if source not in {"auto", "manual"}:
+        source = "manual"
+    updated = str(item.get("updated_at") or updated_default or "")
+    return {
+        "id": item.get("id"),
+        "name": item.get("name") or CANONICAL_NAMES.get(item.get("id"), ""),
+        "score": int(item["score"]),
+        "example": bool(item.get("example")),
+        "source": source,
+        "source_label": "自動" if source == "auto" else "手動",
+        "value": str(item.get("value") or ""),
+        "note": str(item.get("note") or ""),
+        "updated_at": updated,
+        "origin": origin,
+    }
+
+
+def assemble_view(
+    indicators: list[dict],
+    industries: list[dict],
+    *,
+    origin: str,
+    warnings: list[str] | None = None,
+    commentary: dict | None = None,
+    score_updated_at: str | None = None,
+    industry_updated_at: str | None = None,
+    industry_as_of_day: int | None = 12,
+) -> dict:
+    """由已整理好的指標與產業組成畫面用的字典。指標是空的就退回中性。"""
+    if not indicators:
+        failed = _fallback(list(warnings or ["沒有可用的多空指標"]))
+        failed["data_origin"] = "neutral"
+        failed["warnings"] = list(warnings or failed["errors"])
+        return failed
     total = sum(int(item["score"]) for item in indicators)
-    regime = regime_for_score(total)
+    try:
+        regime = regime_for_score(total)
+    except (TypeError, ValueError) as exc:
+        failed = _fallback([str(exc)])
+        failed["data_origin"] = "neutral"
+        failed["warnings"] = list(warnings or []) + [str(exc)]
+        return failed
+    dates = [str(item.get("updated_at") or "") for item in indicators if item.get("updated_at")]
     return {
         "ok": True,
-        "fallback": False,
+        "fallback": origin == "neutral",
         "errors": [],
-        "schema_version": raw["schema_version"],
-        "score_updated_at": raw["score"]["updated_at"],
-        "score_cadence": raw["score"]["cadence"],
-        "industry_updated_at": raw["industries"]["updated_at"],
-        "industry_cadence": raw["industries"]["cadence"],
-        "industry_as_of_day": int(raw["industries"]["as_of_day"]),
+        "warnings": list(warnings or []),
+        "data_origin": origin,
+        "schema_version": "1.0.0",
+        "score_updated_at": score_updated_at or (max(dates) if dates else None),
+        "score_cadence": "weekly",
+        "industry_updated_at": industry_updated_at,
+        "industry_cadence": "monthly",
+        "industry_as_of_day": industry_as_of_day,
         "indicators": indicators,
         "industries": industries,
         "total": total,
         "regime": regime,
         "risk": risk_params_for_regime(regime),
         "ticker_index": _ticker_index(industries),
-        "commentary": dict(raw.get("commentary") or {}),
+        "commentary": dict(commentary or {}),
     }
+
+
+def _view_from_valid(raw: dict) -> dict:
+    updated = raw["score"]["updated_at"]
+    indicators = [decorate_indicator(item, updated, "json") for item in raw["score"]["indicators"]]
+    industries = [dict(item, origin="json") for item in raw["industries"]["items"]]
+    return assemble_view(
+        indicators,
+        industries,
+        origin="json",
+        warnings=[],
+        commentary=raw.get("commentary") or {},
+        score_updated_at=updated,
+        industry_updated_at=raw["industries"]["updated_at"],
+        industry_as_of_day=int(raw["industries"]["as_of_day"]),
+    )
 
 
 def _ticker_index(industries: list[dict]) -> dict[str, dict]:
@@ -311,6 +386,8 @@ def _fallback(errors: list[str]) -> dict:
         "risk": risk,
         "ticker_index": {},
         "commentary": {},
+        "warnings": list(errors)[:12],
+        "data_origin": "neutral",
     }
 
 

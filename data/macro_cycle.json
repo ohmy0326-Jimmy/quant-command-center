@@ -1,7 +1,7 @@
 {
   "schema_version": "1.0.0",
   "commentary": {
-    "score": "這八項分數都是示例，加總 +1，用來對上中性。正式週報請改分數，並把 example 設為 false。",
+    "score": "這九項分數都是示例，加總 +1，用來對上中性。平時改試算表 Macro_Score，不要為了每週更新改這個檔。",
     "industries": "加碼：半導體設備、光通訊/CPO、重電電網、先進製程。減碼：消費電子、生技醫療、記憶體。AI 算力為中性。這八個立場是目前配置；它們的週期位置、方向與代表股仍是示例。其餘十二個產業整列都是示例。"
   },
   "score": {
@@ -9,60 +9,94 @@
     "cadence": "weekly",
     "indicators": [
       {
-        "id": "global_liquidity",
-        "name": "全球流動性",
-        "score": 1,
-        "example": true,
-        "note": "示例：金融條件略鬆。"
-      },
-      {
-        "id": "growth_momentum",
-        "name": "成長動能",
-        "score": 1,
-        "example": true,
-        "note": "示例：景氣新訂單略高於榮枯線。"
-      },
-      {
-        "id": "inflation_path",
-        "name": "通膨路徑",
-        "score": 1,
-        "example": true,
-        "note": "示例：核心通膨續降。"
-      },
-      {
-        "id": "credit_spreads",
-        "name": "信用利差",
+        "id": "us_real_yield",
+        "name": "美國實質利率",
         "score": 0,
         "example": true,
-        "note": "示例：利差大致持平。"
+        "source": "manual",
+        "value": "",
+        "updated_at": "2026-10-26",
+        "note": "示例。自動項：10 年期 TIPS 殖利率三個月變化。"
       },
       {
-        "id": "yield_curve",
-        "name": "殖利率曲線",
+        "id": "hy_spread",
+        "name": "高收益債利差",
         "score": 0,
         "example": true,
-        "note": "示例：曲線平坦。"
+        "source": "manual",
+        "value": "",
+        "updated_at": "2026-10-26",
+        "note": "示例。自動項：FRED BAMLH0A0HYM2。"
+      },
+      {
+        "id": "vix",
+        "name": "波動率 VIX",
+        "score": -1,
+        "example": true,
+        "source": "manual",
+        "value": "",
+        "updated_at": "2026-10-26",
+        "note": "示例。自動項：VIX 水準。"
+      },
+      {
+        "id": "equity_ma",
+        "name": "美股與台股年線",
+        "score": 1,
+        "example": true,
+        "source": "manual",
+        "value": "",
+        "updated_at": "2026-10-26",
+        "note": "示例。自動項：標普 500 與加權指數相對 200 日均線。"
+      },
+      {
+        "id": "sox_trend",
+        "name": "費半趨勢",
+        "score": 1,
+        "example": true,
+        "source": "manual",
+        "value": "",
+        "updated_at": "2026-10-26",
+        "note": "示例。自動項：費半相對 200 日均線。"
+      },
+      {
+        "id": "pmi",
+        "name": "製造業 PMI",
+        "score": 1,
+        "example": true,
+        "source": "manual",
+        "value": "",
+        "updated_at": "2026-10-26",
+        "note": "示例。手動項，請寫在試算表。"
       },
       {
         "id": "earnings_revisions",
         "name": "企業獲利修正",
-        "score": 1,
+        "score": 0,
         "example": true,
-        "note": "示例：獲利修正略為上修。"
+        "source": "manual",
+        "value": "",
+        "updated_at": "2026-10-26",
+        "note": "示例。手動項，請寫在試算表。"
       },
       {
-        "id": "risk_appetite",
-        "name": "風險情緒",
+        "id": "valuation",
+        "name": "評價",
+        "score": 0,
+        "example": true,
+        "source": "manual",
+        "value": "",
+        "updated_at": "2026-10-26",
+        "note": "示例。手動項，請寫在試算表。"
+      },
+      {
+        "id": "tw_activity",
+        "name": "台灣景氣與出口",
         "score": -1,
         "example": true,
-        "note": "示例：波動略升。"
-      },
-      {
-        "id": "dollar_liquidity",
-        "name": "美元流動性",
-        "score": -2,
-        "example": true,
-        "note": "示例：美元偏強，資金回流美國。"
+        "source": "manual",
+        "value": "",
+        "updated_at": "2026-10-26",
+        "note": "示例。手動項，請寫在試算表。"
       }
     ]
   },
