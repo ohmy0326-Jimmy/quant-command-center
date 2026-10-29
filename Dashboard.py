@@ -303,7 +303,45 @@ elif page == "第二頁：板塊與主題資金輪動":
             st.subheader("📊 板塊與主題 ETF 漲跌排行榜")
             st.dataframe(df_sectors.style.format({"收盤價": "{:.2f}", "日漲跌幅 (%)": "{:+.2f}%", "月漲跌幅 (%)": "{:+.2f}%"}).background_gradient(subset=["日漲跌幅 (%)", "月漲跌幅 (%)"], cmap="RdYlGn"), use_container_width=True, hide_index=True)
             st.markdown("---")
-            
+
+            st.subheader("📈 板塊與焦點主題 ETF 1 年期多均線互動式日 K 線與成交量戰情圖")
+            tickers_sorted = df_sectors['代號'].tolist()
+
+            for i in range(0, len(tickers_sorted), 2):
+                cols = st.columns(2)
+                for j in range(2):
+                    if i + j < len(tickers_sorted):
+                        t_code = tickers_sorted[i + j]
+                        t_name = sectors_dict[t_code]
+                        df_chart = sector_data_cache[t_code]
+
+                        with cols[j]:
+                            st.markdown(f"**{t_code} - {t_name}**")
+
+                            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.04, row_heights=[0.75, 0.25])
+
+                            fig.add_trace(go.Candlestick(
+                                x=df_chart.index, open=df_chart['Open'], high=df_chart['High'], low=df_chart['Low'], close=df_chart['Close'], name='K線'
+                            ), row=1, col=1)
+
+                            fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['MA5'], name='5MA', line=dict(color='#FFEE58', width=1)), row=1, col=1)
+                            fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['MA20'], name='20MA', line=dict(color='#29B6F6', width=1.5)), row=1, col=1)
+                            fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['MA60'], name='60MA', line=dict(color='#FFA726', width=1.5)), row=1, col=1)
+                            fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['MA200'], name='200MA', line=dict(color='#AB47BC', width=2)), row=1, col=1)
+
+                            colors = ['#EF5350' if row['Close'] < row['Open'] else '#26A69A' for index, row in df_chart.iterrows()]
+                            fig.add_trace(go.Bar(x=df_chart.index, y=df_chart['Volume'], name='成交量', marker_color=colors), row=2, col=1)
+
+                            fig.update_layout(
+                                height=380, margin=dict(l=10, r=10, t=10, b=10),
+                                xaxis_rangeslider_visible=False, showlegend=True,
+                                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                                template="plotly_dark"
+                            )
+                            st.plotly_chart(fig, use_container_width=True)
+
+            st.markdown("---")
+
             if st.button("🧠 啟動 AI 板塊與主題資金輪動解析", use_container_width=True):
                 with st.spinner("AI 經理人正在解析..."):
                     try:
