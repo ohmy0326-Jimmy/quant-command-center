@@ -33,7 +33,7 @@ def cached_macro_cycle_view() -> dict:
 
 def render_macro_cycle_page():
     view = cached_macro_cycle_view()
-    st.title("總經週期與配置")
+    st.title("第五頁：總經週期與配置")
     st.caption("多空分數每週更新，二十個產業的週期位置每月 12 日更新。數字來自 data/macro_cycle.json，這一頁不抓行情。")
 
     if not view.get("ok"):

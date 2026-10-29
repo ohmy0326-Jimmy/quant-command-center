@@ -1,6 +1,6 @@
 # 總經週期與配置
 
-畫面「總經週期與配置」讀 `data/macro_cycle.json`。格式是 `data/macro_cycle.schema.json`（JSON Schema draft 2020-12，`schema_version` 為 `1.0.0`）。載入時用 `macro_cycle.validate_macro_cycle` 檢查；檔案不在、JSON 壞掉或不符合 schema，頁面改顯示原因，第六頁的目標槓桿上限與最低現金水位暫用中性（1.5 倍、15%），不中斷其他頁。
+第五頁「總經週期與配置」讀 `data/macro_cycle.json`。側邊欄順序是第一頁到第四頁、第五頁總經週期、第六頁下單輔助。格式是 `data/macro_cycle.schema.json`（JSON Schema draft 2020-12，`schema_version` 為 `1.0.0`）。載入時用 `macro_cycle.validate_macro_cycle` 檢查；檔案不在、JSON 壞掉或不符合 schema，頁面改顯示原因，第六頁的目標槓桿上限與最低現金水位暫用中性（1.5 倍、15%），不中斷其他頁。
 
 加總與多空狀態不寫在 JSON 裡，一律用八項分數現算，避免明細和總分各寫各的。
 
