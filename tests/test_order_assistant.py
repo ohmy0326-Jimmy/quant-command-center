@@ -285,14 +285,35 @@ class DashboardWiringTests(unittest.TestCase):
             "第二頁：板塊與主題資金輪動",
             "第三頁：重大行事曆與會展",
             "第四頁：部位監控與量化風控",
-            "第五頁：Telegram 戰情推播",
+            "第五頁：總經週期與配置",
             "第六頁：下單輔助系統",
         ]:
             self.assertIn(label, dashboard)
+        page4 = dashboard.index("第四頁：部位監控與量化風控")
+        macro = dashboard.index("第五頁：總經週期與配置")
+        page6 = dashboard.index("第六頁：下單輔助系統")
+        self.assertLess(page4, macro)
+        self.assertLess(macro, page6)
+        self.assertNotIn("第五頁：Telegram 戰情推播", dashboard)
+        radio = dashboard.split("切換監控面板：", 1)[1].split("key=\"nav_page\"", 1)[0]
+        self.assertLess(radio.index("第二頁：板塊與主題資金輪動"), radio.index("第三頁：重大行事曆與會展"))
+        self.assertNotIn("總經週期與配置", radio.split("第四頁：部位監控與量化風控", 1)[0])
+        self.assertIn("send_to_telegram", dashboard)
+        self.assertIn("render_macro_cycle_page", dashboard)
         self.assertIn("finalize_valuation", dashboard)
         self.assertIn("render_order_assistant", dashboard)
         self.assertNotIn("170422", dashboard)
         self.assertNotIn("701000", dashboard)
+        ui_path = os.path.join(root, "order_assistant_ui.py")
+        with open(ui_path, encoding="utf-8") as handle:
+            order_ui = handle.read()
+        self.assertIn("把這份摘要推到 Telegram", order_ui)
+        self.assertIn("參數來自：", order_ui)
+        self.assertIn("format_holding_tag", order_ui)
+        self.assertIn("oa_apply_regime_defaults", order_ui)
+        self.assertIn("@st.fragment", order_ui)
+        with open(os.path.join(root, "macro_cycle_ui.py"), encoding="utf-8") as handle:
+            self.assertIn('st.title("第五頁：總經週期與配置")', handle.read())
 
 
 if __name__ == "__main__":

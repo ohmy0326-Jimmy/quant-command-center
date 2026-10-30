@@ -13,6 +13,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from oauth2client.service_account import ServiceAccountCredentials
 from app_secrets import read_secret
+from macro_cycle_ui import render_macro_cycle_page
 from order_assistant_ui import render_order_assistant
 from portfolio_risk import (
     attach_quotes,
@@ -115,6 +116,27 @@ def cached_quote_bundle(tickers: tuple):
     return {"prices": prices, "betas": betas, "sectors": sectors, "twii": float(twii)}
 
 
+def load_book_for_page5():
+    """第四頁同一套快取與 finalize_valuation。第五頁用來對槓桿與現金。"""
+    account_data, _nav, quant = load_quant_database()
+    frame = normalize_positions(quant)
+    usdtwd = cached_usdtwd()
+    if not frame.empty and "標的" in frame.columns:
+        bundle = cached_quote_bundle(tuple(dict.fromkeys(frame["標的"].astype(str).tolist())))
+        frame = attach_quotes(frame, bundle["prices"], bundle["betas"], bundle["sectors"])
+    valued, _accounts, metrics = finalize_valuation(frame, account_data, usdtwd)
+    positions = []
+    if valued is not None and not valued.empty and "即時市值(台幣)" in valued.columns:
+        for _, row in valued.iterrows():
+            positions.append({"ticker": str(row.get("標的") or ""), "mv": float(row.get("即時市值(台幣)") or 0)})
+    return {
+        "ok": True,
+        "positions": positions,
+        "leverage": float(metrics.get("leverage") or 0),
+        "cash_pct": float(metrics.get("cash_pct") or 0),
+    }
+
+
 def load_market_for_page6(tickers: tuple):
     usdtwd = cached_usdtwd()
     if not tickers:
@@ -197,7 +219,18 @@ if 'ai_memo_p4' not in st.session_state:
 
 with st.sidebar:
     st.title("⚙️ 系統導覽")
-    page = st.radio("切換監控面板：", ["第一頁：總經與風險鬧鐘", "第二頁：板塊與主題資金輪動", "第三頁：重大行事曆與會展", "第四頁：部位監控與量化風控", "第五頁：Telegram 戰情推播", "第六頁：下單輔助系統"])
+    page = st.radio(
+        "切換監控面板：",
+        [
+            "第一頁：總經與風險鬧鐘",
+            "第二頁：板塊與主題資金輪動",
+            "第三頁：重大行事曆與會展",
+            "第四頁：部位監控與量化風控",
+            "第五頁：總經週期與配置",
+            "第六頁：下單輔助系統",
+        ],
+        key="nav_page",
+    )
     if page == "第六頁：下單輔助系統":
         st.caption("風控規則在第六頁最上方，會留在這次工作階段。")
     st.markdown("---")
@@ -786,14 +819,10 @@ elif page == "第四頁：部位監控與量化風控":
             st.error(f"連線發生錯誤。系統訊息: {e}")
 
 # ==========================================
-# 第五頁：Telegram 戰情推播
+# 第五頁：總經週期與配置（本機 JSON，不打外部 API）
 # ==========================================
-elif page == "第五頁：Telegram 戰情推播":
-    st.title("📱 第五頁：Telegram 戰情推播與即時通知中心")
-    st.markdown("---")
-    test_msg = st.text_area("輸入要發送至 Telegram 的戰情訊息：", "🚀 【量化交易戰鬥艙】系統運作正常！")
-    if st.button("🚀 發送 Telegram 測試訊息", type="primary", use_container_width=True):
-        send_to_telegram("手動測試訊息", test_msg)
+elif page == "第五頁：總經週期與配置":
+    render_macro_cycle_page(load_book=load_book_for_page5)
 
 # ==========================================
 # 第六頁：下單輔助（只試算，不送委託）
