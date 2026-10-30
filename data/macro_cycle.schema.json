@@ -1,0 +1,163 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "macro_cycle.schema.json",
+  "title": "總經週期與配置",
+  "description": "schema_version 1.0.0。這份 JSON 是試算表讀不到時的備援。九項指標、二十個產業。加總與多空狀態不寫進檔案。狀態門檻在 macro_cycle.py 的 REGIME_BANDS、REGIME_RISK。平時改 Quant_Database 的 Macro_Score 與 Industry_Cycle，不要為了每週更新而改這個檔。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "score", "industries"],
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0",
+      "description": "資料格式版本。v1 即 1.0.0。欄位有破壞性變更時才升版，只改分數或產業內容不升版。"
+    },
+    "history": {
+      "type": "array",
+      "description": "倉庫備援的週分數。正式歷史在試算表 Macro_Score_History。",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["week", "total", "regime"],
+        "properties": {
+          "week": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+          "total": { "type": "integer", "minimum": -18, "maximum": 18 },
+          "regime": { "enum": ["牛", "偏多", "中性", "偏空", "熊"] }
+        }
+      }
+    },
+    "commentary": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "給畫面顯示的說明。不參與分數計算。",
+      "properties": {
+        "score": { "type": "string" },
+        "industries": { "type": "string" }
+      }
+    },
+    "score": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["updated_at", "cadence", "indicators"],
+      "properties": {
+        "updated_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+          "description": "這次週更的日期（YYYY-MM-DD）。每週改分數時一起改。"
+        },
+        "cadence": {
+          "const": "weekly",
+          "description": "分數更新頻率：每週。"
+        },
+        "indicators": {
+          "type": "array",
+          "minItems": 9,
+          "maxItems": 9,
+          "description": "固定九項。每項整數 -2 到 +2，加總範圍 -18 到 +18。",
+          "items": { "$ref": "#/$defs/indicator" }
+        }
+      }
+    },
+    "industries": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["updated_at", "cadence", "as_of_day", "items"],
+      "properties": {
+        "updated_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-12$",
+          "description": "產業圖更新日期，必須是當月 12 日（YYYY-MM-12）。"
+        },
+        "cadence": {
+          "const": "monthly",
+          "description": "產業圖更新頻率：每月。"
+        },
+        "as_of_day": {
+          "const": 12,
+          "description": "每月固定在 12 日更新產業圖。"
+        },
+        "items": {
+          "type": "array",
+          "minItems": 20,
+          "maxItems": 20,
+          "description": "固定二十個產業。代表股在全部產業之間不可重複（含去掉 .TW/.TWO/.US/.HK 後相同者）。",
+          "items": { "$ref": "#/$defs/industry" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "indicator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "score", "example"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "description": "穩定代號，畫面不顯示。"
+        },
+        "name": { "type": "string", "minLength": 1 },
+        "score": {
+          "type": "integer",
+          "minimum": -2,
+          "maximum": 2
+        },
+        "example": {
+          "type": "boolean",
+          "description": "true 表示這格分數仍是示例，不是正式週報。"
+        },
+        "source": {
+          "enum": ["auto", "manual"],
+          "description": "備援檔用。正式來源看試算表；auto 會被程式覆寫。"
+        },
+        "value": { "type": "string" },
+        "note": { "type": "string" },
+        "trend": { "type": "string", "description": "一句話趨勢，例如 下降、高於年線。" },
+        "updated_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+        }
+      }
+    },
+    "industry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "cycle", "direction", "stance", "tickers", "example"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
+        "name": { "type": "string", "minLength": 1 },
+        "cycle": {
+          "enum": ["復甦", "成長", "趨緩", "衰退"],
+          "description": "產業時鐘的位置，也是四象限的象限。"
+        },
+        "direction": {
+          "enum": ["上行", "持平", "下行"],
+          "description": "在該象限裡的走向。上行往下一階段（順時針），下行往回。"
+        },
+        "stance": {
+          "enum": ["加碼", "中性", "減碼"]
+        },
+        "tickers": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 },
+          "description": "代表股代號。2330 與 2330.TW 視為同一檔。"
+        },
+        "example": {
+          "type": "boolean",
+          "description": "true 表示整列（含立場）都是示例。false 表示立場是目前配置；週期、方向與代表股仍可能是示例，請看 note。"
+        },
+        "note": { "type": "string" },
+        "rationale": { "type": "string", "description": "一句話理由。" },
+        "prev_cycle": {
+          "enum": ["復甦", "成長", "趨緩", "衰退", ""],
+          "description": "上個月的週期位置。空白表示沒有上月。與 cycle 不同就標成換象限。"
+        }
+      }
+    }
+  }
+}
