@@ -50,13 +50,16 @@ def build_risk_manager_prompt(df, total_net_liq, global_leverage, portfolio_beta
 
 
 def complete_risk_manager_prompt(prompt: str, api_key: str, timeout_seconds: float | None = None) -> str:
-    """呼叫 Gemini。timeout_seconds 為 None 時與第四頁按鈕同一條呼叫。"""
+    """呼叫 Gemini，與第四頁按鈕同一條。
+
+    ``timeout_seconds`` 不傳進 SDK。客戶端逾時會變成要求伺服器提前中斷的標頭，
+    時限偏短時 Gemini 直接回 500，這支 API 就變成 502。
+    時間上限由呼叫端的 ``call_with_timeout`` 負責。
+    """
+    del timeout_seconds
     from google import genai
 
-    if timeout_seconds is None:
-        client = genai.Client(api_key=api_key)
-    else:
-        client = _client_with_timeout(api_key, timeout_seconds)
+    client = genai.Client(api_key=api_key)
     response = client.models.generate_content(model=RISK_MANAGER_MODEL, contents=prompt)
     text = getattr(response, "text", None)
     if not isinstance(text, str) or not text.strip():
@@ -76,15 +79,3 @@ def generate_risk_manager_advice(
     """第四頁按鈕與唯讀 API 共用的一輪建議。"""
     prompt = build_risk_manager_prompt(df, total_net_liq, global_leverage, portfolio_beta, global_cash_pct)
     return complete_risk_manager_prompt(prompt, api_key=api_key, timeout_seconds=timeout_seconds)
-
-
-def _client_with_timeout(api_key: str, timeout_seconds: float):
-    from google import genai
-
-    milliseconds = max(1, int(float(timeout_seconds) * 1000))
-    try:
-        from google.genai.types import HttpOptions
-
-        return genai.Client(api_key=api_key, http_options=HttpOptions(timeout=milliseconds))
-    except TypeError:
-        return genai.Client(api_key=api_key)

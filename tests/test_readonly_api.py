@@ -7,12 +7,13 @@ import os
 import time
 import unittest
 from datetime import datetime
+from unittest.mock import MagicMock, patch
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 from fastapi.testclient import TestClient
 
-from ai_advice import RISK_MANAGER_MODEL, build_risk_manager_prompt, page4_advice_figures
+from ai_advice import RISK_MANAGER_MODEL, build_risk_manager_prompt, complete_risk_manager_prompt, page4_advice_figures
 from api.advice_cache import AdviceCache, AdviceTimeout, RateLimited, call_with_timeout
 from api.auth import RedactSecretsFilter, api_key_matches, install_redact_filter
 from api.main import AdviceNotConfigured, app, get_book_loader, get_prompt_runner, reset_advice_cache
@@ -137,6 +138,26 @@ class AdvicePromptTests(unittest.TestCase):
         self.assertNotIn("請給予 3 點風控建議。", dashboard)
         self.assertIn("請給予 3 點風控建議。", advice)
         self.assertEqual(dashboard.count("gemini-3.8-flash"), 3)
+        self.assertNotIn("HttpOptions", advice)
+        self.assertIn("genai.Client(api_key=api_key)", advice)
+        self.assertIn("generate_content(model=RISK_MANAGER_MODEL, contents=prompt)", advice)
+
+    def test_gemini_call_matches_dashboard_style(self):
+        fake = MagicMock()
+        fake.models.generate_content.return_value.text = "三點建議"
+        with patch("google.genai.Client", return_value=fake) as ctor:
+            text = complete_risk_manager_prompt("持倉明細", api_key="not-a-real-key", timeout_seconds=25)
+        self.assertEqual(text, "三點建議")
+        ctor.assert_called_once_with(api_key="not-a-real-key")
+        fake.models.generate_content.assert_called_once_with(model="gemini-3.8-flash", contents="持倉明細")
+
+    def test_test_site_banner_only_when_app_env_is_test(self):
+        with open(os.path.join(ROOT, "Dashboard.py"), encoding="utf-8") as handle:
+            dashboard = handle.read()
+        self.assertIn('os.environ.get("APP_ENV", "").strip() == "test"', dashboard)
+        self.assertIn("量化交易戰鬥艙（測試站）", dashboard)
+        self.assertIn('st.warning("這是測試站。")', dashboard)
+        self.assertIn('_page_title = "量化交易戰鬥艙（測試站）" if _is_test_site else "量化交易戰鬥艙"', dashboard)
 
 
 class AuthUnitTests(unittest.TestCase):
@@ -380,6 +401,34 @@ class ApiHttpTests(unittest.TestCase):
         bare = self.client.get("/v1/ai-advice", headers={"X-API-Key": API_KEY})
         self.assertEqual(bare.status_code, 503)
         self.assertEqual(bare.json()["detail"], "ai advice is not configured")
+
+    def test_ai_advice_failure_logs_exception_without_secret(self):
+        secret = "gemini-secret-value-should-not-leak"
+        os.environ["GEMINI_API_KEY"] = secret
+        os.environ["AI_ADVICE_MIN_INTERVAL_SECONDS"] = "0"
+        reset_advice_cache()
+
+        def boom(_prompt: str) -> str:
+            raise RuntimeError(f"model failed token={secret}")
+
+        app.dependency_overrides[get_prompt_runner] = lambda: boom
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        advice_logger = logging.getLogger("api.main")
+        advice_logger.addHandler(handler)
+        try:
+            response = self.client.get("/v1/ai-advice", headers={"X-API-Key": API_KEY})
+        finally:
+            advice_logger.removeHandler(handler)
+            os.environ.pop("GEMINI_API_KEY", None)
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.json()["detail"], "ai advice unavailable")
+        self.assertNotIn(secret, response.text)
+        written = stream.getvalue()
+        self.assertIn("ai advice failed", written)
+        self.assertIn("RuntimeError", written)
+        self.assertNotIn(secret, written)
+        self.assertIn("[redacted]", written)
 
     def test_committed_schema_matches_models(self):
         with open(SCHEMA_PATH, encoding="utf-8") as handle:

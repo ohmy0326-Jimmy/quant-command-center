@@ -36,6 +36,12 @@ class RedactSecretsFilter(logging.Filter):
             if redacted != message:
                 record.msg = redacted
                 record.args = ()
+            if record.exc_info:
+                if not record.exc_text:
+                    record.exc_text = logging.Formatter().formatException(record.exc_info)
+                redacted_exc = _redact(record.exc_text)
+                if redacted_exc != record.exc_text:
+                    record.exc_text = redacted_exc
         except Exception:
             return True
         return True
@@ -55,6 +61,6 @@ def install_redact_filter() -> None:
     if _FILTER_INSTALLED:
         return
     filt = RedactSecretsFilter()
-    for name in ("", "uvicorn", "uvicorn.access", "uvicorn.error", "fastapi"):
+    for name in ("", "uvicorn", "uvicorn.access", "uvicorn.error", "fastapi", "api", "api.main"):
         logging.getLogger(name).addFilter(filt)
     _FILTER_INSTALLED = True

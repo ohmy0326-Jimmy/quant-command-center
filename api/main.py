@@ -18,6 +18,12 @@ from portfolio_briefing import SCHEMA_VERSION, format_as_of, load_live_book, tai
 
 logger = logging.getLogger(__name__)
 install_redact_filter()
+if not any(getattr(handler, "quant_api", False) for handler in logger.handlers):
+    _handler = logging.StreamHandler()
+    _handler.quant_api = True
+    _handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+    logger.addHandler(_handler)
+    logger.setLevel(logging.INFO)
 
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 _cache: AdviceCache | None = None
@@ -150,7 +156,7 @@ def ai_advice(
     except AdviceNotConfigured as exc:
         raise HTTPException(status_code=503, detail="ai advice is not configured") from exc
     except Exception as exc:
-        logger.warning("ai advice failed: %s", type(exc).__name__)
+        logger.exception("ai advice failed")
         raise HTTPException(status_code=502, detail="ai advice unavailable") from exc
     return _advice_response(result.text, result.generated_at, result.cached)
 

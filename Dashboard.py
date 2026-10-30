@@ -30,7 +30,11 @@ from portfolio_risk import (
 # ==========================================
 # 網頁基本設定與密碼驗證防護（支援環境變數與 Secret）
 # ==========================================
-st.set_page_config(page_title="量化交易戰鬥艙", page_icon="⚔️", layout="wide", initial_sidebar_state="expanded")
+_is_test_site = os.environ.get("APP_ENV", "").strip() == "test"
+_page_title = "量化交易戰鬥艙（測試站）" if _is_test_site else "量化交易戰鬥艙"
+st.set_page_config(page_title=_page_title, page_icon="⚔️", layout="wide", initial_sidebar_state="expanded")
+if _is_test_site:
+    st.warning("這是測試站。")
 
 _env_password = os.environ.get("ADMIN_PASSWORD")
 ADMIN_PASSWORD = _env_password if _env_password else read_secret("", "passwords", "admin")
