@@ -1,0 +1,309 @@
+{
+  "schema_version": "1.0.0",
+  "header": "X-API-Key",
+  "models": {
+    "health": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "examples": [
+            "1.0.0"
+          ],
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "as_of": {
+          "description": "Asia/Taipei，ISO 8601，含時區偏移。",
+          "title": "As Of",
+          "type": "string"
+        },
+        "status": {
+          "const": "ok",
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "as_of",
+        "status"
+      ],
+      "title": "HealthResponse",
+      "type": "object"
+    },
+    "portfolio": {
+      "$defs": {
+        "PositionResponse": {
+          "additionalProperties": false,
+          "properties": {
+            "symbol": {
+              "description": "標的代號，對應第四頁「標的」。",
+              "title": "Symbol",
+              "type": "string"
+            },
+            "name": {
+              "description": "名稱。試算表沒填時為空字串。",
+              "title": "Name",
+              "type": "string"
+            },
+            "qty": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "持有數量。",
+              "title": "Qty"
+            },
+            "price": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "即時報價，原幣。臺指期是指數點數，美股是美元。",
+              "title": "Price"
+            },
+            "market_value": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "即時市值，台幣。第四頁欄位「即時市值(台幣)」。期貨為保證金加未實現損益。",
+              "title": "Market Value"
+            },
+            "pnl": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "淨未實現損益，台幣。原幣損益乘上換算匯率。股票損益已含 0.3% 證交稅估算，不再從淨值扣一次。",
+              "title": "Pnl"
+            }
+          },
+          "required": [
+            "symbol",
+            "name",
+            "qty",
+            "price",
+            "market_value",
+            "pnl"
+          ],
+          "title": "PositionResponse",
+          "type": "object"
+        },
+        "YuantaFuturesResponse": {
+          "additionalProperties": false,
+          "properties": {
+            "equity": {
+              "description": "元大期貨權益，台幣。基期 170422 再加未實現損益，與第四頁相同。",
+              "title": "Equity",
+              "type": "number"
+            },
+            "maintenance_margin": {
+              "description": "維持保證金合計，台幣。",
+              "title": "Maintenance Margin",
+              "type": "number"
+            },
+            "margin_ratio_pct": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "權益 ÷ 維持保證金 × 100。沒有保證金時為 null。",
+              "title": "Margin Ratio Pct"
+            },
+            "excess_margin": {
+              "description": "期貨帳戶現金餘額（權益高於維持保證金的部分）。",
+              "title": "Excess Margin",
+              "type": "number"
+            },
+            "margin_call": {
+              "description": "權益低於維持保證金時為 true。",
+              "title": "Margin Call",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "equity",
+            "maintenance_margin",
+            "margin_ratio_pct",
+            "excess_margin",
+            "margin_call"
+          ],
+          "title": "YuantaFuturesResponse",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "examples": [
+            "1.0.0"
+          ],
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "as_of": {
+          "description": "Asia/Taipei，這次回應產生的時間。",
+          "title": "As Of",
+          "type": "string"
+        },
+        "currency": {
+          "const": "TWD",
+          "description": "淨值、曝險、市值、損益的幣別。",
+          "title": "Currency",
+          "type": "string"
+        },
+        "usdtwd": {
+          "description": "這次估價用的美元兌台幣，與第四頁同一來源。",
+          "title": "Usdtwd",
+          "type": "number"
+        },
+        "net_value": {
+          "description": "總帳戶淨值，台幣。第四頁 metrics.nav。",
+          "title": "Net Value",
+          "type": "number"
+        },
+        "exposure": {
+          "description": "總實質曝險，台幣。第四頁 metrics.exposure。",
+          "title": "Exposure",
+          "type": "number"
+        },
+        "leverage": {
+          "description": "實質曝險 ÷ 淨值。畫面上四捨五入到小數兩位。",
+          "title": "Leverage",
+          "type": "number"
+        },
+        "cash_pct": {
+          "description": "現金 ÷ 淨值 × 100，百分點。13.4 表示 13.4%。畫面上四捨五入到小數一位。",
+          "title": "Cash Pct",
+          "type": "number"
+        },
+        "beta": {
+          "description": "曝險加權 Beta。第四頁 metrics.beta。",
+          "title": "Beta",
+          "type": "number"
+        },
+        "positions": {
+          "items": {
+            "$ref": "#/$defs/PositionResponse"
+          },
+          "title": "Positions",
+          "type": "array"
+        },
+        "yuanta_futures": {
+          "$ref": "#/$defs/YuantaFuturesResponse"
+        }
+      },
+      "required": [
+        "schema_version",
+        "as_of",
+        "currency",
+        "usdtwd",
+        "net_value",
+        "exposure",
+        "leverage",
+        "cash_pct",
+        "beta",
+        "positions",
+        "yuanta_futures"
+      ],
+      "title": "PortfolioResponse",
+      "type": "object"
+    },
+    "ai_advice": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "examples": [
+            "1.0.0"
+          ],
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "as_of": {
+          "description": "Asia/Taipei，這次回應產生的時間。",
+          "title": "As Of",
+          "type": "string"
+        },
+        "text": {
+          "description": "AI 避險基金經理人的風控建議，與第四頁按鈕同一套提示詞。",
+          "title": "Text",
+          "type": "string"
+        },
+        "model": {
+          "description": "Gemini 模型名稱。",
+          "title": "Model",
+          "type": "string"
+        },
+        "cached": {
+          "description": "true 表示這次沒有重新呼叫模型。",
+          "title": "Cached",
+          "type": "boolean"
+        },
+        "generated_at": {
+          "description": "Asia/Taipei，這段文字實際產生的時間。",
+          "title": "Generated At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "as_of",
+        "text",
+        "model",
+        "cached",
+        "generated_at"
+      ],
+      "title": "AdviceResponse",
+      "type": "object"
+    },
+    "error": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "examples": [
+            "1.0.0"
+          ],
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "as_of": {
+          "description": "Asia/Taipei。",
+          "title": "As Of",
+          "type": "string"
+        },
+        "detail": {
+          "title": "Detail",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "as_of",
+        "detail"
+      ],
+      "title": "ErrorResponse",
+      "type": "object"
+    }
+  }
+}

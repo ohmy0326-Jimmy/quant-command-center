@@ -1,0 +1,7 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args: ["build", "-f", "api/Dockerfile", "-t", "$_IMAGE", "."]
+images:
+  - "$_IMAGE"
+substitutions:
+  _IMAGE: asia-east1-docker.pkg.dev/quant-dashboard-512010/cloud-run-source-deploy/quant-command-center-api:latest
