@@ -38,7 +38,7 @@ X-API-Key: <READONLY_API_KEY>
 
 每個 JSON 都有：
 
-- `schema_version`：目前 `1.0.0`
+- `schema_version`：目前 `1.1.0`
 - `as_of`：`Asia/Taipei` 的 ISO 8601，例如 `2026-10-29T22:00:00+08:00`
 
 機器可讀的 JSON Schema 在 [`readonly_api.schema.json`](readonly_api.schema.json)，由 `api/schemas.py` 的 Pydantic 模型產生。
@@ -49,7 +49,7 @@ X-API-Key: <READONLY_API_KEY>
 
 ```json
 {
-  "schema_version": "1.0.0",
+  "schema_version": "1.1.0",
   "as_of": "2026-10-29T22:00:00+08:00",
   "status": "ok"
 }
@@ -57,7 +57,7 @@ X-API-Key: <READONLY_API_KEY>
 
 ## GET /v1/portfolio
 
-成功時 **200**。數字與第四頁相同，幣別是台幣。`leverage` 是實質曝險 ÷ 淨值（畫面上會再四捨五入到小數兩位）。`cash_pct` 是現金 ÷ 淨值 × 100 的百分點（畫面上四捨五入到小數一位），`9.5` 表示 9.5%。`beta` 是曝險加權 Beta。
+成功時 **200**。數字與第四頁相同，幣別是台幣。`leverage` 是實質曝險 ÷ 淨值（畫面上會再四捨五入到小數兩位）。`cash_pct` 是現金 ÷ 淨值 × 100 的百分點（畫面上四捨五入到小數一位），`9.5` 表示 9.5%。`total_beta` 為總組合 Beta（(台股與台指期貨 Beta 曝險 + 美股 Beta 曝險) ÷ 總淨值），`beta` 欄位亦設為 `total_beta`。`tw_beta` 與 `us_beta` 分別為台股/台指期貨與美股分區 Beta（分區 Beta 曝險 ÷ 分區淨值）。`tw_nav` 與 `us_nav` 分別為台股/台指期貨與美股分區淨值。`tw_exposure` 與 `us_exposure` 分別為台股/台指期貨與美股的實質 Beta 曝險（臺指期貨曝險現為名目合約總值：口數 × 指數點 × 乘數）。
 
 `price` 是原幣報價（臺指期是指數點，美股是美元）。`market_value` 與 `pnl` 是台幣：分別對應第四頁的「即時市值(台幣)」與「淨未實現損益(原幣) × 換算匯率」。股票損益已含 0.3% 證交稅估算，不會再從淨值扣一次。期貨市值是佔用保證金加未實現損益。
 
@@ -65,15 +65,22 @@ X-API-Key: <READONLY_API_KEY>
 
 ```json
 {
-  "schema_version": "1.0.0",
+  "schema_version": "1.1.0",
   "as_of": "2026-10-29T22:00:00+08:00",
   "currency": "TWD",
   "usdtwd": 30.0,
   "net_value": 527922.0,
-  "exposure": 1033500.0,
-  "leverage": 1.957675,
+  "exposure": 4332500.0,
+  "leverage": 8.206685,
   "cash_pct": 9.471247,
-  "beta": 1.064828,
+  "beta": 8.24838,
+  "tw_beta": 8.324014,
+  "us_beta": 3.0,
+  "total_beta": 8.24838,
+  "tw_nav": 520422.0,
+  "us_nav": 7500.0,
+  "tw_exposure": 4332000.0,
+  "us_exposure": 22500.0,
   "positions": [
     {
       "symbol": "2330",

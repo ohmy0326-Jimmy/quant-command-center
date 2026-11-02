@@ -739,9 +739,14 @@ elif page == "第四頁：部位監控與量化風控":
 
                 st.subheader("⚖️ 投資組合 Beta 係數與中性化戰情計分板")
                 b_col1, b_col2, b_col3 = st.columns(3)
-                b_col1.metric("整體資產加權 Beta", f"{portfolio_beta:.2f}", "量化中性化指標")
-                b_col2.metric("部位中性化判定", neutrality_status, "區間: -0.2 ~ +0.2 為中性")
-                b_col3.metric("總實質曝險部位", f"NT$ {total_exposure_sum:,.0f}", "")
+                b_col1.metric("台股 Beta", f"{metrics['tw_beta']:.2f}", f"TW 淨值: NT$ {metrics['tw_nav']:,.0f}")
+                b_col2.metric("美股 Beta", f"{metrics['us_beta']:.2f}", f"US 淨值: NT$ {metrics['us_nav']:,.0f}")
+                b_col3.metric("總 Beta", f"{metrics['total_beta']:.2f}", neutrality_status)
+
+                if metrics.get("expired_removed"):
+                    st.info(f"ℹ️ 已自動過期排除之選擇權標的：{', '.join(metrics['expired_removed'])}")
+                if metrics.get("options_missing_delta"):
+                    st.warning(f"⚠️ 以下選擇權缺少 Delta 數值，Beta 曝險以 0 計算：{', '.join(metrics['options_missing_delta'])}")
                 st.markdown("---")
 
                 st.subheader("🏢 各精細產業別持股曝險與資金佔比分佈")

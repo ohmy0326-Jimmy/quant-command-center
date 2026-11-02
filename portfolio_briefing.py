@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-SCHEMA_VERSION = "1.0.0"
+SCHEMA_VERSION = "1.1.0"
 TAIPEI = ZoneInfo("Asia/Taipei")
 
 
@@ -91,16 +91,24 @@ def yuanta_from_metrics(metrics: dict) -> dict:
 
 
 def portfolio_payload(positions: pd.DataFrame, metrics: dict, *, usdtwd: float, as_of: datetime) -> dict:
+    total_beta = float(metrics.get("total_beta", metrics.get("beta", 0.0)))
     return {
         "schema_version": SCHEMA_VERSION,
         "as_of": format_as_of(as_of),
         "currency": "TWD",
         "usdtwd": float(usdtwd),
-        "net_value": float(metrics["nav"]),
-        "exposure": float(metrics["exposure"]),
-        "leverage": float(metrics["leverage"]),
-        "cash_pct": float(metrics["cash_pct"]),
-        "beta": float(metrics["beta"]),
+        "net_value": float(metrics.get("nav", 0.0)),
+        "exposure": float(metrics.get("exposure", 0.0)),
+        "leverage": float(metrics.get("leverage", 0.0)),
+        "cash_pct": float(metrics.get("cash_pct", 0.0)),
+        "beta": total_beta,
+        "tw_beta": float(metrics.get("tw_beta", 0.0)),
+        "us_beta": float(metrics.get("us_beta", 0.0)),
+        "total_beta": total_beta,
+        "tw_nav": float(metrics.get("tw_nav", 0.0)),
+        "us_nav": float(metrics.get("us_nav", 0.0)),
+        "tw_exposure": float(metrics.get("tw_exposure", 0.0)),
+        "us_exposure": float(metrics.get("us_exposure", 0.0)),
         "positions": position_records(positions),
         "yuanta_futures": yuanta_from_metrics(metrics),
     }

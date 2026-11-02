@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import os
 import re
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -158,7 +160,7 @@ def market_beta_and_sector(ticker, is_tw: bool) -> tuple[float, str]:
         except Exception:
             refined_sector = "其他與衍生品"
 
-    if t_upper in ["TX", "MTX", "FMF"]:
+    if t_upper in TAIEX_FUTURES:
         return 1.0, str(refined_sector)
 
     try:
@@ -178,16 +180,94 @@ def market_beta_and_sector(ticker, is_tw: bool) -> tuple[float, str]:
         return 1.0, str(refined_sector)
 
 
-def normalize_positions(quant_data: pd.DataFrame) -> pd.DataFrame:
+def is_option_row(row) -> bool:
+    kind = str(row.get("種類", "")).lower()
+    if any(k in kind for k in ("選擇權", "期權", "option")):
+        return True
+    name = str(row.get("名稱", "")).lower()
+    if any(k in name for k in ("call", "put", "買權", "賣權")):
+        return True
+    return False
+
+
+def parse_expiry(row) -> date | None:
+    expiry_cols = ("到期日", "到期日期", "到期", "Expiry", "Expiration", "expiry", "expiration")
+    for col in expiry_cols:
+        if col in row and pd.notna(row[col]):
+            val = row[col]
+            if str(val).strip():
+                try:
+                    num = float(val)
+                    if 30000 < num < 100000:
+                        return (pd.Timestamp("1899-12-30") + pd.Timedelta(days=num)).date()
+                except (ValueError, TypeError):
+                    pass
+                dt = pd.to_datetime(val, errors="coerce")
+                if pd.notna(dt):
+                    return dt.date()
+
+    if is_option_row(row):
+        for text_val in (str(row.get("名稱", "")), str(row.get("標的", ""))):
+            if not text_val:
+                continue
+            m = re.search(r"[A-Z]{1,6}(\d{2})(\d{2})(\d{2})[CP]\d{8}", text_val, re.IGNORECASE)
+            if m:
+                try:
+                    yy, mm, dd = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                    year = 2000 + yy if yy < 80 else 1900 + yy
+                    return date(year, mm, dd)
+                except ValueError:
+                    pass
+            m = re.search(r"(?<!\d)(20\d{2})[-/](0[1-9]|1[0-2])[-/](0[1-9]|[12]\d|3[01])(?!\d)", text_val)
+            if m:
+                try:
+                    return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                except ValueError:
+                    pass
+            m = re.search(r"(?<!\d)(20\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])(?!\d)", text_val)
+            if m:
+                try:
+                    return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                except ValueError:
+                    pass
+            m = re.search(r"(?<!\d)(0[1-9]|1[0-2])[-/](0[1-9]|[12]\d|3[01])[-/](20\d{2})(?!\d)", text_val)
+            if m:
+                try:
+                    return date(int(m.group(3)), int(m.group(1)), int(m.group(2)))
+                except ValueError:
+                    pass
+    return None
+
+
+def normalize_positions(quant_data: pd.DataFrame, today: date | None = None) -> pd.DataFrame:
     """清洗持倉表。欄位定義與第四頁進入報價迴圈之前相同。"""
     if quant_data is None or quant_data.empty or "標的" not in quant_data.columns:
         return pd.DataFrame()
 
     df = quant_data.copy()
-    df["標的"] = df["標的"].astype(str).str.strip().str.upper()
+    raw_target = df["標的"].astype(str).str.strip().str.upper()
+    df["標的"] = raw_target
     df = df[df["標的"] != ""].copy()
     if df.empty:
         return pd.DataFrame()
+
+    if today is None:
+        today = datetime.now(ZoneInfo("Asia/Taipei")).date()
+
+    expired_removed = []
+    keep_mask = []
+    for _idx, row in df.iterrows():
+        exp = parse_expiry(row)
+        if exp is not None and exp < today:
+            expired_removed.append(str(row["標的"]).strip().upper())
+            keep_mask.append(False)
+        else:
+            keep_mask.append(True)
+
+    df = df[keep_mask].copy()
+    df.attrs["expired_removed"] = list(dict.fromkeys(expired_removed))
+    if df.empty:
+        return df
 
     df["持有數量"] = pd.to_numeric(df["持有數量"], errors="coerce").fillna(0.0)
     df["平均成本"] = pd.to_numeric(df["平均成本"], errors="coerce").fillna(0.0)
@@ -225,8 +305,8 @@ def _quote_one(ticker, twii_price: float, beta_fn):
     """單一代號的報價、Beta、產業。例外時的回退與第四頁逐檔迴圈相同。"""
     try:
         t_upper = str(ticker).upper()
-        if t_upper in ["TX", "MTX", "FMF", "TMF"]:
-            sector = "微型臺指期" if t_upper == "FMF" else ("小型臺指" if t_upper == "MTX" else "臺指期貨")
+        if t_upper in TAIEX_FUTURES:
+            sector = DETAILED_SECTOR_MAP.get(t_upper, "臺指期貨")
             return ticker, twii_price, 1.0, sector
 
         is_tw_market = _page4_is_tw_market(ticker)
@@ -306,6 +386,16 @@ def _empty_metrics() -> dict:
         "cash_pct": 0.0,
         "debt": 0.0,
         "beta": 0.0,
+        "tw_beta": 0.0,
+        "us_beta": 0.0,
+        "total_beta": 0.0,
+        "tw_exposure": 0.0,
+        "us_exposure": 0.0,
+        "tw_nav": 0.0,
+        "us_nav": 0.0,
+        "beta_weighted_avg": 0.0,
+        "options_missing_delta": [],
+        "expired_removed": [],
         "margin_ratio": None,
         "futures_equity": 0.0,
         "futures_maint": 0.0,
@@ -379,7 +469,76 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
             df["即時報價"] * df["持有數量"],
         ).astype(float)
         df["即時市值(台幣)"] = (df["顯示_即時市值(原幣)"].abs() * df["換算匯率"]).astype(float)
-        df["實質曝險(台幣)"] = (df["即時市值(台幣)"] * df["標的槓桿"]).astype(float)
+
+        options_missing_delta = []
+        df["實質曝險(台幣)"] = 0.0
+        df["Beta曝險(台幣)"] = 0.0
+
+        for idx, row in df.iterrows():
+            ticker_str = str(row["標的"]).strip().upper()
+            kind_str = str(row["種類"])
+            qty = float(row["持有數量"])
+            px = float(row["即時報價"])
+            fx = float(row["換算匯率"])
+            is_opt = is_option_row(row)
+            is_fut = ("期" in kind_str) and not is_opt
+
+            if is_opt:
+                delta_val = None
+                for dcol in ("Delta", "delta"):
+                    if dcol in df.columns and pd.notna(row[dcol]):
+                        try:
+                            delta_val = float(row[dcol])
+                            break
+                        except (ValueError, TypeError):
+                            pass
+
+                if delta_val is None:
+                    if ticker_str not in options_missing_delta:
+                        options_missing_delta.append(ticker_str)
+                    beta_exp = 0.0
+                    gross_exp = 0.0
+                else:
+                    opt_mult = 100.0 if "美" in kind_str else 50.0
+                    if "合約乘數" in df.columns and pd.notna(row["合約乘數"]):
+                        try:
+                            opt_mult = float(row["合約乘數"])
+                        except (ValueError, TypeError):
+                            pass
+                    und_px = px
+                    if "標的現價" in df.columns and pd.notna(row["標的現價"]):
+                        try:
+                            und_px = float(row["標的現價"])
+                        except (ValueError, TypeError):
+                            pass
+                    beta_exp = delta_val * qty * opt_mult * und_px * fx
+                    gross_exp = abs(beta_exp)
+
+                df.at[idx, "實質曝險(台幣)"] = gross_exp
+                df.at[idx, "Beta曝險(台幣)"] = beta_exp
+
+            elif is_fut:
+                mult = futures_multiplier(ticker_str)
+                gross_exp = abs(qty) * px * mult * fx
+                df.at[idx, "實質曝險(台幣)"] = gross_exp
+                if is_taiex_future(ticker_str):
+                    df.at[idx, "Beta曝險(台幣)"] = qty * px * mult * fx
+                else:
+                    mkt_val_twd = float(row["即時市值(台幣)"])
+                    lev = float(row["標的槓桿"])
+                    beta = float(row["Beta值"])
+                    sens = lev if lev > 1 else beta
+                    sign = 1.0 if qty > 0 else (-1.0 if qty < 0 else 0.0)
+                    df.at[idx, "Beta曝險(台幣)"] = mkt_val_twd * sens * sign
+
+            else:
+                mkt_val_twd = float(row["即時市值(台幣)"])
+                lev = float(row["標的槓桿"])
+                beta = float(row["Beta值"])
+                df.at[idx, "實質曝險(台幣)"] = mkt_val_twd * lev
+                sens = lev if lev > 1 else beta
+                sign = 1.0 if qty > 0 else (-1.0 if qty < 0 else 0.0)
+                df.at[idx, "Beta曝險(台幣)"] = mkt_val_twd * sens * sign
     else:
         df = pd.DataFrame()
 
@@ -433,24 +592,94 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
             ),
             1,
         ).astype(float)
+
+        acc_market_types = {}
+        for idx, row in account_data.iterrows():
+            acc_name = str(row["帳戶名稱"]).strip()
+            if "元大期貨" in acc_name:
+                acc_market_types[acc_name] = "TW"
+            else:
+                subset = df[df["帳戶"] == acc_name] if not df.empty else pd.DataFrame()
+                if not subset.empty:
+                    is_us_flags = subset["種類"].astype(str).str.contains("美")
+                    if is_us_flags.all():
+                        acc_market_types[acc_name] = "US"
+                    elif (~is_us_flags).all():
+                        acc_market_types[acc_name] = "TW"
+                    else:
+                        acc_market_types[acc_name] = "MIXED"
+                else:
+                    if any(k in acc_name.upper() for k in ("美", "US", "複委託", "海外")):
+                        acc_market_types[acc_name] = "US"
+                    else:
+                        acc_market_types[acc_name] = "TW"
+
+        tw_nav = 0.0
+        us_nav = 0.0
+        for idx, row in account_data.iterrows():
+            acc_name = str(row["帳戶名稱"]).strip()
+            acc_nav = float(row["帳戶淨值"])
+            mtype = acc_market_types[acc_name]
+            if mtype == "TW":
+                tw_nav += acc_nav
+            elif mtype == "US":
+                us_nav += acc_nav
+            else:
+                subset = df[df["帳戶"] == acc_name]
+                us_subset = subset[subset["種類"].astype(str).str.contains("美")]
+                us_mv = float(us_subset["即時市值(台幣)"].sum())
+                us_nav += us_mv
+                tw_nav += (acc_nav - us_mv)
     else:
         nav = 0.0
+        tw_nav = 0.0
+        us_nav = 0.0
 
     if not df.empty:
         df["真實風險權重 (%)"] = np.where(nav > 0, (df["實質曝險(台幣)"] / nav) * 100.0, 0.0).astype(float)
 
-    metrics = _metrics_from_frames(df, account_data, nav)
+    expired_removed = positions.attrs.get("expired_removed", []) if positions is not None else []
+    metrics = _metrics_from_frames(df, account_data, nav, tw_nav, us_nav, options_missing_delta if not df.empty else [], expired_removed)
     return df, account_data, metrics
 
 
-def _metrics_from_frames(df: pd.DataFrame, account_data: pd.DataFrame, nav: float) -> dict:
+def _metrics_from_frames(
+    df: pd.DataFrame,
+    account_data: pd.DataFrame,
+    nav: float,
+    tw_nav: float = 0.0,
+    us_nav: float = 0.0,
+    options_missing_delta: list[str] | None = None,
+    expired_removed: list[str] | None = None,
+) -> dict:
     metrics = _empty_metrics()
     metrics["nav"] = float(nav)
+    metrics["tw_nav"] = float(tw_nav)
+    metrics["us_nav"] = float(us_nav)
+    metrics["options_missing_delta"] = list(dict.fromkeys(options_missing_delta or []))
+    metrics["expired_removed"] = list(expired_removed or [])
+
     position_exposure = float(df["實質曝險(台幣)"].sum()) if not df.empty and "實質曝險(台幣)" in df.columns else 0.0
     metrics["position_exposure"] = position_exposure
     if position_exposure > 0:
-        metrics["beta"] = float((df["實質曝險(台幣)"] / position_exposure * df["Beta值"]).sum())
+        metrics["beta_weighted_avg"] = float((df["實質曝險(台幣)"] / position_exposure * df["Beta值"]).sum())
     metrics["sector_weights"] = _sector_weights(df)
+
+    if not df.empty and "Beta曝險(台幣)" in df.columns:
+        is_us = df["種類"].astype(str).str.contains("美")
+        tw_exp = float(df[~is_us]["Beta曝險(台幣)"].sum())
+        us_exp = float(df[is_us]["Beta曝險(台幣)"].sum())
+    else:
+        tw_exp = 0.0
+        us_exp = 0.0
+
+    metrics["tw_exposure"] = tw_exp
+    metrics["us_exposure"] = us_exp
+    metrics["tw_beta"] = (tw_exp / tw_nav) if tw_nav > 0 else 0.0
+    metrics["us_beta"] = (us_exp / us_nav) if us_nav > 0 else 0.0
+    total_beta = ((tw_exp + us_exp) / nav) if nav > 0 else 0.0
+    metrics["total_beta"] = total_beta
+    metrics["beta"] = total_beta
 
     if account_data is None or account_data.empty or "帳戶淨值" not in account_data.columns:
         return metrics

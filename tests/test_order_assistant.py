@@ -1,6 +1,7 @@
 """下單輔助與第四頁共用估價的單元測試。不連網、不讀金鑰。"""
 
 import math
+from datetime import date
 import os
 import unittest
 
@@ -19,10 +20,12 @@ from order_assistant import (
     option_expiry_pnl,
     propose_rebalance,
     run_stress,
+    split_betas,
+    strategy_summary,
     suggest_addback_text,
     taiex_shock_state,
 )
-from portfolio_risk import YUANTA_FUTURES_BASE_EQUITY, finalize_valuation
+from portfolio_risk import YUANTA_FUTURES_BASE_EQUITY, finalize_valuation, normalize_positions
 
 
 def _stock(account, kind, ticker, qty, cost, price, lev=1.0, beta=1.0, sector="其他", max_loss=-100):
@@ -62,11 +65,16 @@ class ValuationTests(unittest.TestCase):
         tw = valued[valued["標的"] == "2330"].iloc[0]
         self.assertAlmostEqual(tw["淨未實現損益(原幣)"], 9670.0, places=6)
         self.assertAlmostEqual(tw["即時市值(台幣)"], 110000.0, places=6)
+        # nav = 50000 + 110000 + 7500 - 10000 + 370422 = 527922
         self.assertAlmostEqual(metrics["nav"], 527922.0, places=6)
-        self.assertAlmostEqual(metrics["exposure"], 1_033_500.0, places=6)
-        self.assertAlmostEqual(metrics["leverage"], 1_033_500 / 527922, places=8)
+        # exposure = 2330 (110k) + SOXL (7.5k*3=22.5k) + TX notional (1 * 21000 * 200 * 1 = 4.2M) = 4,332,500
+        self.assertAlmostEqual(metrics["exposure"], 4_332_500.0, places=6)
+        self.assertAlmostEqual(metrics["leverage"], 4_332_500 / 527922, places=8)
         self.assertAlmostEqual(metrics["cash"], 50000.0, places=6)
-        self.assertAlmostEqual(metrics["beta"], 1_100_500 / 1_033_500, places=8)
+        # tw_exp = 110,000 * 1.2 + 4,200,000 = 4,332,000; us_exp = 7,500 * 3 = 22,500
+        # total_beta = (4,332,000 + 22,500) / 527,922 = 4,354,500 / 527,922
+        self.assertAlmostEqual(metrics["beta"], 4_354_500 / 527922, places=8)
+        self.assertAlmostEqual(metrics["total_beta"], 4_354_500 / 527922, places=8)
         self.assertAlmostEqual(metrics["margin_ratio"], 370422 / 538000 * 100, places=6)
         self.assertTrue(metrics["margin_call"])
         self.assertAlmostEqual(metrics["futures_equity"], YUANTA_FUTURES_BASE_EQUITY + 200000, places=6)
@@ -95,7 +103,8 @@ class OrderImpactTests(unittest.TestCase):
         self.assertAlmostEqual(updated.metrics["nav"], 1000.0, places=6)
         self.assertAlmostEqual(updated.metrics["exposure"], 800.0, places=6)
         self.assertAlmostEqual(updated.metrics["leverage"], 0.8, places=6)
-        self.assertAlmostEqual(updated.metrics["beta"], 1.75, places=6)
+        # AAA MV 500 * beta 1 + SOXL MV 100 * leverage 3 = 800 Beta exposure, NAV 1000 => total_beta = 800 / 1000 = 0.8
+        self.assertAlmostEqual(updated.metrics["beta"], 0.8, places=6)
         self.assertAlmostEqual(updated.metrics["cash"], 400.0, places=6)
 
     def test_buy_shortfall_becomes_margin_debt_and_nav_unchanged(self):
@@ -240,6 +249,125 @@ class StressTests(unittest.TestCase):
         stressed = run_stress(snap, "貶值", fx=0.05)
         self.assertAlmostEqual(stressed["nav"], 10 * 100 * 30 * 1.05, places=4)
         self.assertGreater(stressed["drawdown_pct"], 0)
+
+
+class SpecificationRefinementTests(unittest.TestCase):
+    def test_tmf_futures_exposure(self):
+        # 2 lots TMF at 22600 index => Notional = 2 * 22600 * 10 = 452,000 TWD
+        positions = pd.DataFrame([_stock("元大期貨", "期貨", "TMF", 2, 22000, 22600)])
+        accounts = pd.DataFrame([{"帳戶名稱": "元大期貨", "現金餘額": 0, "融資/質押借款": 0}])
+        valued, _acc, metrics = finalize_valuation(positions, accounts, usdtwd=32.0)
+        row = valued.iloc[0]
+        self.assertEqual(row["實質曝險(台幣)"], 452000.0)
+        self.assertEqual(row["Beta曝險(台幣)"], 452000.0)
+        self.assertEqual(metrics["exposure"], 452000.0)
+
+    def test_leveraged_etf_beta_exposure(self):
+        # US Leveraged ETF: MV = 100k TWD, 標的槓桿 = 3, Beta = 3.2 => Beta曝險 = 100k * 3 = 300k (not 320k or 960k)
+        positions = pd.DataFrame([_stock("美股戶", "美股", "SOXL", 100, 31.25, 31.25, lev=3.0, beta=3.2)])
+        accounts = pd.DataFrame([{"帳戶名稱": "美股戶", "現金餘額": 0, "融資/質押借款": 0}])
+        valued, _acc, metrics = finalize_valuation(positions, accounts, usdtwd=32.0)
+        row = valued.iloc[0]
+        # MV(TWD) = 100 * 31.25 * 32 = 100,000 TWD
+        self.assertAlmostEqual(row["即時市值(台幣)"], 100000.0)
+        self.assertAlmostEqual(row["實質曝險(台幣)"], 300000.0)
+        self.assertAlmostEqual(row["Beta曝險(台幣)"], 300000.0)
+
+    def test_split_nav_and_betas(self):
+        positions = pd.DataFrame(
+            [
+                _stock("台股戶", "台股", "2330", 1000, 200, 200, beta=1.0),
+                _stock("美股戶", "美股", "NVDA", 100, 100, 100, beta=1.5),
+            ]
+        )
+        accounts = pd.DataFrame(
+            [
+                {"帳戶名稱": "台股戶", "現金餘額": 100000, "融資/質押借款": 0},
+                {"帳戶名稱": "元大期貨", "現金餘額": 0, "融資/質押借款": 0},
+                {"帳戶名稱": "美股戶", "現金餘額": 50000, "融資/質押借款": 0},
+            ]
+        )
+        # 台股戶: cash 100k + stock 200k = 300k NAV
+        # 元大期貨: 170422 base equity NAV
+        # 美股戶: cash 50k + stock 100*100*30=300k = 350k NAV
+        # tw_nav = 300,000 + 170,422 = 470,422
+        # us_nav = 350,000
+        # nav = 820,422
+        _valued, _acc, metrics = finalize_valuation(positions, accounts, usdtwd=30.0)
+        self.assertAlmostEqual(metrics["tw_nav"], 470422.0, places=6)
+        self.assertAlmostEqual(metrics["us_nav"], 350000.0, places=6)
+        self.assertAlmostEqual(metrics["nav"], 820422.0, places=6)
+        self.assertAlmostEqual(metrics["tw_nav"] + metrics["us_nav"], metrics["nav"], places=6)
+        self.assertAlmostEqual(metrics["tw_beta"], 200000 / 470422, places=6)
+        self.assertAlmostEqual(metrics["us_beta"], 450000 / 350000, places=6)
+        self.assertAlmostEqual(metrics["total_beta"], 650000 / 820422, places=6)
+
+    def test_parse_expiry_formats(self):
+        from portfolio_risk import parse_expiry
+
+        occ_row = {"種類": "美股期權", "標的": "MUU261030C00050000", "名稱": "MUU Call"}
+        self.assertEqual(parse_expiry(occ_row), date(2026, 10, 30))
+
+        us_fmt_row = {"種類": "美股期權", "標的": "SNXX", "名稱": "SNXX 10/30/2026 Call"}
+        self.assertEqual(parse_expiry(us_fmt_row), date(2026, 10, 30))
+
+        embedded_row = {"種類": "期權", "標的": "MUU", "名稱": "MUU20261030C"}
+        self.assertEqual(parse_expiry(embedded_row), date(2026, 10, 30))
+
+    def test_expired_option_filter(self):
+        raw_data = pd.DataFrame(
+            [
+                {
+                    "帳戶": "美股戶",
+                    "種類": "美股期權",
+                    "標的": "MUU_EXP",
+                    "名稱": "MUU 2026/10/30 Call",
+                    "持有數量": -5,
+                    "平均成本": 1.0,
+                },
+                {
+                    "帳戶": "美股戶",
+                    "種類": "美股期權",
+                    "標的": "MUU_ACTIVE",
+                    "名稱": "MUU Call",
+                    "到期日": "2026-11-02",
+                    "持有數量": -5,
+                    "平均成本": 1.0,
+                },
+            ]
+        )
+        cleaned = normalize_positions(raw_data, today=date(2026, 11, 2))
+        self.assertEqual(len(cleaned), 1)
+        self.assertEqual(cleaned.iloc[0]["標的"], "MUU_ACTIVE")
+        self.assertEqual(cleaned.attrs["expired_removed"], ["MUU_EXP"])
+
+    def test_split_betas_with_put_delta(self):
+        metrics = {
+            "tw_exposure": 1000000.0,
+            "us_exposure": 500000.0,
+            "tw_nav": 500000.0,
+            "us_nav": 500000.0,
+            "nav": 1000000.0,
+        }
+        # Put delta = -100k exposure, paid 10k premium debit
+        res = split_betas(metrics, tw_exposure_delta=-100000.0, tw_cash_delta=-10000.0)
+        self.assertEqual(res["tw_exposure"], 900000.0)
+        self.assertEqual(res["tw_nav"], 490000.0)
+        self.assertAlmostEqual(res["tw_beta"], 900000 / 490000, places=6)
+        self.assertAlmostEqual(res["total_beta"], 1400000 / 990000, places=6)
+
+    def test_strategy_summary_new_keys(self):
+        positions = pd.DataFrame([_stock("股票戶", "台股", "2330", 1000, 1000, 1000, beta=1.0)])
+        accounts = pd.DataFrame([{"帳戶名稱": "股票戶", "現金餘額": 500000, "融資/質押借款": 0}])
+        snap = Snapshot(positions, accounts, usdtwd=30.0, twii=23000.0)
+        legs = [{"kind": "put", "strike": 22000, "signed_lots": 1, "premium": 200, "iv": 0.2}]
+        summary = strategy_summary(snap, "保護性賣權", legs, t_years=0.1, rate=0.01)
+        self.assertIn("tw_beta_before", summary)
+        self.assertIn("tw_beta_after", summary)
+        self.assertIn("total_beta_before", summary)
+        self.assertIn("total_beta_after", summary)
+        self.assertIn("option_exposure", summary)
+        self.assertLess(summary["tw_beta_after"], summary["tw_beta_before"])
 
 
 class FastPathTests(unittest.TestCase):

@@ -51,7 +51,14 @@ class PortfolioResponse(BaseModel):
     exposure: float = Field(description="總實質曝險，台幣。第四頁 metrics.exposure。")
     leverage: float = Field(description="實質曝險 ÷ 淨值。畫面上四捨五入到小數兩位。")
     cash_pct: float = Field(description="現金 ÷ 淨值 × 100，百分點。13.4 表示 13.4%。畫面上四捨五入到小數一位。")
-    beta: float = Field(description="曝險加權 Beta。第四頁 metrics.beta。")
+    beta: float = Field(description="總 Beta（(TW 曝險 + US 曝險) / 總淨值）。第四頁 metrics.beta。")
+    tw_beta: float = Field(description="台股 Beta（TW 曝險 / TW 淨值）。")
+    us_beta: float = Field(description="美股 Beta（US 曝險 / US 淨值）。")
+    total_beta: float = Field(description="總 Beta（(TW 曝險 + US 曝險) / 總淨值）。")
+    tw_nav: float = Field(description="台股淨值（台股市值 + 元大期貨權益 + 台股現金 - 融資/質押）。")
+    us_nav: float = Field(description="美股淨值（US 市值 + US 現金 - US 借款）。")
+    tw_exposure: float = Field(description="台股 Beta 曝險，台幣。")
+    us_exposure: float = Field(description="美股 Beta 曝險，台幣。")
     positions: list[PositionResponse]
     yuanta_futures: YuantaFuturesResponse
 

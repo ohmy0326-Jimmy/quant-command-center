@@ -14,7 +14,7 @@ from order_assistant import (
     Rules,
     TXO_MULTIPLIER,
     apply_order,
-    beta_equivalent,
+    bs_price_greeks,
     build_checklist_text,
     build_payoff_curve,
     build_sample_snapshot,
@@ -31,7 +31,6 @@ from order_assistant import (
     standard_stress,
     strategy_summary,
     suggest_addback_text,
-    taiex_dollar_delta,
     taiex_shock_state,
 )
 from macro_cycle import format_holding_tag, holding_tag
@@ -248,13 +247,14 @@ def _metric_row(before: dict, after: dict):
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("合併槓桿", f"{after['leverage']:.2f}x", f"{after['leverage'] - before['leverage']:+.2f}x", delta_color="inverse")
     c2.metric("現金水位", f"{after['cash_pct']:.1f}%", f"{after['cash_pct'] - before['cash_pct']:+.1f}%")
-    c3.metric("Beta", f"{after['beta']:.2f}", f"{after['beta'] - before['beta']:+.2f}", delta_color="off")
+    c3.metric("總 Beta", f"{after['total_beta']:.2f}", f"{after['total_beta'] - before['total_beta']:+.2f}", delta_color="off")
     if after.get("margin_ratio") is not None and before.get("margin_ratio") is not None:
         c4.metric("保證金比率", f"{after['margin_ratio']:.1f}%", f"{after['margin_ratio'] - before['margin_ratio']:+.1f}%")
     elif after.get("margin_ratio") is not None:
         c4.metric("保證金比率", f"{after['margin_ratio']:.1f}%")
     else:
         c4.metric("保證金比率", "無期貨")
+    st.caption(f"台股 Beta {before['tw_beta']:.2f} → {after['tw_beta']:.2f}｜美股 Beta {before['us_beta']:.2f} → {after['us_beta']:.2f}")
 
 
 def _order_kind(snapshot, ticker: str, held):
@@ -390,7 +390,7 @@ def _side_metrics(snapshot):
     st.write(f"淨值 NT$ {metrics['nav']:,.0f}")
     st.write(f"合併槓桿 {metrics['leverage']:.2f}x")
     st.write(f"現金 {metrics['cash_pct']:.1f}%")
-    st.write(f"Beta {metrics['beta']:.2f}")
+    st.write(f"總 Beta {metrics['total_beta']:.2f}（台股 {metrics['tw_beta']:.2f}／美股 {metrics['us_beta']:.2f}）")
     if metrics["margin_ratio"] is None:
         st.write("保證金 —")
     else:
@@ -454,7 +454,10 @@ def _render_hedge(snapshot, rules: Rules):
                 st.error(f"超過年度預算 {used:.0f}%（預算 NT$ {budget:,.0f}）")
             else:
                 st.success(f"佔年度預算 {used:.0f}%（預算 NT$ {budget:,.0f}）")
-            st.write(f"避險後台指等值 Beta {summary['beta_before']:.2f} → {summary['beta_after']:.2f}")
+            st.write(f"台股 Beta {summary['tw_beta_before']:.2f} → {summary['tw_beta_after']:.2f}")
+            st.write(f"美股 Beta {summary['us_beta_before']:.2f} → {summary['us_beta_after']:.2f}")
+            st.write(f"總 Beta {summary['total_beta_before']:.2f} → {summary['total_beta_after']:.2f}")
+            st.write(f"選擇權曝險變動 NT$ {summary['option_exposure']:,.0f}")
             st.write(f"每月時間價值 NT$ {summary['theta_month']:,.0f}（負值是耗損）")
             st.caption(f"選擇權 Delta {summary['delta_per_point']:,.0f} 元／點")
 
@@ -554,6 +557,15 @@ def _render_hedge(snapshot, rules: Rules):
         st.write(f"權利金約 US$ {premium_usd:,.0f}（NT$ {premium_twd:,.0f}，匯率 {snapshot.usdtwd:.2f}）")
         nav = snapshot.metrics["nav"] or 1.0
         st.write(f"佔淨值 {premium_twd / nav * 100:.2f}%，佔年度預算 {(premium_twd / budget * 100.0) if budget else 0:.0f}%")
+        us_delta = bs_price_greeks(us_spot, us_strike, t_years, rate, iv, "put")[1]
+        us_exposure_delta = us_delta * us_lots * us_mult * us_spot * snapshot.usdtwd
+        from order_assistant import split_betas
+        b_us_before = split_betas(snapshot.metrics)
+        b_us_after = split_betas(snapshot.metrics, us_exposure_delta=us_exposure_delta, us_cash_delta=-premium_twd)
+        st.write(f"美股 Beta {b_us_before['us_beta']:.2f} → {b_us_after['us_beta']:.2f}")
+        st.write(f"總 Beta {b_us_before['total_beta']:.2f} → {b_us_after['total_beta']:.2f}")
+        st.write(f"美股選擇權曝險變動 NT$ {us_exposure_delta:,.0f}")
+
         us_rows = []
         for move_us in (-0.10, -0.20, -0.30):
             from order_assistant import option_expiry_pnl
@@ -567,12 +579,7 @@ def _render_hedge(snapshot, rules: Rules):
         )
         st.caption("這裡假設美股指數自己走，不跟台指圖疊加。")
 
-    base_delta = taiex_dollar_delta(book)
-    st.caption(
-        f"目前台指經濟 Delta（未含選擇權）約 NT$ {base_delta:,.0f}／點，"
-        f"等值 Beta {beta_equivalent(base_delta, book.twii, book.metrics['nav']):.2f}。"
-        "這是市值與契約名目算出來的，和第四頁用曝險加權的 Beta 不同，避險才用得到。"
-    )
+    st.caption("TW Beta = TW 曝險 / TW 淨值 (TW 淨值 = 台股市值 + 元大期貨權益數 + 台股現金 − 融資/質押)、US Beta = US 曝險 / US 淨值、總 Beta = (TW 曝險 + US 曝險) / 總淨值；選擇權曝險 = Delta × 口數 × 乘數 × 指數；權利金從現金扣除。")
     return "\n".join(plan_lines)
 
 
@@ -720,7 +727,7 @@ def render_order_assistant(send_to_telegram, load_sheets, beta_fn, load_market=N
         h2.metric("實質曝險", f"NT$ {metrics['exposure']:,.0f}")
         h3.metric("合併槓桿", f"{metrics['leverage']:.2f}x", f"上限 {rules.target_leverage:.2f}x", delta_color="off")
         h4.metric("現金水位", f"{metrics['cash_pct']:.1f}%", f"下限 {rules.min_cash_pct:.0f}%", delta_color="off")
-        h5.metric("Beta", f"{metrics['beta']:.2f}", f"目標 {rules.beta_low:.1f}–{rules.beta_high:.1f}", delta_color="off")
+        h5.metric("總 Beta", f"{metrics['total_beta']:.2f}", f"台股 {metrics['tw_beta']:.2f}／美股 {metrics['us_beta']:.2f}｜目標 {rules.beta_low:.1f}–{rules.beta_high:.1f}", delta_color="off")
         if metrics["margin_ratio"] is not None:
             st.metric(
                 "期貨保證金比率（權益 ÷ 維持保證金）",

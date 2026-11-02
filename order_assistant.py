@@ -246,13 +246,7 @@ def _coerce_accounts(accounts: pd.DataFrame) -> pd.DataFrame:
 
 def economic_exposure(snapshot: Snapshot) -> float:
     """期貨用契約名目（指數×乘數×口數），其餘沿用第四頁的實質曝險。"""
-    total = 0.0
-    for pos in positions_as_dicts(snapshot.valued):
-        if _is_futures_kind(pos["kind"]) and is_taiex_future(pos["ticker"]):
-            total += abs(pos["qty"]) * pos["price"] * futures_multiplier(pos["ticker"]) * pos["fx"]
-        else:
-            total += pos["exposure"]
-    return total
+    return float(snapshot.metrics.get("exposure", 0.0))
 
 
 def economic_leverage(snapshot: Snapshot) -> float:
@@ -284,10 +278,37 @@ def taiex_dollar_delta(snapshot: Snapshot) -> float:
 
 
 def beta_equivalent(dollar_delta: float, twii: float, nav: float) -> float:
-    """1% 台指變動對淨值的百分比敏感度。"""
+    """1% 台指變動對淨值的百分比敏感度 (dollar-delta × index / nav)。"""
     if nav <= 0 or twii <= 0:
         return 0.0
     return float(dollar_delta) * float(twii) / float(nav)
+
+
+def option_exposure_twd(delta_per_point: float, spot: float, fx: float = 1.0) -> float:
+    return float(delta_per_point) * float(spot) * float(fx)
+
+
+def split_betas(metrics: dict, tw_exposure_delta=0.0, us_exposure_delta=0.0, tw_cash_delta=0.0, us_cash_delta=0.0) -> dict:
+    tw_exp = float(metrics.get("tw_exposure", 0.0)) + float(tw_exposure_delta)
+    us_exp = float(metrics.get("us_exposure", 0.0)) + float(us_exposure_delta)
+    tw_nav = float(metrics.get("tw_nav", 0.0)) + float(tw_cash_delta)
+    us_nav = float(metrics.get("us_nav", 0.0)) + float(us_cash_delta)
+    nav = float(metrics.get("nav", 0.0)) + float(tw_cash_delta) + float(us_cash_delta)
+
+    tw_beta = (tw_exp / tw_nav) if tw_nav > 0 else 0.0
+    us_beta = (us_exp / us_nav) if us_nav > 0 else 0.0
+    total_beta = ((tw_exp + us_exp) / nav) if nav > 0 else 0.0
+
+    return {
+        "tw_beta": float(tw_beta),
+        "us_beta": float(us_beta),
+        "total_beta": float(total_beta),
+        "tw_exposure": float(tw_exp),
+        "us_exposure": float(us_exp),
+        "tw_nav": float(tw_nav),
+        "us_nav": float(us_nav),
+        "nav": float(nav),
+    }
 
 
 _SEMI_TICKERS = {
@@ -363,7 +384,11 @@ def health_flags(snapshot: Snapshot, rules: Rules, stress_rows: list[dict] | Non
         f"{metrics['cash_pct']:.1f}%，下限 {rules.min_cash_pct:.1f}%",
     )
     beta_ok = rules.beta_low - 1e-9 <= metrics["beta"] <= rules.beta_high + 1e-9
-    add("投組 Beta", beta_ok, f"{metrics['beta']:.2f}，目標 {rules.beta_low:.2f}–{rules.beta_high:.2f}")
+    add(
+        "投組 Beta",
+        beta_ok,
+        f"總 Beta {metrics['total_beta']:.2f}（台股 {metrics['tw_beta']:.2f}／美股 {metrics['us_beta']:.2f}），目標 {rules.beta_low:.2f}–{rules.beta_high:.2f}",
+    )
     if metrics["margin_ratio"] is None:
         add("保證金比率", True, "目前沒有期貨維持保證金")
     else:
@@ -1038,8 +1063,11 @@ def strategy_summary(
     theta = monthly_theta_cash(spot, legs, t_years, rate, multiplier)
     nav = float(snapshot.metrics["nav"]) or 1.0
     debit = float(greeks["net_debit"])
-    base_delta = taiex_dollar_delta(snapshot)
-    hedged_delta = base_delta + greeks["delta_per_point"]
+
+    opt_exp = option_exposure_twd(greeks["delta_per_point"], spot, fx=1.0)
+    b_before = split_betas(snapshot.metrics)
+    b_after = split_betas(snapshot.metrics, tw_exposure_delta=opt_exp, tw_cash_delta=-debit)
+
     return {
         "name": name,
         "legs": legs,
@@ -1047,8 +1075,15 @@ def strategy_summary(
         "premium_pct_nav": debit / nav * 100.0,
         "long_premium": greeks["long_premium"],
         "delta_per_point": greeks["delta_per_point"],
-        "beta_before": beta_equivalent(base_delta, spot, nav),
-        "beta_after": beta_equivalent(hedged_delta, spot, nav),
+        "option_exposure": opt_exp,
+        "tw_beta_before": b_before["tw_beta"],
+        "tw_beta_after": b_after["tw_beta"],
+        "us_beta_before": b_before["us_beta"],
+        "us_beta_after": b_after["us_beta"],
+        "total_beta_before": b_before["total_beta"],
+        "total_beta_after": b_after["total_beta"],
+        "beta_before": b_before["tw_beta"],
+        "beta_after": b_after["tw_beta"],
         "theta_month": theta,
         "multiplier": multiplier,
     }
@@ -1133,7 +1168,7 @@ def build_checklist_text(
         f"實質曝險 NT$ {metrics['exposure']:,.0f}",
         f"合併槓桿 {metrics['leverage']:.2f}x（上限 {rules.target_leverage:.2f}x，第二階段 {rules.stage2_leverage:.2f}x）",
         f"現金水位 {metrics['cash_pct']:.1f}%（下限 {rules.min_cash_pct:.1f}%）",
-        f"Beta {metrics['beta']:.2f}（目標 {rules.beta_low:.2f}–{rules.beta_high:.2f}）",
+        f"總 Beta {metrics['total_beta']:.2f}（台股 {metrics['tw_beta']:.2f}／美股 {metrics['us_beta']:.2f}）（目標 {rules.beta_low:.2f}–{rules.beta_high:.2f}）",
     ]
     if metrics["margin_ratio"] is not None:
         lines.append(
@@ -1230,7 +1265,9 @@ def order_rule_warnings(before: Snapshot, after: Snapshot, rules: Rules, stress_
     if after.metrics["cash_pct"] + 1e-9 < rules.min_cash_pct:
         warnings.append(f"下單後現金 {after.metrics['cash_pct']:.1f}%，低於下限 {rules.min_cash_pct:.1f}%")
     if not (rules.beta_low - 1e-9 <= after.metrics["beta"] <= rules.beta_high + 1e-9):
-        warnings.append(f"下單後 Beta {after.metrics['beta']:.2f}，不在 {rules.beta_low:.2f}–{rules.beta_high:.2f}")
+        warnings.append(
+            f"下單後 總 Beta {after.metrics['total_beta']:.2f}（台股 {after.metrics['tw_beta']:.2f}／美股 {after.metrics['us_beta']:.2f}），不在 {rules.beta_low:.2f}–{rules.beta_high:.2f}"
+        )
     if after.metrics["margin_call"]:
         warnings.append("下單後期貨權益低於維持保證金，會落入追繳")
     breaches = loss_breaches(after, rules)
