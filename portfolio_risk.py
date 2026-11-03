@@ -665,6 +665,7 @@ def _empty_metrics() -> dict:
         "tw_nav": 0.0,
         "us_nav": 0.0,
         "beta_weighted_avg": 0.0,
+        **beta_leverage_breakdown(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
         "options_missing_delta": [],
         "expired_removed": [],
         "margin_ratio": None,
@@ -797,12 +798,23 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
                 return float(row["實質佔用本金(原幣)"]) + float(row["淨未實現損益(原幣)"])
             return float(row["即時報價"]) * float(row["持有數量"])
 
-        df["顯示_即時市值(原幣)"] = df.apply(calc_display_mv, axis=1).astype(float)
+        # 權益市值：期貨＝保證金＋未實現損益，只用來算帳戶淨值（舊的「即時市值」口徑）。
+        df["權益市值(原幣)"] = df.apply(calc_display_mv, axis=1).astype(float)
+        df["權益市值(台幣)"] = (df["權益市值(原幣)"].abs() * df["換算匯率"]).astype(float)
+
+        def calc_market_value(row):
+            # 持倉表顯示的市值：期貨列顯示名目市值（報價 × 乘數 × 口數），不是未實現損益。
+            if "期" in str(row["種類"]) and not is_option_row(row):
+                return abs(float(row["持有數量"])) * float(row["即時報價"]) * _row_multiplier(row)
+            return float(row["權益市值(原幣)"])
+
+        df["顯示_即時市值(原幣)"] = df.apply(calc_market_value, axis=1).astype(float)
         df["即時市值(台幣)"] = (df["顯示_即時市值(原幣)"].abs() * df["換算匯率"]).astype(float)
 
         options_missing_delta = []
         df["實質曝險(台幣)"] = 0.0
         df["Beta曝險(台幣)"] = 0.0
+        df["採用槓桿"] = 1.0
         
         overrides = dict(df.attrs.get("beta_fallbacks") or {})
         if "有效Beta" not in df.columns:
@@ -866,15 +878,17 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
                 df.at[idx, "Beta來源"] = "選擇權 Delta 曝險"
 
             elif is_fut:
+                # 期貨：曝險＝名目（報價 × 乘數 × 口數），Beta＝標的 Beta（臺指期定義 1）。槓桿已在名目裡，不再乘。
                 gross_exp = abs(qty) * px * row_mult * fx
                 df.at[idx, "實質曝險(台幣)"] = gross_exp
+                df.at[idx, "採用槓桿"] = 1.0
                 if is_taiex_future(ticker_str):
                     df.at[idx, "Beta曝險(台幣)"] = qty * px * row_mult * fx
                     df.at[idx, "有效Beta"] = 1.0
                     df.at[idx, "Beta來源"] = "定義 1.0"
                 else:
-                    mkt_val_twd = float(row["即時市值(台幣)"])
-                    eb = effective_beta(ticker_str, kind_str, row["標的槓桿"], row["Beta值"], row.get("標的Beta"), str(row.get("標的Beta來源") or ""), str(row.get("Beta來源") or ""), overrides)
+                    mkt_val_twd = gross_exp
+                    eb = effective_beta(ticker_str, kind_str, 1.0, row["Beta值"], row.get("標的Beta"), str(row.get("標的Beta來源") or ""), str(row.get("Beta來源") or ""), overrides)
                     sens = eb["sens"]
                     df.at[idx, "有效Beta"] = sens
                     df.at[idx, "Beta來源"] = eb["source"]
@@ -884,10 +898,13 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
                     df.at[idx, "Beta曝險(台幣)"] = mkt_val_twd * sens * sign
 
             else:
+                # 現股／ETF：名目曝險＝市值 × 槓桿；Beta 曝險＝市值 × 有效Beta（槓桿 × 標的一年 Beta）
+                # ＝名目曝險 × 標的 Beta。槓桿只乘一次。
                 mkt_val_twd = float(row["即時市值(台幣)"])
-                lev = float(row["標的槓桿"])
-                df.at[idx, "實質曝險(台幣)"] = mkt_val_twd * lev
                 eb = effective_beta(ticker_str, kind_str, row["標的槓桿"], row["Beta值"], row.get("標的Beta"), str(row.get("標的Beta來源") or ""), str(row.get("Beta來源") or ""), overrides)
+                lev = float(eb["lev"]) if eb.get("lev") is not None else _row_float(row["標的槓桿"], 1.0)
+                df.at[idx, "實質曝險(台幣)"] = mkt_val_twd * lev
+                df.at[idx, "採用槓桿"] = lev
                 sens = eb["sens"]
                 df.at[idx, "有效Beta"] = sens
                 df.at[idx, "Beta來源"] = eb["source"]
@@ -895,6 +912,9 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
                 df.at[idx, "採用標的Beta"] = eb["underlying_beta"] if eb["underlying_beta"] is not None else np.nan
                 sign = 1.0 if qty > 0 else (-1.0 if qty < 0 else 0.0)
                 df.at[idx, "Beta曝險(台幣)"] = mkt_val_twd * sens * sign
+        # 曝險Beta：套在名目曝險上的 Beta（槓桿 ETF＝標的 Beta；現股＝自身 Beta；臺指期＝1）。
+        gross = df["實質曝險(台幣)"].astype(float)
+        df["曝險Beta"] = np.where(gross != 0, df["Beta曝險(台幣)"].astype(float) / gross.where(gross != 0, 1.0), 0.0).astype(float)
     else:
         df = pd.DataFrame()
 
@@ -906,7 +926,7 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
             account_data[col] = pd.to_numeric(account_data[col], errors="coerce").fillna(0.0).astype(float)
 
         if not df.empty:
-            acc_market = df.groupby("帳戶")["即時市值(台幣)"].sum()
+            acc_market = df.groupby("帳戶")["權益市值(台幣)"].sum()
             acc_exp = df.groupby("帳戶")["實質曝險(台幣)"].sum()
         else:
             acc_market, acc_exp = pd.Series(dtype=float), pd.Series(dtype=float)
@@ -1045,7 +1065,7 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
             else:
                 subset = df[df["帳戶"] == acc_name]
                 us_subset = subset[subset["種類"].astype(str).str.contains("美")]
-                us_mv = float(us_subset["即時市值(台幣)"].sum())
+                us_mv = float(us_subset["權益市值(台幣)"].sum())
                 us_nav += us_mv
                 tw_nav += (acc_nav - us_mv)
     else:
@@ -1092,8 +1112,6 @@ def _metrics_from_frames(
 
     position_exposure = float(df["實質曝險(台幣)"].sum()) if not df.empty and "實質曝險(台幣)" in df.columns else 0.0
     metrics["position_exposure"] = position_exposure
-    if position_exposure > 0:
-        metrics["beta_weighted_avg"] = float((df["實質曝險(台幣)"] / position_exposure * df["Beta值"]).sum())
     metrics["sector_weights"] = _sector_weights(df)
 
     if not df.empty and "Beta曝險(台幣)" in df.columns:
@@ -1104,6 +1122,8 @@ def _metrics_from_frames(
         tw_exp = 0.0
         us_exp = 0.0
 
+    # 舊欄位：tw_exposure / us_exposure 一直是「Beta 加權曝險」Σ(名目曝險 × Beta)，不是名目曝險。
+    # 保留原意給下單試算（split_betas）與舊 API 使用者；新欄位見 beta_leverage_breakdown。
     metrics["tw_exposure"] = tw_exp
     metrics["us_exposure"] = us_exp
     metrics["tw_beta"] = (tw_exp / tw_nav) if tw_nav > 0 else 0.0
@@ -1111,6 +1131,10 @@ def _metrics_from_frames(
     total_beta = ((tw_exp + us_exp) / nav) if nav > 0 else 0.0
     metrics["total_beta"] = total_beta
     metrics["beta"] = total_beta
+
+    tw_notional, us_notional = _notional_by_market(df, account_data)
+    metrics.update(beta_leverage_breakdown(tw_notional, us_notional, tw_exp, us_exp, tw_nav, us_nav, nav))
+    metrics["beta_weighted_avg"] = metrics["avg_beta"]
 
     if not df.empty and "報價來源" in df.columns:
         fut_rows = df[[("期" in str(r["種類"]) or is_option_row(r)) and "美" not in str(r["種類"]) for _, r in df.iterrows()]]
@@ -1175,6 +1199,99 @@ def _metrics_from_frames(
 
     metrics.update(ledger_metrics_from_accounts(account_data))
     return metrics
+
+
+def _row_float(value, default: float = 0.0) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    return number if math.isfinite(number) else float(default)
+
+
+def _row_multiplier(row) -> float:
+    ticker = str(row["標的"]).strip().upper()
+    if "合約乘數" in row and pd.notna(row["合約乘數"]):
+        try:
+            cm = float(row["合約乘數"])
+            if cm > 0:
+                return cm
+        except (TypeError, ValueError):
+            pass
+    return futures_multiplier(ticker)
+
+
+def _notional_by_market(df: pd.DataFrame, account_data: pd.DataFrame | None) -> tuple[float, float]:
+    """台股／美股名目曝險合計。只算帳戶表有的帳戶，跟 metrics["exposure"]（帳戶加總）同一口徑。"""
+    if df is None or df.empty or "實質曝險(台幣)" not in df.columns:
+        return 0.0, 0.0
+    rows = df
+    if account_data is not None and not account_data.empty and "帳戶名稱" in account_data.columns and "帳戶" in df.columns:
+        names = set(account_data["帳戶名稱"].astype(str).str.strip())
+        rows = df[df["帳戶"].astype(str).str.strip().isin(names)]
+    is_us = rows["種類"].astype(str).str.contains("美")
+    return float(rows[~is_us]["實質曝險(台幣)"].sum()), float(rows[is_us]["實質曝險(台幣)"].sum())
+
+
+def _ratio(numerator: float, denominator: float) -> float:
+    return float(numerator) / float(denominator) if denominator and denominator > 0 else 0.0
+
+
+def beta_leverage_breakdown(tw_notional: float, us_notional: float, tw_beta_exp: float, us_beta_exp: float, tw_nav: float, us_nav: float, nav: float) -> dict:
+    """台股／美股／合計的三個數字，口徑一致：
+
+    - 名目曝險：現股／ETF＝市值 × 槓桿倍數；期貨＝報價 × 乘數 × 口數；選擇權＝|Delta 名目|。
+    - Beta 曝險＝Σ(名目曝險 × Beta)。槓桿 ETF 的 Beta 用標的一年 Beta（槓桿已在名目裡，只乘一次）。
+    - 槓桿＝名目曝險 ÷ 淨值
+    - 部位平均 Beta＝Beta 曝險 ÷ 名目曝險
+    - 帳戶 Beta＝Beta 曝險 ÷ 淨值＝槓桿 × 部位平均 Beta
+    """
+    notional = float(tw_notional) + float(us_notional)
+    beta_exp = float(tw_beta_exp) + float(us_beta_exp)
+    return {
+        "tw_notional_exposure": float(tw_notional),
+        "us_notional_exposure": float(us_notional),
+        "notional_exposure": notional,
+        "tw_beta_exposure": float(tw_beta_exp),
+        "us_beta_exposure": float(us_beta_exp),
+        "beta_exposure": beta_exp,
+        "tw_leverage": _ratio(tw_notional, tw_nav),
+        "us_leverage": _ratio(us_notional, us_nav),
+        "total_leverage": _ratio(notional, nav),
+        "tw_avg_beta": _ratio(tw_beta_exp, tw_notional),
+        "us_avg_beta": _ratio(us_beta_exp, us_notional),
+        "avg_beta": _ratio(beta_exp, notional),
+        "tw_account_beta": _ratio(tw_beta_exp, tw_nav),
+        "us_account_beta": _ratio(us_beta_exp, us_nav),
+        "account_beta": _ratio(beta_exp, nav),
+    }
+
+
+BETA_LEVERAGE_NOTE = (
+    "槓桿＝名目曝險 ÷ 淨值；部位平均 Beta＝Σ(名目曝險 × Beta) ÷ 名目曝險；帳戶 Beta＝Σ(名目曝險 × Beta) ÷ 淨值＝槓桿 × 部位平均 Beta。"
+    "名目曝險：現股／ETF＝市值 × 槓桿倍數，期貨＝報價 × 乘數 × 口數。槓桿 ETF 的 Beta 用標的一年 Beta，槓桿只乘一次。"
+)
+
+
+def beta_leverage_rows(metrics: dict) -> list[dict]:
+    """第四頁、第六頁共用的三列表：台股／美股／合計。"""
+    m = metrics or {}
+    out = []
+    for label, prefix, nav_key, lev_key, avg_key, acct_key in (
+        ("台股", "tw_", "tw_nav", "tw_leverage", "tw_avg_beta", "tw_account_beta"),
+        ("美股", "us_", "us_nav", "us_leverage", "us_avg_beta", "us_account_beta"),
+        ("合計", "", "nav", "total_leverage", "avg_beta", "account_beta"),
+    ):
+        out.append({
+            "市場": label,
+            "名目曝險": float(m.get(f"{prefix}notional_exposure", 0.0) or 0.0),
+            "Beta曝險": float(m.get(f"{prefix}beta_exposure", 0.0) or 0.0),
+            "淨值": float(m.get(nav_key, 0.0) or 0.0),
+            "槓桿": float(m.get(lev_key, 0.0) or 0.0),
+            "部位平均Beta": float(m.get(avg_key, 0.0) or 0.0),
+            "帳戶Beta": float(m.get(acct_key, 0.0) or 0.0),
+        })
+    return out
 
 
 def _sector_weights(df: pd.DataFrame) -> dict:

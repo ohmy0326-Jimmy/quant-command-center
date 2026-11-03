@@ -65,6 +65,7 @@ from order_insights import (
     rs_warning,
 )
 from refresh_controls import render_refresh_bar
+from beta_leverage_ui import render_beta_leverage_table
 from beta_rules import BETA_FALLBACK_STATE_KEY, fallback_table_rows, overrides_from_rows
 from macro_cycle import format_holding_tag, holding_tag
 from macro_cycle_ui import cached_macro_cycle_view
@@ -956,6 +957,7 @@ def _render_us_hedge(snapshot, rules: Rules, beta_fn=None):
             "名稱": r["name"],
             "市值(NT$)": r["mv_twd"],
             "槓桿": f"{r['lev']:g}x",
+            "名目曝險(NT$)": r.get("notional_twd", 0.0),
             "標的代號": r["underlying"] or "—",
             "標的 Beta": f"{r['underlying_beta']:.2f}" if r["underlying_beta"] is not None else "—",
             "有效 Beta": f"{r['eff_beta']:.2f}" if r["eff_beta"] is not None else "—",
@@ -966,6 +968,7 @@ def _render_us_hedge(snapshot, rules: Rules, beta_fn=None):
     st.dataframe(
         df_exp.style.format({
             "市值(NT$)": "NT$ {:,.0f}",
+            "名目曝險(NT$)": "NT$ {:,.0f}",
             "S&P 曝險(NT$)": "NT$ {:,.0f}",
         }),
         width="stretch",
@@ -975,14 +978,17 @@ def _render_us_hedge(snapshot, rules: Rules, beta_fn=None):
     if exp.get("fallback_rows"):
         st.warning(f"{'、'.join(exp['fallback_rows'])} 抓不到標的即時一年 Beta，暫用預設值（可在上方「新標的才需要改」修改）。")
 
-    em1, em2, em3 = st.columns(3)
-    em1.metric("美股 S&P 曝險", f"NT$ {exp['exposure_twd']:,.0f}", f"US$ {exp['exposure_usd']:,.0f}")
-    em2.metric("美股 Beta（對 S&P，美股淨值）", f"{exp['us_beta_spx']:.2f}")
-    em3.metric("第四頁美股 Beta", f"{snapshot.metrics.get('us_beta', 0.0):.2f}")
+    em1, em2, em3, em4 = st.columns(4)
+    em1.metric("美股 S&P Beta 曝險", f"NT$ {exp['exposure_twd']:,.0f}", f"US$ {exp['exposure_usd']:,.0f}")
+    em2.metric("美股槓桿（名目 ÷ 淨值）", f"{exp['us_leverage']:.2f}x", f"名目 NT$ {exp['notional_twd']:,.0f}", delta_color="off")
+    em3.metric("美股部位平均 Beta", f"{exp['us_avg_beta']:.2f}")
+    em4.metric("美股帳戶 Beta（÷ 美股淨值）", f"{exp['us_beta_spx']:.2f}", f"第四頁 {snapshot.metrics.get('us_beta', 0.0):.2f}", delta_color="off")
     st.caption(
-        f"槓桿 ETF = 槓桿 × 標的一年 Beta（對 S&P 500），與第四頁同一套算法，所以兩邊美股 Beta 相同。"
-        f"第四頁口徑 US Beta：{snapshot.metrics.get('us_beta', 0.0):.2f}（曝險 NT$ {exp['page4_us_exposure']:,.0f} ÷ 美股淨值 NT$ {exp['us_nav']:,.0f}）。"
+        f"名目曝險＝市值 × 槓桿；Beta 曝險＝名目曝險 × 標的一年 Beta（對 S&P 500）＝市值 × 有效 Beta，槓桿只乘一次，與第四頁同一套算法。"
+        f"美股帳戶 Beta {exp['us_beta_spx']:.2f}＝槓桿 {exp['us_leverage']:.2f}x × 部位平均 Beta {exp['us_avg_beta']:.2f}"
+        f"（Beta 曝險 NT$ {exp['page4_us_exposure']:,.0f} ÷ 美股淨值 NT$ {exp['us_nav']:,.0f}）。"
     )
+    render_beta_leverage_table(st, snapshot.metrics)
 
     i1, i2, i3, i4, i5 = st.columns(5)
     ratio = i1.number_input("避險比率（%）", min_value=0.0, max_value=200.0, value=100.0, step=5.0, key="oa_us_ratio")
@@ -1613,6 +1619,7 @@ def render_order_assistant(send_to_telegram, load_sheets, beta_fn, load_market=N
         h3.metric("合併槓桿", f"{metrics['leverage']:.2f}x", f"上限 {rules.target_leverage:.2f}x", delta_color="off")
         h4.metric("現金水位", f"{metrics['cash_pct']:.1f}%", f"下限 {rules.min_cash_pct:.0f}%", delta_color="off")
         h5.metric("總 Beta", f"{metrics['total_beta']:.2f}", f"台股 {metrics['tw_beta']:.2f}／美股 {metrics['us_beta']:.2f}｜目標 {rules.beta_low:.1f}–{rules.beta_high:.1f}", delta_color="off")
+        render_beta_leverage_table(st, metrics)
         ratio = equity_ratio_pct(metrics.get("futures_equity"), metrics.get("futures_initial"))
         if ratio is not None:
             st.metric(

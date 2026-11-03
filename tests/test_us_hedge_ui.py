@@ -69,8 +69,9 @@ with patch("us_hedge.fetch_us_vix", return_value=mock_vix), \\
         self.assertTrue(any("美股選擇權避險" in txt for txt in markdown_texts))
 
         metric_labels = [m.label for m in at.metric]
-        self.assertIn("美股 S&P 曝險", metric_labels)
-        self.assertIn("美股 Beta（對 S&P，美股淨值）", metric_labels)
+        self.assertIn("美股 S&P Beta 曝險", metric_labels)
+        self.assertIn("美股部位平均 Beta", metric_labels)
+        self.assertIn("美股帳戶 Beta（÷ 美股淨值）", metric_labels)
 
         warning_texts = [w.value for w in at.warning]
         self.assertTrue(any("無報價" in txt for txt in warning_texts))

@@ -324,11 +324,28 @@ class ApiHttpTests(unittest.TestCase):
                 "us_nav",
                 "tw_exposure",
                 "us_exposure",
+                "beta_leverage",
                 "positions",
                 "yuanta_futures",
             },
         )
-        self.assertEqual(set(body["positions"][0]), {"symbol", "name", "qty", "price", "market_value", "pnl"})
+        self.assertEqual(set(body["positions"][0]),
+            {
+                "symbol", "name", "qty", "price", "market_value", "pnl",
+                "equity_value", "leverage", "notional_exposure", "underlying", "underlying_beta",
+                "beta", "effective_beta", "beta_exposure", "beta_source",
+            },
+        )
+        self.assertEqual(set(body["beta_leverage"]), {"tw", "us", "total"})
+        self.assertEqual(
+            set(body["beta_leverage"]["total"]),
+            {"notional_exposure", "beta_exposure", "nav", "leverage", "avg_beta", "account_beta"},
+        )
+        self.assertAlmostEqual(
+            body["beta_leverage"]["tw"]["notional_exposure"] + body["beta_leverage"]["us"]["notional_exposure"],
+            body["exposure"],
+            places=4,
+        )
         self.assertEqual(
             set(body["yuanta_futures"]),
             {

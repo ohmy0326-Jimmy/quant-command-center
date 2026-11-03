@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-SCHEMA_VERSION = "1.2.0"
+SCHEMA_VERSION = "1.3.0"
 TAIPEI = ZoneInfo("Asia/Taipei")
 
 
@@ -56,6 +56,15 @@ def _name(value) -> str:
     return text
 
 
+def _col(row, frame: pd.DataFrame, *names: str) -> float | None:
+    for name in names:
+        if name in frame.columns:
+            value = _finite(row[name])
+            if value is not None:
+                return value
+    return None
+
+
 def position_records(positions: pd.DataFrame) -> list[dict]:
     """每列對應第四頁持倉表。市值與損益換算成台幣。"""
     if positions is None or positions.empty:
@@ -73,6 +82,15 @@ def position_records(positions: pd.DataFrame) -> list[dict]:
                 "price": _finite(row["即時報價"]),
                 "market_value": _finite(row["即時市值(台幣)"]),
                 "pnl": pnl,
+                "equity_value": _col(row, positions, "權益市值(台幣)", "即時市值(台幣)"),
+                "leverage": _col(row, positions, "採用槓桿", "標的槓桿"),
+                "notional_exposure": _col(row, positions, "實質曝險(台幣)"),
+                "underlying": _name(row["標的代號"]) if "標的代號" in positions.columns else "",
+                "underlying_beta": _col(row, positions, "採用標的Beta"),
+                "beta": _col(row, positions, "曝險Beta"),
+                "effective_beta": _col(row, positions, "有效Beta"),
+                "beta_exposure": _col(row, positions, "Beta曝險(台幣)"),
+                "beta_source": _name(row["Beta來源"]) if "Beta來源" in positions.columns else "",
             }
         )
     return rows
@@ -99,6 +117,26 @@ def yuanta_from_metrics(metrics: dict) -> dict:
     }
 
 
+def beta_leverage_block(metrics: dict) -> dict:
+    """1.3.0 新增：台股／美股／合計各三個數字，名目曝險口徑一致（tw + us = total）。"""
+
+    def leg(prefix: str, nav_key: str, lev_key: str, avg_key: str, acct_key: str) -> dict:
+        return {
+            "notional_exposure": float(metrics.get(f"{prefix}notional_exposure", 0.0) or 0.0),
+            "beta_exposure": float(metrics.get(f"{prefix}beta_exposure", 0.0) or 0.0),
+            "nav": float(metrics.get(nav_key, 0.0) or 0.0),
+            "leverage": float(metrics.get(lev_key, 0.0) or 0.0),
+            "avg_beta": float(metrics.get(avg_key, 0.0) or 0.0),
+            "account_beta": float(metrics.get(acct_key, 0.0) or 0.0),
+        }
+
+    return {
+        "tw": leg("tw_", "tw_nav", "tw_leverage", "tw_avg_beta", "tw_account_beta"),
+        "us": leg("us_", "us_nav", "us_leverage", "us_avg_beta", "us_account_beta"),
+        "total": leg("", "nav", "total_leverage", "avg_beta", "account_beta"),
+    }
+
+
 def portfolio_payload(positions: pd.DataFrame, metrics: dict, *, usdtwd: float, as_of: datetime) -> dict:
     total_beta = float(metrics.get("total_beta", metrics.get("beta", 0.0)))
     return {
@@ -118,6 +156,7 @@ def portfolio_payload(positions: pd.DataFrame, metrics: dict, *, usdtwd: float, 
         "us_nav": float(metrics.get("us_nav", 0.0)),
         "tw_exposure": float(metrics.get("tw_exposure", 0.0)),
         "us_exposure": float(metrics.get("us_exposure", 0.0)),
+        "beta_leverage": beta_leverage_block(metrics),
         "positions": position_records(positions),
         "yuanta_futures": yuanta_from_metrics(metrics),
     }
