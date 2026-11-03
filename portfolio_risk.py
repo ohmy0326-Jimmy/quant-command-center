@@ -18,6 +18,7 @@ import requests
 import yfinance as yf
 
 import taifex_quotes
+from beta_rules import beta_source_label, effective_beta, fetch_underlying_beta
 
 # 元大期貨備援本日餘額（未含未平倉損益之現金帳頁面），最後確認日期 2026-11-02（來自元大 App）。
 YUANTA_FUTURES_BASE_EQUITY = 168308.0
@@ -199,7 +200,7 @@ def fetch_twii(default: float = 23000.0) -> float:
         return float(default)
 
 
-def market_beta_and_sector(ticker, is_tw: bool) -> tuple[float, str]:
+def market_beta_info(ticker, is_tw: bool) -> tuple[float, str, bool]:
     """一年期回歸 Beta。共變異數與變異數的 ddof 與第四頁相同，不另做修正。"""
     t_upper = str(ticker).upper()
     if t_upper in DETAILED_SECTOR_MAP:
@@ -212,7 +213,7 @@ def market_beta_and_sector(ticker, is_tw: bool) -> tuple[float, str]:
             refined_sector = "其他與衍生品"
 
     if t_upper in TAIEX_FUTURES:
-        return 1.0, str(refined_sector)
+        return 1.0, str(refined_sector), True
 
     try:
         benchmark = "^TWII" if is_tw else "^GSPC"
@@ -224,11 +225,16 @@ def market_beta_and_sector(ticker, is_tw: bool) -> tuple[float, str]:
             cov = np.cov(returns.iloc[:, 0], returns.iloc[:, 1])[0][1]
             var_bench = np.var(returns.iloc[:, 1])
             beta = cov / var_bench if var_bench != 0 else 1.0
+            return float(round(beta, 2)), str(refined_sector), True
         else:
-            beta = 1.0
-        return float(round(beta, 2)), str(refined_sector)
+            return 1.0, str(refined_sector), False
     except Exception:
-        return 1.0, str(refined_sector)
+        return 1.0, str(refined_sector), False
+
+def market_beta_and_sector(ticker, is_tw: bool) -> tuple[float, str]:
+    return market_beta_info(ticker, is_tw)[:2]
+
+market_beta_and_sector.info = market_beta_info
 
 
 def is_option_row(row) -> bool:
@@ -399,6 +405,7 @@ def _quote_one_ex(ticker: str, twii_price: float, beta_fn, kind: str = ""):
                         extras["Delta來源"] = "估算(Black-76)"
 
             b_val, s_val = 1.0, DETAILED_SECTOR_MAP.get("TX", "台指選擇權")
+            extras["Beta來源"] = beta_source_label(kind_str, True, definition=True)
             return ticker, price, b_val, s_val, extras
 
         if t_upper in TAIEX_FUTURES:
@@ -407,27 +414,44 @@ def _quote_one_ex(ticker: str, twii_price: float, beta_fn, kind: str = ""):
             extras["報價來源"] = fut_q.label if (fut_q and fut_q.price is not None) else "無報價，暫用成本價"
             extras["合約乘數"] = fut_q.multiplier if fut_q else futures_multiplier(t_upper)
             sector = DETAILED_SECTOR_MAP.get(t_upper, "臺指期貨")
+            extras["Beta來源"] = beta_source_label(kind_str, True, definition=True)
             return ticker, price, 1.0, sector, extras
 
         if ("期" in kind_str) and not is_opt:
             fut_q = taifex_quotes.get_futures_quote(ticker)
             if fut_q and fut_q.price is not None:
-                b_val, s_val = beta_fn(ticker, True)
+                if getattr(beta_fn, "info", None):
+                    b_val, s_val, ok = beta_fn.info(ticker, True)
+                else:
+                    b_val, s_val = beta_fn(ticker, True)
+                    ok = True
                 extras["報價來源"] = fut_q.label
                 extras["合約乘數"] = fut_q.multiplier
+                extras["Beta來源"] = beta_source_label(kind_str, ok)
                 return ticker, fut_q.price, b_val, s_val, extras
 
             is_tw_market = _page4_is_tw_market(ticker)
-            b_val, s_val = beta_fn(ticker, is_tw_market)
+            if getattr(beta_fn, "info", None):
+                b_val, s_val, ok = beta_fn.info(ticker, is_tw_market)
+            else:
+                b_val, s_val = beta_fn(ticker, is_tw_market)
+                ok = True
             px = _fetch_yahoo_price(ticker, is_tw_market)
             extras["報價來源"] = ("TW Yahoo(備援)" if is_tw_market else "Yahoo(備援)") if pd.notna(px) else "無報價，暫用成本價"
             extras["合約乘數"] = futures_multiplier(ticker)
+            extras["Beta來源"] = beta_source_label(kind_str, ok)
             return ticker, px, b_val, s_val, extras
 
         is_tw_market = _page4_is_tw_market(ticker)
-        b_val, s_val = beta_fn(ticker, is_tw_market)
+        if getattr(beta_fn, "info", None):
+            b_val, s_val, ok = beta_fn.info(ticker, is_tw_market)
+        else:
+            b_val, s_val = beta_fn(ticker, is_tw_market)
+            ok = True
         px = _fetch_yahoo_price(ticker, is_tw_market)
         extras["報價來源"] = ("TW Yahoo" if is_tw_market else "Yahoo") if pd.notna(px) else "無報價，暫用成本價"
+        extras["Beta來源"] = beta_source_label(kind_str, ok)
+        extras.update(fetch_underlying_beta(ticker, beta_fn))
         return ticker, px, b_val, s_val, extras
 
     except Exception:
@@ -536,7 +560,7 @@ def _row_label(df: pd.DataFrame, idx) -> str:
     return f"{sheet_row}（{who}）" if who else sheet_row
 
 
-def value_positions_safely(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: float, prices: dict | None = None, betas: dict | None = None, sectors: dict | None = None, extras: dict | None = None):
+def value_positions_safely(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: float, prices: dict | None = None, betas: dict | None = None, sectors: dict | None = None, extras: dict | None = None, beta_fallbacks: dict | None = None):
     """attach_quotes + finalize_valuation，但單一壞列不會讓整頁失敗。
 
     整批成功就直接回傳。失敗時逐列試算，把會出錯的列排除後重算，
@@ -548,7 +572,7 @@ def value_positions_safely(positions: pd.DataFrame, accounts: pd.DataFrame, usdt
 
     def run(frame):
         if frame is not None and not frame.empty and "標的" in frame.columns:
-            frame = attach_quotes(frame, prices, betas, sectors, extras=extras)
+            frame = attach_quotes(frame, prices, betas, sectors, extras=extras, beta_fallbacks=beta_fallbacks)
         return finalize_valuation(frame, accounts, usdtwd)
 
     try:
@@ -574,10 +598,12 @@ def value_positions_safely(positions: pd.DataFrame, accounts: pd.DataFrame, usdt
         return valued, acc, metrics, warnings
 
 
-def attach_quotes(df: pd.DataFrame, prices: dict, betas: dict, sectors: dict, extras: dict | None = None) -> pd.DataFrame:
+def attach_quotes(df: pd.DataFrame, prices: dict, betas: dict, sectors: dict, extras: dict | None = None, beta_fallbacks: dict | None = None) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame() if df is None else df.copy()
     out = df.copy()
+    if beta_fallbacks is not None:
+        out.attrs["beta_fallbacks"] = dict(beta_fallbacks)
     out["即時報價"] = out["標的"].map(prices).fillna(out["平均成本"])
     out["Beta值"] = out["標的"].map(betas).fillna(1.0)
     out["產業別"] = out["標的"].map(sectors).fillna("其他")
@@ -603,6 +629,13 @@ def attach_quotes(df: pd.DataFrame, prices: dict, betas: dict, sectors: dict, ex
             out["Delta來源"] = np.where(has_sheet_delta, "試算表", delta_src_series)
         else:
             out["Delta來源"] = np.where(has_sheet_delta, "試算表", out["Delta來源"].fillna(delta_src_series))
+
+        for key in ("Beta來源", "標的代號", "標的Beta", "標的Beta來源"):
+            ex_series = out["標的"].map(lambda t: extras.get(t, {}).get(key, np.nan if key == "標的Beta" else ""))
+            if key not in out.columns:
+                out[key] = ex_series
+            else:
+                out[key] = out[key].fillna(ex_series)
 
     return out
 
@@ -657,6 +690,7 @@ def _empty_metrics() -> dict:
         "futures_cash_flow": 0.0,
         "futures_cash_detail": "",
         "futures_cash_warning": "",
+        "beta_fallbacks_used": [],
     }
 
 
@@ -748,7 +782,6 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
         df["顯示_投入總金額(原幣)"] = np.where(is_futures_mask, df["實質佔用本金(原幣)"], df["名目合約總值(原幣)"]).astype(float)
 
         def calc_display_mv(row):
-            t_str = str(row["標的"]).strip().upper()
             is_opt = is_option_row(row)
             if is_opt and "美" not in str(row["種類"]):
                 mult_opt = 50.0
@@ -770,6 +803,18 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
         options_missing_delta = []
         df["實質曝險(台幣)"] = 0.0
         df["Beta曝險(台幣)"] = 0.0
+        
+        overrides = dict(df.attrs.get("beta_fallbacks") or {})
+        if "有效Beta" not in df.columns:
+            df["有效Beta"] = np.nan
+        if "Beta來源" not in df.columns:
+            df["Beta來源"] = ""
+        if "標的代號" not in df.columns:
+            df["標的代號"] = ""
+        if "標的Beta" not in df.columns:
+            df["標的Beta"] = np.nan
+        # 標的Beta 只放即時抓到的值；實際採用的（含預設值）另存，重算時預設值不會被當成即時值。
+        df["採用標的Beta"] = np.nan
 
         for idx, row in df.iterrows():
             ticker_str = str(row["標的"]).strip().upper()
@@ -817,26 +862,37 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
 
                 df.at[idx, "實質曝險(台幣)"] = gross_exp
                 df.at[idx, "Beta曝險(台幣)"] = beta_exp
+                df.at[idx, "有效Beta"] = np.nan
+                df.at[idx, "Beta來源"] = "選擇權 Delta 曝險"
 
             elif is_fut:
                 gross_exp = abs(qty) * px * row_mult * fx
                 df.at[idx, "實質曝險(台幣)"] = gross_exp
                 if is_taiex_future(ticker_str):
                     df.at[idx, "Beta曝險(台幣)"] = qty * px * row_mult * fx
+                    df.at[idx, "有效Beta"] = 1.0
+                    df.at[idx, "Beta來源"] = "定義 1.0"
                 else:
                     mkt_val_twd = float(row["即時市值(台幣)"])
-                    lev = float(row["標的槓桿"])
-                    beta = float(row["Beta值"])
-                    sens = lev if lev > 1 else beta
+                    eb = effective_beta(ticker_str, kind_str, row["標的槓桿"], row["Beta值"], row.get("標的Beta"), str(row.get("標的Beta來源") or ""), str(row.get("Beta來源") or ""), overrides)
+                    sens = eb["sens"]
+                    df.at[idx, "有效Beta"] = sens
+                    df.at[idx, "Beta來源"] = eb["source"]
+                    df.at[idx, "標的代號"] = eb["underlying"]
+                    df.at[idx, "採用標的Beta"] = eb["underlying_beta"] if eb["underlying_beta"] is not None else np.nan
                     sign = 1.0 if qty > 0 else (-1.0 if qty < 0 else 0.0)
                     df.at[idx, "Beta曝險(台幣)"] = mkt_val_twd * sens * sign
 
             else:
                 mkt_val_twd = float(row["即時市值(台幣)"])
                 lev = float(row["標的槓桿"])
-                beta = float(row["Beta值"])
                 df.at[idx, "實質曝險(台幣)"] = mkt_val_twd * lev
-                sens = lev if lev > 1 else beta
+                eb = effective_beta(ticker_str, kind_str, row["標的槓桿"], row["Beta值"], row.get("標的Beta"), str(row.get("標的Beta來源") or ""), str(row.get("Beta來源") or ""), overrides)
+                sens = eb["sens"]
+                df.at[idx, "有效Beta"] = sens
+                df.at[idx, "Beta來源"] = eb["source"]
+                df.at[idx, "標的代號"] = eb["underlying"]
+                df.at[idx, "採用標的Beta"] = eb["underlying_beta"] if eb["underlying_beta"] is not None else np.nan
                 sign = 1.0 if qty > 0 else (-1.0 if qty < 0 else 0.0)
                 df.at[idx, "Beta曝險(台幣)"] = mkt_val_twd * sens * sign
     else:
@@ -1002,6 +1058,19 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
 
     expired_removed = positions.attrs.get("expired_removed", []) if positions is not None else []
     metrics = _metrics_from_frames(df, account_data, nav, tw_nav, us_nav, options_missing_delta if not df.empty else [], expired_removed)
+    
+    if not df.empty and "Beta來源" in df.columns:
+        fallbacks = []
+        for _, row in df.iterrows():
+            src = str(row.get("Beta來源", ""))
+            if "預設值" in src:
+                fallbacks.append({
+                    "標的": str(row.get("標的", "")),
+                    "標的代號": str(row.get("標的代號", "")),
+                    "Beta來源": src
+                })
+        metrics["beta_fallbacks_used"] = fallbacks
+
     return df, account_data, metrics
 
 

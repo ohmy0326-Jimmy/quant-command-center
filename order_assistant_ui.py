@@ -14,7 +14,6 @@ from order_assistant import (
     Rules,
     TXO_MULTIPLIER,
     apply_order,
-    bs_price_greeks,
     build_checklist_text,
     build_payoff_curve,
     build_sample_snapshot,
@@ -22,11 +21,12 @@ from order_assistant import (
     format_qty_text,
     health_flags,
     hedge_leg_vols,
-    holding_display_values,
     hedge_profit_plan,
     hedge_stress_table,
+    holding_display_values,
     iv_percentile,
     iv_traffic_light,
+    option_expiry_pnl,
     loss_breaches,
     order_price_hint,
     parse_tickers,
@@ -39,6 +39,7 @@ from order_assistant import (
     taiex_shock_state,
 )
 import taifex_quotes
+import us_hedge
 from order_calculators import (
     FUTURES_PRODUCTS,
     default_margin_per_lot,
@@ -64,6 +65,7 @@ from order_insights import (
     rs_warning,
 )
 from refresh_controls import render_refresh_bar
+from beta_rules import BETA_FALLBACK_STATE_KEY, fallback_table_rows, overrides_from_rows
 from macro_cycle import format_holding_tag, holding_tag
 from macro_cycle_ui import cached_macro_cycle_view
 from portfolio_risk import (
@@ -85,6 +87,16 @@ def _cached_rs(ticker: str, kind: str) -> dict:
 @st.cache_data(ttl=600, show_spinner=False)
 def _cached_taiex_vix() -> dict:
     return fetch_taiex_vix()
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _cached_us_vix() -> dict:
+    return us_hedge.fetch_us_vix()
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _cached_us_index() -> dict:
+    return us_hedge.fetch_us_index_prices()
 
 
 def _priority_table(items: list[dict]):
@@ -227,21 +239,32 @@ def _public_error(exc: Exception) -> str:
     return f"線上持倉讀取失敗，下面改用示範持倉。原因：{text[:300]}"
 
 
-def _load_live(load_sheets, beta_fn, load_market=None):
+def _load_live(load_sheets, beta_fn, load_market=None, beta_fallbacks=None):
     accounts, _nav_hist, quant = load_sheets()
     raw = normalize_positions(quant)
     pairs = tuple(dict.fromkeys(zip(raw["標的"].astype(str), raw["種類"].astype(str) if "種類" in raw.columns else [""] * len(raw)))) if not raw.empty and "標的" in raw.columns else tuple()
     if load_market is not None:
-        usdtwd, twii, prices, betas, sectors = load_market(pairs)
+        res = load_market(pairs)
+        usdtwd, twii, prices, betas, sectors = res[:5]
+        extras = res[5] if len(res) > 5 else None
     else:
         usdtwd = fetch_usdtwd()
         twii = fetch_twii()
         prices, betas, sectors = ({}, {}, {})
+        extras = {}
         if not raw.empty:
-            prices, betas, sectors = populate_market_fields(raw, beta_fn, twii)
+            prices, betas, sectors = populate_market_fields(raw, beta_fn, twii, extras=extras)
     if not raw.empty:
-        raw = attach_quotes(raw, prices, betas, sectors)
+        raw = attach_quotes(raw, prices, betas, sectors, extras=extras, beta_fallbacks=beta_fallbacks)
     return build_snapshot_from_frames(raw, accounts, usdtwd, twii)
+
+
+def _with_beta_fallbacks(snapshot, overrides):
+    if not overrides:
+        return snapshot
+    positions = snapshot.positions.copy()
+    positions.attrs["beta_fallbacks"] = dict(overrides)
+    return build_snapshot_from_frames(positions, snapshot.accounts, snapshot.usdtwd, snapshot.twii)
 
 
 def build_snapshot_from_frames(raw, accounts, usdtwd, twii):
@@ -397,6 +420,35 @@ def _render_order(snapshot, rules: Rules):
             sector = st.text_input("產業", value=sector, key=f"oa_sector_{ticker}")
         else:
             st.caption(f"沿用持倉：Beta {held['beta']:.2f}、槓桿 {held['lev']:.1f}x、{held['sector']}、{held['kind']}")
+
+        st.markdown("**槓桿 ETF 標的預設 Beta（抓不到即時一年 Beta 時才用）**")
+        df_fb = pd.DataFrame(fallback_table_rows(st.session_state.get(BETA_FALLBACK_STATE_KEY)))
+        edited = st.data_editor(
+            df_fb,
+            key="oa_beta_fallback_editor",
+            hide_index=True,
+            disabled=["標的", "對應槓桿 ETF", "已手動修改"],
+            column_config={
+                "預設 Beta": st.column_config.NumberColumn(min_value=0.1, max_value=5.0, step=0.05, format="%.2f")
+            },
+        )
+        new = overrides_from_rows(edited.to_dict("records"))
+        if new != (st.session_state.get(BETA_FALLBACK_STATE_KEY) or {}):
+            st.session_state[BETA_FALLBACK_STATE_KEY] = new
+            st.rerun()
+
+        if st.button("恢復預設值", key="oa_beta_fallback_reset"):
+            st.session_state.pop(BETA_FALLBACK_STATE_KEY, None)
+            st.session_state.pop("oa_beta_fallback_editor", None)
+            st.rerun()
+
+        fb_used = snapshot.metrics.get("beta_fallbacks_used") or []
+        if fb_used:
+            names = "、".join(f"{x.get('標的')}（{x.get('Beta來源')}）" for x in fb_used)
+            st.caption(f"目前用預設值的持倉：{names}")
+        else:
+            st.caption("目前所有槓桿 ETF 都抓到即時一年 Beta。")
+        st.caption("修改後第四頁、第六頁、美股避險一起套用（同一個瀏覽器分頁）。")
     qty = float(st.session_state["oa_qty"])
     side = st.session_state["oa_side"]
     if qty <= 0 or not ticker:
@@ -817,8 +869,6 @@ def _render_hedge(snapshot, rules: Rules):
     plan_lines = []
     for summary in summaries:
         spot_m = float(book.twii) * (1.0 + move)
-        from order_assistant import option_expiry_pnl
-
         hedge_pnl = option_expiry_pnl(spot_m, summary["legs"], TXO_MULTIPLIER)
         value = max(hedge_pnl + summary["net_debit"], 0.0)
         cost = summary["net_debit"] if summary["net_debit"] > 0 else summary["long_premium"]
@@ -835,48 +885,311 @@ def _render_hedge(snapshot, rules: Rules):
         plan_lines.append(text)
         st.write(text)
 
-    with st.expander("美股指數 Put（選擇性，不與台指圖混在一起）"):
-        u1, u2, u3, u4 = st.columns(4)
-        us_spot = u1.number_input("指數點數", min_value=1.0, value=5600.0, step=10.0, key="oa_us_spot")
-        us_strike = u2.number_input("賣權履約價", min_value=1.0, value=5300.0, step=10.0, key="oa_us_strike")
-        us_lots = u3.number_input("口數 ", min_value=0.0, value=1.0, step=1.0, key="oa_us_lots")
-        us_mult = u4.number_input("乘數（美元／點）", min_value=1.0, value=100.0, step=1.0, key="oa_us_mult")
-        us_prem = st.number_input("權利金（點，0=理論價）", min_value=0.0, value=0.0, step=1.0, key="oa_us_prem")
-        us_legs = [_leg("put", us_strike, us_lots, us_prem, iv)]
-        # 用一個假的現貨做 BS，淨值仍是本帳戶的台幣淨值。
-        us_book_spot = us_spot
-        from order_assistant import resolve_leg_premium
+    st.caption("TW Beta = TW 曝險 / TW 淨值 (TW 淨值 = 台股市值 + 元大期貨權益數 + 台股現金 − 融資/質押)、US Beta = US 曝險 / US 淨值、總 Beta = (TW 曝險 + US 曝險) / 總淨值；選擇權曝險 = Delta × 口數 × 乘數 × 指數；權利金從現金扣除。")
+    return "\n".join(plan_lines)
 
-        resolved = [resolve_leg_premium(us_book_spot, leg, t_years, rate) for leg in us_legs]
-        premium_usd = resolved[0]["premium"] * us_lots * us_mult
-        premium_twd = premium_usd * snapshot.usdtwd
-        st.write(f"權利金約 US$ {premium_usd:,.0f}（NT$ {premium_twd:,.0f}，匯率 {snapshot.usdtwd:.2f}）")
-        nav = snapshot.metrics["nav"] or 1.0
-        st.write(f"佔淨值 {premium_twd / nav * 100:.2f}%，佔年度預算 {(premium_twd / budget * 100.0) if budget else 0:.0f}%")
-        us_delta = bs_price_greeks(us_spot, us_strike, t_years, rate, iv, "put")[1]
-        us_exposure_delta = us_delta * us_lots * us_mult * us_spot * snapshot.usdtwd
-        from order_assistant import split_betas
-        b_us_before = split_betas(snapshot.metrics)
-        b_us_after = split_betas(snapshot.metrics, us_exposure_delta=us_exposure_delta, us_cash_delta=-premium_twd)
-        st.write(f"美股 Beta {b_us_before['us_beta']:.2f} → {b_us_after['us_beta']:.2f}")
-        st.write(f"總 Beta {b_us_before['total_beta']:.2f} → {b_us_after['total_beta']:.2f}")
-        st.write(f"美股選擇權曝險變動 NT$ {us_exposure_delta:,.0f}")
 
-        us_rows = []
-        for move_us in (-0.10, -0.20, -0.30):
-            from order_assistant import option_expiry_pnl
+@st.fragment
+def _render_us_hedge(snapshot, rules: Rules, beta_fn=None):
+    st.markdown("### 美股選擇權避險（SPY／XSP／SPX）")
+    st.caption("乘數都是 100 美元；三個策略是替代方案，權利金不要加總；美股選擇權沒有即時報價來源，權利金請手動輸入，沒填會標「無報價」並用理論價試算。")
 
-            pnl_usd = option_expiry_pnl(us_spot * (1.0 + move_us), resolved, us_mult)
-            us_rows.append({"指數漲跌": f"{move_us * 100:.0f}%", "到期損益（USD）": pnl_usd, "到期損益（TWD）": pnl_usd * snapshot.usdtwd})
+    idx = _cached_us_index()
+    prices = us_hedge.instrument_prices(idx.get("SPX"), idx.get("SPY"))
+
+    inst_options = list(us_hedge.US_HEDGE_INSTRUMENTS.keys())
+    inst = st.selectbox(
+        "避險標的",
+        inst_options,
+        index=inst_options.index(us_hedge.DEFAULT_US_INSTRUMENT),
+        format_func=lambda k: us_hedge.US_HEDGE_INSTRUMENTS[k]["label"],
+        key="oa_us_inst",
+    )
+
+    m1, m2, m3 = st.columns(3)
+    spx_val = prices.get("SPX")
+    xsp_val = prices.get("XSP")
+    spy_val = prices.get("SPY")
+    m1.metric("SPX", f"{spx_val:,.2f}" if spx_val is not None else "無報價")
+    m2.metric("XSP（≈ SPX ÷ 10）", f"{xsp_val:,.2f}" if xsp_val is not None else "無報價")
+    m3.metric("SPY（≈ SPX ÷ 10）", f"{spy_val:,.2f}" if spy_val is not None else "無報價")
+
+    src_label = idx.get("source", "無報價")
+    spx_per_spy = prices.get("spx_per_spy")
+    ratio_str = f"｜SPX ÷ SPY = {spx_per_spy:.2f}" if spx_per_spy is not None else ""
+    est_notes = []
+    if prices.get("spx_estimated"):
+        est_notes.append("SPX 為推估")
+    if prices.get("spy_estimated"):
+        est_notes.append("SPY/XSP 為推估")
+    est_str = f"（{', '.join(est_notes)}）" if est_notes else ""
+    st.caption(f"來源：{src_label}{ratio_str} {est_str}".strip())
+
+    cur_price = prices.get(inst)
+    if cur_price is None:
+        st.warning("無報價：S&P 500 價格抓不到，請手動輸入。")
+        fallback_spot = 6000.0 if inst == "SPX" else 600.0
+    else:
+        fallback_spot = float(cur_price)
+
+    spot = st.number_input(
+        "標的價格",
+        min_value=1.0,
+        value=fallback_spot,
+        step=1.0 if inst != "SPX" else 5.0,
+        key=f"oa_us_spot_{inst}",
+    )
+
+    _ = beta_fn
+    exp = us_hedge.us_spx_exposure(snapshot)
+    if not exp["rows"]:
+        st.info("沒有美股部位，不需要美股避險。")
+        return None
+
+    disp_rows = []
+    for r in exp["rows"]:
+        src = r.get("beta_source") or r.get("method") or ""
+        if "預設值" in src:
+            src = f"⚠️ {src}"
+        disp_rows.append({
+            "標的": r["ticker"],
+            "名稱": r["name"],
+            "市值(NT$)": r["mv_twd"],
+            "槓桿": f"{r['lev']:g}x",
+            "標的代號": r["underlying"] or "—",
+            "標的 Beta": f"{r['underlying_beta']:.2f}" if r["underlying_beta"] is not None else "—",
+            "有效 Beta": f"{r['eff_beta']:.2f}" if r["eff_beta"] is not None else "—",
+            "S&P 曝險(NT$)": r["exposure_twd"],
+            "Beta來源": src,
+        })
+    df_exp = pd.DataFrame(disp_rows)
+    st.dataframe(
+        df_exp.style.format({
+            "市值(NT$)": "NT$ {:,.0f}",
+            "S&P 曝險(NT$)": "NT$ {:,.0f}",
+        }),
+        width="stretch",
+        hide_index=True,
+    )
+
+    if exp.get("fallback_rows"):
+        st.warning(f"{'、'.join(exp['fallback_rows'])} 抓不到標的即時一年 Beta，暫用預設值（可在上方「新標的才需要改」修改）。")
+
+    em1, em2, em3 = st.columns(3)
+    em1.metric("美股 S&P 曝險", f"NT$ {exp['exposure_twd']:,.0f}", f"US$ {exp['exposure_usd']:,.0f}")
+    em2.metric("美股 Beta（對 S&P，美股淨值）", f"{exp['us_beta_spx']:.2f}")
+    em3.metric("第四頁美股 Beta", f"{snapshot.metrics.get('us_beta', 0.0):.2f}")
+    st.caption(
+        f"槓桿 ETF = 槓桿 × 標的一年 Beta（對 S&P 500），與第四頁同一套算法，所以兩邊美股 Beta 相同。"
+        f"第四頁口徑 US Beta：{snapshot.metrics.get('us_beta', 0.0):.2f}（曝險 NT$ {exp['page4_us_exposure']:,.0f} ÷ 美股淨值 NT$ {exp['us_nav']:,.0f}）。"
+    )
+
+    i1, i2, i3, i4, i5 = st.columns(5)
+    ratio = i1.number_input("避險比率（%）", min_value=0.0, max_value=200.0, value=100.0, step=5.0, key="oa_us_ratio")
+    calc = us_hedge.hedge_contracts(exp["exposure_usd"], spot, ratio / 100.0, 100.0)
+    contracts = i2.number_input(
+        "口數",
+        min_value=0.0,
+        value=float(calc["contracts"]),
+        step=1.0,
+        key=f"oa_us_contracts_{inst}_{calc['contracts']}",
+        help="預設為自動計算的口數；避險比率或價格改變時會重新帶入。",
+    )
+    expiry = i3.date_input("到期日", value=date.today() + timedelta(days=90), key="oa_us_expiry")
+    rate = i4.number_input("利率（%）", min_value=0.0, max_value=15.0, value=4.0, step=0.25, key="oa_us_rate") / 100.0
+    iv_fallback = i5.number_input("預設波動率（%）", min_value=1.0, max_value=150.0, value=18.0, step=1.0, key="oa_us_iv") / 100.0
+
+    st.caption(f"{calc['formula']}（原始計算值：{calc['raw']:.2f} 口）")
+
+    days = max((expiry - date.today()).days, 0)
+    t_years = days / 365.0
+
+    step_val = 5.0 if inst == "SPX" else 1.0
+    def_put = round(spot * 0.95 / step_val) * step_val
+    def_short = round(spot * 0.90 / step_val) * step_val
+    def_call = round(spot * 1.05 / step_val) * step_val
+
+    k1, k2, k3 = st.columns(3)
+    k_put = k1.number_input("買進賣權履約價", min_value=0.0, value=float(def_put), step=step_val, key=f"oa_us_k_put_{inst}")
+    k_short = k2.number_input("價差空頭履約價", min_value=0.0, value=float(def_short), step=step_val, key=f"oa_us_k_short_{inst}")
+    k_call = k3.number_input("領口賣出買權履約價", min_value=0.0, value=float(def_call), step=step_val, key=f"oa_us_k_call_{inst}")
+
+    p1, p2, p3 = st.columns(3)
+    raw_prem_put = p1.number_input("賣權權利金（每股/點 USD，0 = 無報價）", min_value=0.0, value=0.0, step=0.5, key=f"oa_us_prem_put_{inst}")
+    raw_prem_short = p2.number_input("空頭賣權權利金（每股/點 USD，0 = 無報價）", min_value=0.0, value=0.0, step=0.5, key=f"oa_us_prem_short_{inst}")
+    raw_prem_call = p3.number_input("買權權利金（每股/點 USD，0 = 無報價）", min_value=0.0, value=0.0, step=0.5, key=f"oa_us_prem_call_{inst}")
+
+    premiums = {
+        "put": raw_prem_put if raw_prem_put > 0 else None,
+        "short_put": raw_prem_short if raw_prem_short > 0 else None,
+        "call": raw_prem_call if raw_prem_call > 0 else None,
+    }
+
+    vix = _cached_us_vix()
+    v1, v2 = st.columns([1, 2])
+    vix_level = float(vix["value"]) if vix.get("ok") and vix.get("value") is not None else None
+    if vix_level is None:
+        v1.metric("美股 VIX", "無報價")
+    else:
+        v1.metric("美股 VIX", f"{vix_level:.2f}")
+    v2.caption(f"來源：{vix.get('source') or '無報價'}　{vix.get('as_of') or ''}".strip())
+
+    built = us_hedge.build_us_strategies(
+        spot, int(contracts), k_put, k_short, k_call, premiums, t_years, rate, iv_fallback, vix_level
+    )
+    for w in built.get("warnings", []):
+        st.warning(w)
+
+    put_leg = built["strategies"]["買進賣權"][0]
+    short_leg = None
+    call_leg = None
+    if "賣權價差" in built["strategies"]:
+        short_leg = built["strategies"]["賣權價差"][1]
+    if "領口" in built["strategies"]:
+        call_leg = built["strategies"]["領口"][1]
+
+    for leg_name, leg_obj in (("買進賣權", put_leg), ("賣權價差空頭", short_leg), ("領口賣出買權", call_leg)):
+        if leg_obj is None:
+            continue
+        src = leg_obj.get("source")
+        note = leg_obj.get("note", "")
+        if leg_obj.get("no_quote"):
+            st.warning(f"{leg_name}：{note}")
+        elif src == "manual":
+            st.caption(note)
+        elif src == "manual_bad_iv":
+            st.warning(note)
+
+    put_iv_pct = put_leg.get("iv", iv_fallback) * 100.0
+    sig = us_hedge.iv_signal_vs_vix(put_iv_pct, vix.get("history") or [])
+    pct = sig.get("percentile")
+    label = sig.get("label", "")
+    color = sig.get("color")
+    hl = vix.get("history_label") or "近一年美股 VIX 沒有資料"
+    if pct is None:
+        st.caption(f"IV 百分位：無法計算。{hl}。燈號：綠 <30%、黃 30–70%、紅 >70%。")
+    else:
+        extra_note = "（理論價，非市場報價）" if put_leg.get("no_quote") else ""
+        text = f"IV {put_iv_pct:.1f}% 在{hl}的百分位 {pct:.0f}%：{label}（綠 <30%、黃 30–70%、紅 >70%）{extra_note}"
+        if color == "green":
+            st.success(text)
+        elif color == "red":
+            st.error(text)
+        else:
+            st.warning(text)
+
+    summaries = []
+    cols = st.columns(len(built["strategies"]))
+    budget = snapshot.metrics["nav"] * rules.hedge_budget_pct_nav / 100.0
+    for col, (name, legs) in zip(cols, built["strategies"].items()):
+        s = us_hedge.us_strategy_summary(snapshot, name, legs, spot, t_years, rate, exp["exposure_twd"], 100.0)
+        summaries.append(s)
+        with col:
+            st.markdown(f"**{name}**")
+            debit = s["net_debit"]
+            debit_usd = s["net_debit_usd"]
+            if debit >= 0:
+                st.metric("權利金支出", f"US$ {debit_usd:,.0f}", f"NT$ {debit:,.0f}（佔淨值 {s['premium_pct_nav']:.2f}%）")
+            else:
+                st.metric("權利金淨收入", f"US$ {-debit_usd:,.0f}", f"NT$ {-debit:,.0f}")
+            used = (max(debit, 0.0) / budget * 100.0) if budget > 0 else 0.0
+            if max(debit, 0.0) > budget > 0:
+                st.error(f"超過年度預算 {used:.0f}%（預算 NT$ {budget:,.0f}）")
+            else:
+                st.success(f"佔年度預算 {used:.0f}%（預算 NT$ {budget:,.0f}）")
+            st.write(f"美股 Beta（對 S&P）{s['us_beta_before']:.2f} → {s['us_beta_after']:.2f}")
+            st.write(f"台股 Beta {s['tw_beta_before']:.2f} → {s['tw_beta_after']:.2f}")
+            st.write(f"總 Beta {s['total_beta_before']:.2f} → {s['total_beta_after']:.2f}")
+            st.write(f"選擇權曝險變動 NT$ {s['option_exposure']:,.0f}")
+            st.write(f"每月時間價值 US$ {s['theta_month_usd']:,.0f}（NT$ {s['theta_month']:,.0f}，負值是耗損）")
+            if s["no_quote"]:
+                st.caption("含無報價腿，用理論價估算")
+
+    curve = us_hedge.us_payoff_curve(snapshot, summaries, spot, exp["exposure_twd"], 100.0)
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=curve["漲跌幅%"], y=curve["投組"], name="美股部位（無避險）", line=dict(color="#B0BEC5", width=2)))
+    colors = {"買進賣權": "#42A5F5", "賣權價差": "#FFA726", "領口": "#66BB6A"}
+    for name in built["strategies"]:
+        if name in curve.columns:
+            fig.add_trace(go.Scatter(x=curve["漲跌幅%"], y=curve[name], name=name, line=dict(color=colors.get(name, "#EF5350"), width=2)))
+    fig.add_hline(y=0, line_color="#546E7A", line_width=1)
+    fig.add_vline(x=0, line_color="#546E7A", line_width=1)
+    fig.update_layout(
+        title=f"到期損益：美股部位 + {inst} 避險（S&P -30%～+15%）",
+        xaxis_title="S&P 500 漲跌幅 %",
+        yaxis_title="損益（TWD）",
+        template="plotly_dark",
+        height=480,
+        margin=dict(l=10, r=10, t=64, b=72),
+        legend=dict(orientation="h", yanchor="top", y=-0.22, x=0.0, xanchor="left"),
+    )
+    st.plotly_chart(fig, width="stretch", key="oa_us_payoff")
+    st.caption("美股部位用 S&P 曝險 × 漲跌幅線性估算，台股不動；槓桿 ETF 有每日再平衡耗損。")
+
+    st.markdown("**壓力表（S&P -10%／-20%／-30%，含權利金）**")
+    stress_rows = []
+    for s in summaries:
+        for row in us_hedge.us_hedge_stress_table(
+            snapshot, s, spot, exp["exposure_twd"], multiple=rules.hedge_realize_multiple, realize_fraction=rules.hedge_realize_fraction
+        ):
+            plan = row["profit_plan"]
+            stress_rows.append({
+                "策略": s["name"],
+                "情境": row["name"],
+                "美股部位損益": row["port_pnl"],
+                "避險損益": row["hedge_pnl"],
+                "避險市值": row["hedge_value"],
+                "避險後淨值": row["nav"],
+                "回撤": row["drawdown_pct"],
+                "獲利規則": "實現" if plan["triggered"] else "未達",
+            })
+    if stress_rows:
         st.dataframe(
-            pd.DataFrame(us_rows).style.format({"到期損益（USD）": "US$ {:,.0f}", "到期損益（TWD）": "NT$ {:,.0f}"}),
+            pd.DataFrame(stress_rows).style.format({
+                "美股部位損益": "NT$ {:,.0f}",
+                "避險損益": "NT$ {:,.0f}",
+                "避險市值": "NT$ {:,.0f}",
+                "避險後淨值": "NT$ {:,.0f}",
+                "回撤": "{:.1f}%",
+            }),
             width="stretch",
             hide_index=True,
         )
-        st.caption("這裡假設美股指數自己走，不跟台指圖疊加。")
 
-    st.caption("TW Beta = TW 曝險 / TW 淨值 (TW 淨值 = 台股市值 + 元大期貨權益數 + 台股現金 − 融資/質押)、US Beta = US 曝險 / US 淨值、總 Beta = (TW 曝險 + US 曝險) / 總淨值；選擇權曝險 = Delta × 口數 × 乘數 × 指數；權利金從現金扣除。")
-    return "\n".join(plan_lines)
+    st.markdown("#### 美股避險獲利處理規則")
+    st.write(
+        f"若避險市值 ≥ 成本的 {rules.hedge_realize_multiple:.1f} 倍，實現 {rules.hedge_realize_fraction * 100:.0f}% 變成現金，其餘續抱。"
+        "成本用淨支出；若策略是淨收入，改用買進賣權那一腿的權利金當成本。"
+    )
+    slip_col, _rest = st.columns([1, 2])
+    drop = slip_col.slider("看看這個 S&P 跌幅下的處理數字", min_value=0, max_value=30, value=20, key="oa_us_hedge_drop")
+    move = -drop / 100.0
+    plan_lines = []
+    usdtwd = float(snapshot.usdtwd)
+    for s in summaries:
+        spot_m = spot * (1.0 + move)
+        hedge_pnl = option_expiry_pnl(spot_m, s["legs"], 100.0) * usdtwd
+        value = max(hedge_pnl + s["net_debit"], 0.0)
+        cost = s["net_debit"] if s["net_debit"] > 0 else s["long_premium"]
+        plan = hedge_profit_plan(cost, value, rules.hedge_realize_multiple, rules.hedge_realize_fraction)
+        keep_lots = contracts * plan["keep_fraction"]
+        if plan["triggered"]:
+            text = (
+                f"{s['name']}：市值 NT$ {value:,.0f} 是成本的 {plan['value_to_cost']:.1f} 倍。"
+                f"實現 NT$ {plan['realize_cash']:,.0f} 入現金，保留約 {keep_lots:.1f} 口（市值 NT$ {plan['keep_value']:,.0f}）。"
+            )
+        else:
+            ratio_txt = f"{plan['value_to_cost']:.1f} 倍" if plan["value_to_cost"] is not None else "尚無成本"
+            text = f"{s['name']}：市值 NT$ {value:,.0f}（{ratio_txt}），未達 {rules.hedge_realize_multiple:.1f} 倍，整組續抱。"
+        plan_lines.append(text)
+        st.write(text)
+
+    st.caption("美股 Beta = 美股 S&P 曝險 ÷ 美股淨值；總 Beta = (台股曝險 + 美股 S&P 曝險) ÷ 總淨值；選擇權曝險 = Delta × 口數 × 100 × 價格 × 匯率；權利金從美股現金扣除。")
+
+    strat_summaries = []
+    for s in summaries:
+        strat_summaries.append(f"{s['name']} 淨支出 US$ {s['net_debit_usd']:,.0f}，美股 Beta {s['us_beta_before']:.2f}→{s['us_beta_after']:.2f}")
+    return f"美股避險：{inst} {contracts:g} 口，買進賣權 {k_put:g}；" + "；".join(strat_summaries)
 
 
 @st.fragment
@@ -1216,6 +1529,7 @@ def render_order_assistant(send_to_telegram, load_sheets, beta_fn, load_market=N
 
     on_cloud = bool(os.environ.get("K_SERVICE"))
     has_key = bool(os.environ.get("GCP_KEY_JSON") or os.environ.get("GOOGLE_SERVICE_KEY_JSON"))
+    overrides = dict(st.session_state.get(BETA_FALLBACK_STATE_KEY) or {})
     options = ["線上持倉（與第四頁同一份試算表）", "示範持倉（離線試算）"]
     default_index = 0 if (on_cloud or has_key) else 1
     source = st.radio("資料來源", options, index=default_index, horizontal=True, key="oa_source")
@@ -1224,9 +1538,13 @@ def render_order_assistant(send_to_telegram, load_sheets, beta_fn, load_market=N
         clear_fns=(
             getattr(load_sheets, "clear", None),
             getattr(beta_fn, "clear", None),
+            getattr(getattr(beta_fn, "info", None), "clear", None),
             clear_caches,
             _cached_rs.clear,
             _cached_taiex_vix.clear,
+            _cached_us_vix.clear,
+            _cached_us_index.clear,
+            us_hedge.clear_cache,
         ),
         session_keys=(),
     )
@@ -1235,14 +1553,14 @@ def render_order_assistant(send_to_telegram, load_sheets, beta_fn, load_market=N
     if not using_sample:
         try:
             with st.spinner("正在用第四頁同一套算法讀持倉..."):
-                snapshot = _load_live(load_sheets, beta_fn, load_market)
+                snapshot = _load_live(load_sheets, beta_fn, load_market, beta_fallbacks=overrides)
             st.caption(f"線上持倉。美元／台幣 {snapshot.usdtwd:.2f}，台指 {snapshot.twii:,.0f}。槓桿定義與第四頁相同。")
         except Exception as exc:
             st.warning(_public_error(exc))
-            snapshot = build_sample_snapshot()
+            snapshot = _with_beta_fallbacks(build_sample_snapshot(), overrides)
             using_sample = True
     else:
-        snapshot = build_sample_snapshot()
+        snapshot = _with_beta_fallbacks(build_sample_snapshot(), overrides)
 
     if using_sample:
         st.info("現在是示範持倉（台股、美股、SOXL／00663L、元大期貨），用來熟悉流程。數字不是你的真實帳戶，也不會寫回 Google 試算表。")
@@ -1355,6 +1673,10 @@ def render_order_assistant(send_to_telegram, load_sheets, beta_fn, load_market=N
     with tab_hedge:
         st.subheader("選擇權避險試算")
         hedge_note = _render_hedge(snapshot, rules)
+        st.divider()
+        us_hedge_note = _render_us_hedge(snapshot, rules, beta_fn=beta_fn)
+        if us_hedge_note:
+            hedge_note = "\n".join(n for n in (hedge_note, us_hedge_note) if n)
 
     with tab_stress:
         st.subheader("壓力測試")

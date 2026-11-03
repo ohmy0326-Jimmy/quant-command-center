@@ -353,6 +353,7 @@ def positions_as_dicts(valued: pd.DataFrame) -> list[dict]:
     rows = []
     for _, row in valued.iterrows():
         fx = float(row.get("換算匯率", 1.0))
+        eff_beta = float(row.get("有效Beta")) if "有效Beta" in row and pd.notna(row["有效Beta"]) else None
         rows.append(
             {
                 "ticker": str(row["標的"]).upper(),
@@ -374,6 +375,8 @@ def positions_as_dicts(valued: pd.DataFrame) -> list[dict]:
                 "max_loss_pct": float(row["最大虧損比例"]),
                 "occupied_native": float(row["實質佔用本金(原幣)"]),
                 "notional_native": float(row["名目合約總值(原幣)"]),
+                "eff_beta": eff_beta,
+                "beta_source": str(row.get("Beta來源", "") or ""),
             }
         )
     return rows
@@ -421,6 +424,7 @@ def taiex_dollar_delta(snapshot: Snapshot) -> float:
     一般台股：市值 × Beta／指數。槓桿 ETF：市值 × 標的槓桿／指數。
     臺指期：口數 × 乘數。
     """
+    from beta_rules import effective_beta
     twii = float(snapshot.twii) if snapshot.twii else 0.0
     if twii <= 0:
         return 0.0
@@ -431,7 +435,11 @@ def taiex_dollar_delta(snapshot: Snapshot) -> float:
         elif "美" in pos["kind"]:
             continue
         else:
-            sens = pos["lev"] if pos["lev"] > 1 else pos["beta"]
+            eff = pos.get("eff_beta")
+            if eff is not None and math.isfinite(eff):
+                sens = eff
+            else:
+                sens = effective_beta(pos["ticker"], pos["kind"], pos["lev"], pos["beta"])["sens"]
             delta += pos["mv_twd"] * sens / twii
     return delta
 
