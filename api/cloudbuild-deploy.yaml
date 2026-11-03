@@ -1,0 +1,17 @@
+# 自動部署 API：main 有新 commit 時由 Cloud Build trigger 執行（build → push → deploy）。
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args: ["build", "-f", "api/Dockerfile", "-t", "$_IMAGE:$SHORT_SHA", "-t", "$_IMAGE:latest", "."]
+  - name: gcr.io/cloud-builders/docker
+    args: ["push", "--all-tags", "$_IMAGE"]
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args: ["run", "deploy", "$_SERVICE", "--image", "$_IMAGE:$SHORT_SHA", "--region", "$_REGION", "--platform", "managed", "--quiet"]
+images:
+  - "$_IMAGE:$SHORT_SHA"
+substitutions:
+  _IMAGE: asia-east1-docker.pkg.dev/quant-dashboard-512010/cloud-run-source-deploy/quant-command-center-api
+  _SERVICE: quant-command-center-api
+  _REGION: asia-east1
+options:
+  logging: CLOUD_LOGGING_ONLY
