@@ -33,6 +33,7 @@ from portfolio_risk import (
 )
 from sheet_dates import nav_growth_series
 import taifex_quotes
+import taiex_vix
 
 # ==========================================
 # 網頁基本設定與密碼驗證防護（支援環境變數與 Secret）
@@ -224,6 +225,7 @@ def clear_market_caches():
     cached_top_holdings_map.clear()
     get_market_beta_and_sector.clear()
     taifex_quotes.clear_cache()
+    taiex_vix.clear_cache()
 
 
 # 初始化各頁面 AI 記憶狀態
@@ -885,7 +887,7 @@ elif page == "第四頁：部位監控與量化風控":
 # 第五頁：總經週期與配置（本機 JSON，不打外部 API）
 # ==========================================
 elif page == "第五頁：總經週期與配置":
-    render_macro_cycle_page(load_book=load_book_for_page5)
+    render_macro_cycle_page(load_book=load_book_for_page5, clear_caches=clear_market_caches)
 
 # ==========================================
 # 第六頁：下單輔助（只試算，不送委託）
