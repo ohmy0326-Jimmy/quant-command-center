@@ -23,6 +23,18 @@ import taifex_quotes
 YUANTA_FUTURES_BASE_EQUITY = 168308.0
 
 
+def equity_ratio_pct(equity, initial_margin) -> float | None:
+    """權益比率＝權益數 ÷ 原始保證金 × 100。第四頁與第六頁共用。沒有原始保證金時為 None。"""
+    try:
+        equity_value = float(equity)
+        initial = float(initial_margin)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(equity_value) or not math.isfinite(initial) or initial <= 0:
+        return None
+    return equity_value / initial * 100.0
+
+
 def yuanta_cash_ledger(value) -> float:
     """元大期貨本日餘額 (cash ledger, 不含未平倉損益)。
 
@@ -149,11 +161,28 @@ def fetch_quant_sheets(key_data: dict):
     creds = ServiceAccountCredentials.from_json_keyfile_dict(key_data, scope)
     client = gspread.authorize(creds)
     spreadsheet = client.open("Quant_Database")
-    return (
-        pd.DataFrame(spreadsheet.worksheet("Active_Positions").get_all_records()),
-        pd.DataFrame(spreadsheet.worksheet("Daily_NAV").get_all_records()),
-        pd.DataFrame(spreadsheet.worksheet("持倉統計").get_all_records()),
+    from futures_ledger import FUTURES_LEDGER_SHEET, TRADE_LOG_SHEET, apply_yuanta_ledger
+    from sheet_dates import normalize_nav_frame
+
+    accounts = pd.DataFrame(spreadsheet.worksheet("Active_Positions").get_all_records())
+    nav = normalize_nav_frame(pd.DataFrame(spreadsheet.worksheet("Daily_NAV").get_all_records()))
+    positions = pd.DataFrame(spreadsheet.worksheet("持倉統計").get_all_records())
+    accounts = apply_yuanta_ledger(
+        accounts,
+        _optional_sheet(spreadsheet, FUTURES_LEDGER_SHEET),
+        _optional_sheet(spreadsheet, TRADE_LOG_SHEET),
+        positions,
     )
+    return accounts, nav, positions
+
+
+def _optional_sheet(spreadsheet, title: str) -> pd.DataFrame | None:
+    """分頁不存在或讀取失敗時回 None，讓本日餘額退回 B7，不讓整頁失敗。"""
+    try:
+        worksheet = spreadsheet.worksheet(title)
+        return pd.DataFrame(worksheet.get_all_records())
+    except Exception:
+        return None
 
 
 def fetch_usdtwd(default: float = 32.5) -> float:
@@ -617,6 +646,17 @@ def _empty_metrics() -> dict:
         "margin_call_points": None,
         "futures_price_labels": [],
         "sector_weights": {},
+        "futures_cash_source": "",
+        "futures_cash_label": "",
+        "futures_cash_calibrated_on": "",
+        "futures_cash_stale": False,
+        "futures_cash_base": None,
+        "futures_cash_realized": 0.0,
+        "futures_cash_fees": 0.0,
+        "futures_cash_tax": 0.0,
+        "futures_cash_flow": 0.0,
+        "futures_cash_detail": "",
+        "futures_cash_warning": "",
     }
 
 
@@ -848,7 +888,13 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
             account_data.at[idx, "維持保證金總額"] = maint_m
 
             if "元大期貨" in acc_name:
-                cash_ledger = yuanta_cash_ledger(row["現金餘額"])
+                if str(row.get("_yuanta_source") or "") == "ledger":
+                    try:
+                        cash_ledger = float(row["現金餘額"])
+                    except (TypeError, ValueError):
+                        cash_ledger = yuanta_cash_ledger(row["現金餘額"])
+                else:
+                    cash_ledger = yuanta_cash_ledger(row["現金餘額"])
                 futures_pnl = 0.0
                 option_val = 0.0
                 if not subset.empty:
@@ -897,14 +943,17 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
             np.where(account_data["帳戶淨值"] != 0, account_data["名目曝險"] / account_data["帳戶淨值"], 0.0),
             2,
         ).astype(float)
-        account_data["權益比率%/現金水位%"] = np.round(
-            np.where(
-                account_data["原始保證金總額"] > 0,
-                (account_data["帳戶淨值"] / account_data["原始保證金總額"]) * 100.0,
-                np.where(account_data["帳戶淨值"] != 0, (account_data["現金餘額"] / account_data["帳戶淨值"]) * 100.0, 0.0),
-            ),
-            1,
-        ).astype(float)
+        def _account_ratio(row) -> float:
+            initial = float(row["原始保證金總額"])
+            nav_value = float(row["帳戶淨值"])
+            if initial > 0:
+                ratio = equity_ratio_pct(nav_value, initial)
+                return 0.0 if ratio is None else round(ratio, 1)
+            if nav_value != 0:
+                return round(float(row["現金餘額"]) / nav_value * 100.0, 1)
+            return 0.0
+
+        account_data["權益比率%/現金水位%"] = account_data.apply(_account_ratio, axis=1).astype(float)
 
         acc_market_types = {}
         for idx, row in account_data.iterrows():
@@ -1040,7 +1089,7 @@ def _metrics_from_frames(
             metrics["margin_ratio"] = equity / maint * 100.0
             metrics["margin_call"] = bool(equity < maint)
         if initial > 0:
-            metrics["risk_indicator"] = equity / initial * 100.0
+            metrics["risk_indicator"] = equity_ratio_pct(equity, initial)
 
         if "距追繳點數" in fut.columns:
             pts = fut["距追繳點數"].dropna()
@@ -1053,7 +1102,9 @@ def _metrics_from_frames(
 
     metrics["cash"] = total_cash
     metrics["cash_pct"] = (total_cash / nav * 100.0) if nav > 0 else 0.0
+    from futures_ledger import ledger_metrics_from_accounts
 
+    metrics.update(ledger_metrics_from_accounts(account_data))
     return metrics
 
 

@@ -21,8 +21,12 @@ from order_assistant import (
     economic_leverage,
     format_qty_text,
     health_flags,
+    hedge_leg_vols,
+    holding_display_values,
     hedge_profit_plan,
     hedge_stress_table,
+    iv_percentile,
+    iv_traffic_light,
     loss_breaches,
     parse_tickers,
     positions_as_dicts,
@@ -33,6 +37,7 @@ from order_assistant import (
     suggest_addback_text,
     taiex_shock_state,
 )
+from taiex_vix import fetch_taiex_vix
 from nav_scenario_sim_ui import render_nav_scenario_simulator
 from order_insights import (
     account_kind_warnings,
@@ -51,12 +56,25 @@ from order_insights import (
 )
 from macro_cycle import format_holding_tag, holding_tag
 from macro_cycle_ui import cached_macro_cycle_view
-from portfolio_risk import attach_quotes, fetch_twii, fetch_usdtwd, is_taiex_future, normalize_positions, populate_market_fields
+from portfolio_risk import (
+    attach_quotes,
+    equity_ratio_pct,
+    fetch_twii,
+    fetch_usdtwd,
+    is_taiex_future,
+    normalize_positions,
+    populate_market_fields,
+)
 
 
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
 def _cached_rs(ticker: str, kind: str) -> dict:
     return rs_for_ticker(ticker, kind)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _cached_taiex_vix() -> dict:
+    return fetch_taiex_vix()
 
 
 def _priority_table(items: list[dict]):
@@ -655,15 +673,50 @@ def _render_hedge(snapshot, rules: Rules):
     prem_put = p1.number_input("賣權權利金（點，0=理論價）", min_value=0.0, value=0.0, step=1.0, key="oa_prem_put")
     prem_short = p2.number_input("空頭賣權權利金（點，0=理論價）", min_value=0.0, value=0.0, step=1.0, key="oa_prem_short")
     prem_call = p3.number_input("買權權利金（點，0=理論價）", min_value=0.0, value=0.0, step=1.0, key="oa_prem_call")
-    st.caption(f"距到期 {days} 天。Greeks 用你填的波動率；若有填權利金，成本用市價、Delta 仍用波動率。")
+    vix_quote = _cached_taiex_vix()
+    vix_level = vix_quote.get("value") if vix_quote.get("ok") else None
+    v1, v2 = st.columns([1, 2])
+    if vix_level is None:
+        v1.metric("台指 VIX", "無報價")
+    else:
+        v1.metric("台指 VIX", f"{float(vix_level):.2f}")
+    v2.caption(f"來源：{vix_quote.get('source') or '無報價'}　{vix_quote.get('as_of') or ''}".strip())
+
+    def _priced(kind: str, strike: float, signed_lots: float, premium: float) -> dict:
+        decision = hedge_leg_vols(float(spot), float(strike), kind, float(premium), iv, t_years, rate, vix_level)
+        leg = _leg(kind, strike, signed_lots, premium, decision["iv"])
+        leg["iv_note"] = decision
+        return leg
+
+    put_decision = hedge_leg_vols(float(spot), float(k_put), "put", float(prem_put), iv, t_years, rate, vix_level)
+    pct = iv_percentile(put_decision.get("iv_percent"), vix_quote.get("history"))
+    light = iv_traffic_light(pct)
+    if pct is None:
+        st.caption(f"IV 百分位：無法計算。{vix_quote.get('history_label') or '近一年台指 VIX 沒有資料'}。燈號：綠 <30%、黃 30–70%、紅 >70%。")
+    else:
+        light_text = f"IV 百分位 {pct:.0f}%：{light['label']}（{vix_quote.get('history_label')}；綠 <30%、黃 30–70%、紅 >70%）"
+        if light["color"] == "green":
+            st.success(light_text)
+        elif light["color"] == "red":
+            st.error(light_text)
+        else:
+            st.warning(light_text)
+    for note in (
+        put_decision.get("note"),
+        hedge_leg_vols(float(spot), float(k_short), "put", float(prem_short), iv, t_years, rate, vix_level).get("note"),
+        hedge_leg_vols(float(spot), float(k_call), "call", float(prem_call), iv, t_years, rate, vix_level).get("note"),
+    ):
+        if note:
+            st.caption(note)
+    st.caption(f"距到期 {days} 天。有填權利金就回推隱含波動率；價外 Put 未填權利金時用台指 VIX + 3。權利金 0 且沒有 VIX 時，沿用上方波動率。")
 
     # 圖與 Greeks 用畫面上的現貨，不改動持倉裡的期貨價格。
     book = copy.copy(snapshot)
     book.twii = float(spot)
     strategies = {
-        "保護性賣權": [_leg("put", k_put, lots, prem_put, iv)],
-        "賣權價差": [_leg("put", k_put, lots, prem_put, iv), _leg("put", k_short, -lots, prem_short, iv)],
-        "領口": [_leg("put", k_put, lots, prem_put, iv), _leg("call", k_call, -lots, prem_call, iv)],
+        "保護性賣權": [_priced("put", k_put, lots, prem_put)],
+        "賣權價差": [_priced("put", k_put, lots, prem_put), _priced("put", k_short, -lots, prem_short)],
+        "領口": [_priced("put", k_put, lots, prem_put), _priced("call", k_call, -lots, prem_call)],
     }
     if k_short >= k_put:
         st.warning("賣權價差的空頭履約價需要低於買進履約價，這欄先不列入比較。")
@@ -707,12 +760,13 @@ def _render_hedge(snapshot, rules: Rules):
         xaxis_title="台指漲跌幅 %",
         yaxis_title="損益（TWD）",
         template="plotly_dark",
-        height=420,
-        margin=dict(l=10, r=10, t=40, b=10),
-        legend=dict(orientation="h", y=1.12),
+        height=480,
+        margin=dict(l=10, r=10, t=64, b=72),
+        legend=dict(orientation="h", yanchor="top", y=-0.22, x=0.0, xanchor="left"),
     )
     st.plotly_chart(fig, width="stretch")
     st.caption("這張圖是到期內含價值，美股部位不隨台指連動。時間價值耗損看上面的每月數字，不畫進曲線。")
+    st.caption("以加權指數×曝險估算，正2等槓桿 ETF 有每日再平衡耗損。")
 
     st.markdown("**壓力表（-10%／-20%／-30%，含權利金）**")
     stress_rows = []
@@ -865,12 +919,15 @@ def _render_holding_tags(snapshot, view: dict):
     st.caption("用總經配置裡的代表股對應產業，標在代號旁邊。對不上的不標。標了「示例」的是占位產業，不是目前定案。")
     rows = []
     for pos in positions_as_dicts(snapshot.valued):
+        shown = holding_display_values(pos)
         rows.append(
             {
                 "標的": pos["ticker"],
                 "產業立場": format_holding_tag(holding_tag(view, pos["ticker"])),
                 "名稱": pos["name"],
-                "市值": pos["mv_twd"],
+                "名目或市值": shown["amount"],
+                "口徑": shown["basis"],
+                "未實現損益": shown["pnl"],
             }
         )
     if not rows:
@@ -888,12 +945,13 @@ def _render_holding_tags(snapshot, view: dict):
             return "background-color: #f9a825; color: #1a1a1a"
         return ""
 
-    styler = frame.style.format({"市值": "NT$ {:,.0f}"})
+    styler = frame.style.format({"名目或市值": "NT$ {:,.0f}", "未實現損益": "NT$ {:,.0f}"})
     if hasattr(styler, "map"):
         styler = styler.map(paint, subset=["產業立場"])
     else:
         styler = styler.applymap(paint, subset=["產業立場"])
     st.dataframe(styler, width="stretch", hide_index=True)
+    st.caption("期貨口徑是名目（口數 × 價格 × 乘數），不是未實現損益，也不是保證金。")
 
 
 def render_order_assistant(send_to_telegram, load_sheets, beta_fn, load_market=None, clear_caches=None):
@@ -964,11 +1022,12 @@ def render_order_assistant(send_to_telegram, load_sheets, beta_fn, load_market=N
         h3.metric("合併槓桿", f"{metrics['leverage']:.2f}x", f"上限 {rules.target_leverage:.2f}x", delta_color="off")
         h4.metric("現金水位", f"{metrics['cash_pct']:.1f}%", f"下限 {rules.min_cash_pct:.0f}%", delta_color="off")
         h5.metric("總 Beta", f"{metrics['total_beta']:.2f}", f"台股 {metrics['tw_beta']:.2f}／美股 {metrics['us_beta']:.2f}｜目標 {rules.beta_low:.1f}–{rules.beta_high:.1f}", delta_color="off")
-        if metrics["margin_ratio"] is not None:
+        ratio = equity_ratio_pct(metrics.get("futures_equity"), metrics.get("futures_initial"))
+        if ratio is not None:
             st.metric(
-                "期貨保證金比率（權益 ÷ 維持保證金）",
-                f"{metrics['margin_ratio']:.1f}%",
-                f"可動用保證金 NT$ {metrics['excess_margin']:,.0f}",
+                "權益比率（權益數 ÷ 原始保證金）",
+                f"{ratio:.2f}%",
+                f"距追繳 NT$ {metrics.get('margin_call_distance', 0):,.0f}",
                 delta_color="off",
             )
         st.caption(

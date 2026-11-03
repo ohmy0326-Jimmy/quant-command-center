@@ -17,6 +17,7 @@ from portfolio_risk import (
     _futures_margin_row,
     finalize_valuation,
     futures_multiplier,
+    is_option_row,
     is_taiex_future,
     yuanta_cash_ledger,
 )
@@ -108,6 +109,150 @@ def bs_price_greeks(spot: float, strike: float, t_years: float, rate: float, sig
     return float(price), float(delta), float(theta)
 
 
+def implied_vol_bs(price: float, spot: float, strike: float, t_years: float, rate: float, kind: str = "put") -> float | None:
+    """由權利金（與現貨同一單位）回推 Black-Scholes 波動率。失敗回傳 None。"""
+    price = float(price)
+    spot = float(spot)
+    strike = float(strike)
+    t_years = float(t_years)
+    rate = float(rate)
+    if price <= 0 or spot <= 0 or strike <= 0 or t_years <= 1e-8:
+        return None
+    is_call = str(kind).lower().startswith("c")
+    disc = math.exp(-rate * t_years)
+    if is_call:
+        lower = max(0.0, spot - strike * disc)
+        upper = spot
+    else:
+        lower = max(0.0, strike * disc - spot)
+        upper = strike * disc
+    if price <= lower + 1e-8 or price >= upper - 1e-10:
+        return None
+    low, high = 1e-4, 5.0
+    for _ in range(80):
+        mid = (low + high) / 2.0
+        model, _, _ = bs_price_greeks(spot, strike, t_years, rate, mid, kind)
+        if model > price:
+            high = mid
+        else:
+            low = mid
+    return (low + high) / 2.0
+
+
+def implied_vol_black76(price: float, forward: float, strike: float, t_years: float, kind: str = "put") -> float | None:
+    """Black-76。forward 用畫面上的台指現貨當期貨價。"""
+    import taifex_quotes
+
+    call_put = "C" if str(kind).lower().startswith("c") else "P"
+    return taifex_quotes.implied_vol_black76(float(price), float(forward), float(strike), float(t_years), call_put)
+
+
+def iv_percentile(level_percent: float | None, history: list[float] | None) -> float | None:
+    """level 在歷史樣本裡的百分位（0–100）。小於等於 level 的比例。"""
+    if level_percent is None:
+        return None
+    try:
+        level = float(level_percent)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(level):
+        return None
+    values = []
+    for item in history or []:
+        try:
+            number = float(item)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(number):
+            values.append(number)
+    if not values:
+        return None
+    rank = sum(1 for value in values if value <= level)
+    return 100.0 * rank / len(values)
+
+
+def iv_traffic_light(percentile: float | None) -> dict:
+    """綠 <30%、黃 30–70%、紅 >70%。"""
+    if percentile is None or not math.isfinite(float(percentile)):
+        return {"color": "none", "label": "無百分位"}
+    pct = float(percentile)
+    if pct < 30.0:
+        return {"color": "green", "label": "偏低"}
+    if pct <= 70.0:
+        return {"color": "yellow", "label": "中間"}
+    return {"color": "red", "label": "偏高"}
+
+
+def hedge_leg_vols(
+    spot: float,
+    strike: float,
+    kind: str,
+    premium: float,
+    iv_input: float,
+    t_years: float,
+    rate: float,
+    vix_percent: float | None,
+) -> dict:
+    """決定一腿用的波動率。
+
+    有填權利金就回推 Black-Scholes（Greeks 沿用它）並另算 Black-76。
+    價外 Put 且沒填權利金時，用台指 VIX + 3 當偏斜建議。
+    """
+    spot = float(spot)
+    strike = float(strike)
+    premium = float(premium or 0.0)
+    iv_input = float(iv_input)
+    is_put = not str(kind).lower().startswith("c")
+    otm_put = is_put and spot > 0 and strike < spot
+    bs_percent = None
+    black76_percent = None
+    if premium > 0:
+        bs = implied_vol_bs(premium, spot, strike, t_years, rate, kind)
+        b76 = implied_vol_black76(premium, spot, strike, t_years, kind)
+        bs_percent = None if bs is None else bs * 100.0
+        black76_percent = None if b76 is None else b76 * 100.0
+        if bs is not None:
+            note = f"權利金 {premium:g} 點回推隱含波動率：Black-Scholes {bs_percent:.2f}%"
+            if black76_percent is not None:
+                note += f"、Black-76 {black76_percent:.2f}%"
+            note += "。Greeks 沿用 Black-Scholes。Black-76 以畫面上的台指現貨當期貨價。"
+            return {
+                "iv": bs,
+                "iv_percent": bs_percent,
+                "bs_percent": bs_percent,
+                "black76_percent": black76_percent,
+                "source": "premium",
+                "note": note,
+            }
+        note = "這筆權利金無法回推隱含波動率（低於內含價值或已超過上限），改用畫面上的波動率。"
+        return {
+            "iv": iv_input,
+            "iv_percent": iv_input * 100.0,
+            "bs_percent": None,
+            "black76_percent": black76_percent,
+            "source": "input",
+            "note": note,
+        }
+    if otm_put and vix_percent is not None and math.isfinite(float(vix_percent)):
+        iv_percent = float(vix_percent) + 3.0
+        return {
+            "iv": iv_percent / 100.0,
+            "iv_percent": iv_percent,
+            "bs_percent": None,
+            "black76_percent": None,
+            "source": "skew",
+            "note": f"價外 Put 偏斜建議：台指 VIX {float(vix_percent):.2f} + 3 = {iv_percent:.2f}%。",
+        }
+    return {
+        "iv": iv_input,
+        "iv_percent": iv_input * 100.0,
+        "bs_percent": None,
+        "black76_percent": None,
+        "source": "input",
+        "note": "",
+    }
+
+
 def intrinsic_value(kind: str, strike: float, spot: float) -> float:
     if str(kind).lower().startswith("c"):
         return max(float(spot) - float(strike), 0.0)
@@ -186,6 +331,20 @@ def parse_tickers(text: str) -> list[str]:
         if token and token not in out:
             out.append(token)
     return out
+
+
+def holding_display_values(pos: dict) -> dict:
+    """產業立場表的金額。期貨用名目（口數 × 價格 × 乘數），其餘用市值。未實現損益另計。"""
+    kind = str(pos.get("kind") or "")
+    is_opt = is_option_row({"種類": kind, "名稱": pos.get("name", ""), "標的": pos.get("ticker", "")})
+    is_fut = ("期" in kind) and not is_opt
+    pnl = float(pos.get("pnl_twd") or 0.0)
+    if is_fut:
+        exposure = abs(float(pos.get("exposure") or 0.0))
+        mult = futures_multiplier(str(pos.get("ticker") or ""))
+        computed = abs(float(pos.get("qty") or 0.0)) * float(pos.get("price") or 0.0) * mult * float(pos.get("fx") or 1.0)
+        return {"amount": exposure if exposure > 0 else computed, "basis": "名目", "pnl": pnl}
+    return {"amount": float(pos.get("mv_twd") or 0.0), "basis": "市值", "pnl": pnl}
 
 
 def positions_as_dicts(valued: pd.DataFrame) -> list[dict]:

@@ -19,6 +19,7 @@ from order_assistant_ui import render_order_assistant
 from portfolio_risk import (
     attach_quotes,
     coerce_ticker_kind_pairs,
+    equity_ratio_pct,
     fetch_quant_sheets,
     fetch_twii,
     fetch_usdtwd,
@@ -30,6 +31,7 @@ from portfolio_risk import (
     ticker_kind_pairs,
     value_positions_safely,
 )
+from sheet_dates import nav_growth_series
 import taifex_quotes
 
 # ==========================================
@@ -706,23 +708,12 @@ elif page == "第四頁：部位監控與量化風控":
             global_cash_pct = round(metrics["cash_pct"], 1) if total_net_liq > 0 else 0.0
 
             st.subheader("📈 歷史資金成長曲線與最大回撤 (MDD) [以台幣計價]")
-            if not nav_data.empty and '日期' in nav_data.columns and '總淨值' in nav_data.columns:
-                nav_data['日期'] = pd.to_datetime(nav_data['日期']).dt.strftime('%Y-%m-%d')
-                nav_data.set_index('日期', inplace=True)
-                nav_data['總淨值'] = pd.to_numeric(nav_data['總淨值'], errors='coerce')
-                
-                today_str = datetime.now().strftime('%Y-%m-%d')
-                if not nav_data.index.str.contains(today_str).any():
-                    nav_data.loc[today_str] = total_net_liq
-                else:
-                    nav_data.loc[today_str, '總淨值'] = total_net_liq
-                    
-                nav_series = nav_data['總淨值'].dropna()
-                if not nav_series.empty:
-                    current_nav, max_nav = nav_series.iloc[-1], nav_series.max()
-                    current_dd_pct = ((current_nav - max_nav) / max_nav) * 100
-                    st.metric("最新總淨值 (TWD)", f"NT$ {current_nav:,.0f}", f"距離歷史最高點: {current_dd_pct:.2f}%")
-                    st.line_chart(nav_series, height=150)
+            nav_series = nav_growth_series(nav_data, total_net_liq)
+            if not nav_series.empty:
+                current_nav, max_nav = nav_series.iloc[-1], nav_series.max()
+                current_dd_pct = ((current_nav - max_nav) / max_nav) * 100 if max_nav else 0.0
+                st.metric("最新總淨值 (TWD)", f"NT$ {current_nav:,.0f}", f"距離歷史最高點: {current_dd_pct:.2f}%")
+                st.line_chart(nav_series, height=150)
             else:
                 st.metric("最新總淨值 (TWD)", f"NT$ {total_net_liq:,.0f}", "即時市價計算")
             
@@ -794,8 +785,8 @@ elif page == "第四頁：部位監控與量化風控":
                 if metrics.get("futures_initial", 0) > 0:
                     fc1, fc2, fc3, fc4, fc5 = st.columns(5)
                     fc1.metric("元大權益數", f"NT$ {metrics.get('futures_equity', 0):,.0f}", f"本日餘額 NT$ {metrics.get('futures_cash_ledger', 0):,.0f}")
-                    risk_ind = metrics.get("risk_indicator", 0) or 0.0
-                    fc2.metric("權益比率(權益/原始)", f"{risk_ind:.1f}%")
+                    risk_ind = equity_ratio_pct(metrics.get("futures_equity"), metrics.get("futures_initial"))
+                    fc2.metric("權益比率(權益/原始)", "—" if risk_ind is None else f"{risk_ind:.2f}%")
                     fc3.metric("可動用保證金", f"NT$ {metrics.get('excess_margin', 0):,.0f}")
                     fc4.metric("原始/維持保證金", f"{metrics.get('futures_initial', 0):,.0f} / {metrics.get('futures_maint', 0):,.0f}")
 
@@ -823,6 +814,15 @@ elif page == "第四頁：部位監控與量化風控":
                 }
                 st.dataframe(account_data[acc_cols].style.format(fmt_dict), use_container_width=True, hide_index=True)
                 st.caption("元大期貨：現金餘額＝本日餘額；帳戶淨值＝權益數＝本日餘額＋期貨未實現損益（期交所即時/夜盤價）；權益比率＝權益數÷原始保證金。")
+                ledger_label = str(metrics.get("futures_cash_label") or "")
+                if ledger_label:
+                    st.caption(f"元大明細：{ledger_label}")
+                if metrics.get("futures_cash_detail"):
+                    st.caption(str(metrics.get("futures_cash_detail")))
+                if metrics.get("futures_cash_stale"):
+                    st.warning("校正已超過 30 天，請用元大期貨截圖校正 Futures_Ledger（日期、本日餘額、當時持倉均價）。")
+                if metrics.get("futures_cash_warning"):
+                    st.warning(str(metrics.get("futures_cash_warning")))
 
             st.markdown("---")
             st.subheader("🎯 微觀持倉、Beta 值與精細產業即時損益追蹤")

@@ -18,6 +18,7 @@ from order_assistant import (
     build_sample_snapshot,
     economic_exposure,
     hedge_profit_plan,
+    holding_display_values,
     loss_breaches,
     option_expiry_pnl,
     propose_rebalance,
@@ -27,7 +28,7 @@ from order_assistant import (
     suggest_addback_text,
     taiex_shock_state,
 )
-from portfolio_risk import YUANTA_FUTURES_BASE_EQUITY, finalize_valuation, normalize_positions
+from portfolio_risk import YUANTA_FUTURES_BASE_EQUITY, equity_ratio_pct, finalize_valuation, normalize_positions
 
 
 def _stock(account, kind, ticker, qty, cost, price, lev=1.0, beta=1.0, sector="其他", max_loss=-100):
@@ -574,6 +575,53 @@ class DashboardWiringTests(unittest.TestCase):
         self.assertIn("@st.fragment", order_ui)
         with open(os.path.join(root, "macro_cycle_ui.py"), encoding="utf-8") as handle:
             self.assertIn('st.title("第五頁：總經週期與配置")', handle.read())
+
+
+class Page6MarginAndNotionalTests(unittest.TestCase):
+    def test_equity_ratio_matches_yuanta_and_page4(self):
+        # 元大：權益數 105,024、原始保證金 35,050 → 299.64%
+        self.assertAlmostEqual(equity_ratio_pct(105_024, 35_050), 299.64, places=2)
+        self.assertIsNone(equity_ratio_pct(105_024, 0))
+        positions = pd.DataFrame([_stock("元大期貨", "期貨", "FMF", 1, 45000, 45434, lev=1, beta=1)])
+        accounts = pd.DataFrame([{"帳戶名稱": "元大期貨", "現金餘額": 105024, "融資/質押借款": 0}])
+        _valued, _accounts_out, metrics = finalize_valuation(positions, accounts, 32)
+        self.assertAlmostEqual(metrics["risk_indicator"], equity_ratio_pct(metrics["futures_equity"], metrics["futures_initial"]), places=6)
+        self.assertAlmostEqual(metrics["futures_initial"], 35050, places=6)
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "order_assistant_ui.py"), encoding="utf-8") as handle:
+            page6 = handle.read()
+        with open(os.path.join(root, "Dashboard.py"), encoding="utf-8") as handle:
+            page4 = handle.read()
+        self.assertIn("equity_ratio_pct", page6)
+        self.assertIn("equity_ratio_pct", page4)
+        self.assertIn("權益比率（權益數 ÷ 原始保證金）", page6)
+        self.assertIn("距追繳", page6)
+        self.assertNotIn("期貨保證金比率（權益 ÷ 維持保證金）", page6)
+
+    def test_fmf_industry_table_uses_notional_not_pnl(self):
+        pos = {
+            "ticker": "FMF",
+            "name": "微台",
+            "kind": "台股期貨",
+            "qty": 1,
+            "price": 45027,
+            "fx": 1,
+            "mv_twd": 4340,
+            "exposure": 450270,
+            "pnl_twd": 4340,
+        }
+        shown = holding_display_values(pos)
+        self.assertEqual(shown["basis"], "名目")
+        self.assertAlmostEqual(shown["amount"], 450270, places=4)
+        self.assertAlmostEqual(shown["pnl"], 4340, places=4)
+        self.assertNotAlmostEqual(shown["amount"], shown["pnl"], places=0)
+        fallback = dict(pos, exposure=0)
+        self.assertAlmostEqual(holding_display_values(fallback)["amount"], 45027 * 10, places=4)
+        stock = {"ticker": "2330", "name": "台積電", "kind": "台股", "qty": 10, "price": 100, "fx": 1, "mv_twd": 1000, "exposure": 1000, "pnl_twd": 50}
+        stock_shown = holding_display_values(stock)
+        self.assertEqual(stock_shown["basis"], "市值")
+        self.assertAlmostEqual(stock_shown["amount"], 1000, places=4)
+        self.assertAlmostEqual(stock_shown["pnl"], 50, places=4)
 
 
 if __name__ == "__main__":
