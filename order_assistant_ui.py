@@ -33,6 +33,7 @@ from order_assistant import (
     suggest_addback_text,
     taiex_shock_state,
 )
+from nav_scenario_sim_ui import render_nav_scenario_simulator
 from order_insights import (
     account_kind_warnings,
     account_options,
@@ -1064,3 +1065,5 @@ def render_order_assistant(send_to_telegram, load_sheets, beta_fn, load_market=N
         if st.button("把這份摘要推到 Telegram", type="primary"):
             payload = text if len(text) <= 3500 else text[:3500] + "\n…（後段省略）"
             send_to_telegram("下單輔助試算", payload)
+
+    render_nav_scenario_simulator(snapshot, float(rules.target_leverage))
