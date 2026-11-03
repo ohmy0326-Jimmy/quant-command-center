@@ -61,8 +61,8 @@ DEFAULT_TAX_RATE = {
     "*": 0.00002,
 }
 
-# 目前校正點：2026-11-03 本日餘額 137,094，剩微台 1 口，原始保證金 35,050。
-# 微台在持倉統計的代號是 FMF（TMF 乘數同樣是 10）。均價請由寫入的人補上。
+# 目前校正點：2026-11-03 本日餘額 137,094，剩微台 1 口、均價 46,734，原始保證金 35,050。
+# 微台在持倉統計的代號是 FMF（TMF 乘數同樣是 10）。
 SEED_CALIBRATION = {
     "類型": "校正",
     "日期": "2026-11-03",
@@ -70,12 +70,12 @@ SEED_CALIBRATION = {
     "商品代號": "FMF",
     "買賣": "買",
     "口數": 1,
-    "均價": None,
+    "均價": 46734,
     "金額": None,
     "手續費預設": None,
     "稅率預設": None,
     "原始保證金": 35050,
-    "備註": "剩微台 1 口。均價請填校正當下的持倉均價；空白時改讀持倉統計。",
+    "備註": "剩微台 1 口，校正當下均價 46734。",
 }
 
 LEDGER_COLUMNS = [
@@ -92,27 +92,36 @@ LEDGER_COLUMNS = [
     "原始保證金",
     "備註",
 ]
-# Notion「交易日誌」同步進 Trade_Log 的既有表頭。A–M 還可能多一欄公式，
-# 程式不依賴欄位字母，也不會改這些表頭。
+# Trade_Log 實際表頭 A–R。不要改這些欄，也不要另開交易明細分頁。
+# N–R（類型起）可以整欄不存在或空白；A–M 的「種類」「總金額」不可改名。
 EXISTING_TRADE_HEADERS = (
-    "成交時間",
+    "時間",
     "帳戶",
+    "種類",
+    "動作",
     "標的",
     "名稱",
-    "商品種類",
-    "動作",
     "數量",
     "成交價",
     "合約乘數",
-    "標的槓桿",
+    "總金額",
     "最大虧損比例",
     "覆盤筆記",
+    "標的槓桿",
+    "類型",
+    "長短線",
+    "停損價",
+    "已實現損益",
+    "交易後帳戶槓桿",
 )
-# 只追加在既有欄位後面。A–M 已佔滿時，順序是 N–R。讀取時可以整欄不存在或空白。
+# N–R。讀取時可以不存在或空白。
 APPENDED_TRADE_HEADERS = ("類型", "長短線", "停損價", "已實現損益", "交易後帳戶槓桿")
+# 種類是台股期貨／台股，不是開倉平倉的「類型」。總金額是契約金額，不是出入金的「金額」。
+_DO_NOT_RENAME = frozenset({"種類", "總金額"})
 
 _HEADER_ALIASES = {
     "交易日期": "日期",
+    "時間": "日期",
     "成交時間": "日期",
     "標的": "商品代號",
     "代號": "商品代號",
@@ -589,7 +598,10 @@ def _apply_trade(books: dict[str, _Book], row, fees: dict[str, float], taxes: di
 
 
 def _is_listed_derivative(row) -> bool:
-    """股票成交留在 Trade_Log，但不進元大期貨餘額。商品種類空白時仍照算。"""
+    """股票成交留在 Trade_Log，但不進元大期貨餘額。種類空白時仍照算。
+
+    認的是「種類」（台股期貨、台股、美股），不是「類型」（開倉／平倉）。
+    """
     kind = _cell_text(row.get("商品種類")) or _cell_text(row.get("種類"))
     if not kind:
         return True
@@ -714,7 +726,8 @@ def _prepare(frame: pd.DataFrame | None) -> pd.DataFrame | None:
     seen = {str(column).strip() for column in out.columns}
     for column in out.columns:
         text = str(column).strip()
-        target = _HEADER_ALIASES.get(text, text)
+        # 種類、總金額保持原名，避免被當成「類型」或出入金「金額」。
+        target = text if text in _DO_NOT_RENAME else _HEADER_ALIASES.get(text, text)
         if target != text and target in seen:
             target = text
         renamed[column] = target

@@ -62,12 +62,97 @@ def _notion_trade(**overrides):
 
 
 class TradeLogTests(unittest.TestCase):
-    def test_existing_headers_are_not_replaced_by_appended_columns(self):
-        self.assertIn("成交時間", EXISTING_TRADE_HEADERS)
-        self.assertIn("動作", EXISTING_TRADE_HEADERS)
-        self.assertIn("合約乘數", EXISTING_TRADE_HEADERS)
-        self.assertEqual(APPENDED_TRADE_HEADERS, ("類型", "長短線", "停損價", "已實現損益", "交易後帳戶槓桿"))
-        self.assertFalse(set(EXISTING_TRADE_HEADERS) & set(APPENDED_TRADE_HEADERS))
+    def test_existing_headers_match_the_live_sheet(self):
+        self.assertEqual(
+            EXISTING_TRADE_HEADERS,
+            (
+                "時間",
+                "帳戶",
+                "種類",
+                "動作",
+                "標的",
+                "名稱",
+                "數量",
+                "成交價",
+                "合約乘數",
+                "總金額",
+                "最大虧損比例",
+                "覆盤筆記",
+                "標的槓桿",
+                "類型",
+                "長短線",
+                "停損價",
+                "已實現損益",
+                "交易後帳戶槓桿",
+            ),
+        )
+        self.assertEqual(APPENDED_TRADE_HEADERS, EXISTING_TRADE_HEADERS[13:])
+
+    def test_real_headers_count_micro_close_only_after_calibration(self):
+        def row(**overrides):
+            blank = {name: "" for name in EXISTING_TRADE_HEADERS}
+            blank.update(overrides)
+            return blank
+
+        before = row(
+            時間="2026-10-30 11:36:00",
+            帳戶="元大期貨",
+            種類="台股期貨",
+            動作="賣出",
+            標的="FMF",
+            名稱="微台",
+            數量=1,
+            成交價=45027,
+            合約乘數=10,
+            總金額=450270,
+            已實現損益=-99999,
+        )
+        same_day = row(
+            時間="2026-11-03",
+            帳戶="元大期貨",
+            種類="台股期貨",
+            動作="賣出",
+            標的="FMF",
+            名稱="微台",
+            數量=1,
+            成交價=40000,
+            合約乘數=10,
+            總金額=400000,
+            已實現損益=-99999,
+        )
+        close_after = row(
+            時間="2026-11-04 13:45:00",
+            帳戶="元大期貨",
+            種類="台股期貨",
+            動作="賣出",
+            標的="FMF",
+            名稱="微台",
+            數量=1,
+            成交價=46000,
+            合約乘數=10,
+            總金額=460000,
+            最大虧損比例=-10,
+            標的槓桿=1,
+        )
+        stock = row(
+            時間="2026-11-05",
+            帳戶="元大期貨",
+            種類="台股",
+            動作="賣出",
+            標的="2330",
+            名稱="台積電",
+            數量=100,
+            成交價=1000,
+            總金額=1_000_000,
+            已實現損益=-50000,
+        )
+        quote = quote_yuanta_ledger(_ledger(46734), pd.DataFrame([before, same_day, close_after, stock]), today=CAL_DAY)
+        gross = (46000 - 46734) * 10
+        tax = 46000 * 10 * 0.00002
+        self.assertAlmostEqual(quote.realized, gross, places=4)
+        self.assertEqual(quote.cashflow, 0)
+        self.assertAlmostEqual(quote.fees, 15, places=4)
+        self.assertAlmostEqual(quote.balance, 137094 + gross - 15 - tax, places=4)
 
     def test_blank_realized_column_uses_average_cost(self):
         trades = pd.DataFrame([_notion_trade(已實現損益="")])
