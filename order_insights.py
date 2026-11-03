@@ -26,6 +26,7 @@ from order_assistant import (
     TXO_MULTIPLIER,
     Rules,
     Snapshot,
+    bs_price_greeks,
     loss_breaches,
     positions_as_dicts,
     taiex_shock_state,
@@ -107,6 +108,14 @@ def account_kind_warnings(account: str, kind: str) -> list[str]:
     return warnings
 
 
+def _clean_float(val: Any, default: float = 0.0) -> float:
+    try:
+        f = float(val)
+        return default if math.isnan(f) else f
+    except (TypeError, ValueError):
+        return default
+
+
 def account_view(snapshot: Snapshot, name: str) -> dict:
     """查詢特定帳戶的當前概況。"""
     target_name = str(name).strip()
@@ -116,17 +125,14 @@ def account_view(snapshot: Snapshot, name: str) -> dict:
         matched = acc_df[mask]
         if not matched.empty:
             row = matched.iloc[0]
-            cash = float(row.get("現金餘額", 0.0))
-            debt = float(row.get("融資/質押借款", 0.0))
-            mv = float(row.get("即時持股市值", 0.0))
-            nav = float(row.get("帳戶淨值", 0.0))
-            exp = float(row.get("名目曝險", 0.0))
+            cash = _clean_float(row.get("現金餘額", 0.0))
+            debt = _clean_float(row.get("融資/質押借款", 0.0))
+            mv = _clean_float(row.get("即時持股市值", 0.0))
+            nav = _clean_float(row.get("帳戶淨值", 0.0))
+            exp = _clean_float(row.get("名目曝險", 0.0))
             lev = (exp / nav) if nav > 0 else 0.0
-            avail = (
-                float(row["可動用保證金"])
-                if "可動用保證金" in row and pd.notna(row["可動用保證金"])
-                else None
-            )
+            avail_raw = row.get("可動用保證金") if "可動用保證金" in row else None
+            avail = None if avail_raw is None or pd.isna(avail_raw) else _clean_float(avail_raw)
             return {
                 "name": target_name,
                 "exists": True,
@@ -241,7 +247,23 @@ US_RS_UNIVERSE = (
     "SHW", "ITW", "MDT", "ORLY", "TGT", "CSX", "MCK",
 )
 
+RS_BENCHMARK_LABEL = {
+    "TW": "台股 50 大權值股（0050 成分股代理，對照加權指數）",
+    "US": "S&P 500 前百大市值股（S&P 500 代理）",
+}
+
 RS_WARN_THRESHOLD = 70
+
+
+def default_put_delta(
+    spot: float, otm_pct: float = 0.05, days: int = 30, iv: float = 0.20, rate: float = 0.015
+) -> float:
+    """計算指定 OTM 比例之 TXO Put Delta（負值）。若 spot <= 0 則回傳 0.0。"""
+    if spot <= 0:
+        return 0.0
+    strike = round(spot * (1.0 - otm_pct) / 50.0) * 50.0
+    _price, delta, _theta = bs_price_greeks(spot, strike, days / 365.0, rate, iv, "put")
+    return float(delta)
 
 
 def rs_raw_score(close: pd.Series) -> float | None:
@@ -328,11 +350,16 @@ def rs_universe_for(kind: str) -> tuple:
     return TW_RS_UNIVERSE
 
 
-def compute_rs(target_close: pd.Series, universe_closes: dict[str, pd.Series]) -> dict:
+def compute_rs(
+    target_close: pd.Series, universe_closes: dict[str, pd.Series], target_symbol: str | None = None
+) -> dict:
     """計算標的 RS Rating、Raw Score、Universe 規模與各期報酬率。"""
     target_raw = rs_raw_score(target_close)
+    target_sym_clean = target_symbol.strip().upper() if target_symbol else None
     univ_raws = []
-    for s in universe_closes.values():
+    for k, s in universe_closes.items():
+        if target_sym_clean and str(k).strip().upper() == target_sym_clean:
+            continue
         r = rs_raw_score(s)
         if r is not None:
             univ_raws.append(r)
@@ -361,6 +388,62 @@ def compute_rs(target_close: pd.Series, universe_closes: dict[str, pd.Series]) -
         "raw": target_raw,
         "universe_size": len(univ_raws),
         "returns": {"3m": r3, "6m": r6, "9m": r9, "12m": r12},
+    }
+
+
+def rs_for_ticker(ticker: str, kind: str, fetch=None) -> dict:
+    """針對指定標的計算 RS Rating 及相關資料。"""
+    benchmark = RS_BENCHMARK_LABEL["US" if "美" in str(kind) else "TW"]
+    symbol = rs_symbol(ticker, kind)
+    if not symbol:
+        return {
+            "symbol": "",
+            "rating": None,
+            "raw": None,
+            "universe_size": 0,
+            "returns": {"3m": None, "6m": None, "9m": None, "12m": None},
+            "benchmark": "",
+            "error": "期貨／選擇權不計算 RS",
+        }
+
+    fetch_fn = fetch if fetch is not None else fetch_close_history
+    universe = rs_universe_for(kind)
+    req_symbols = list(dict.fromkeys([symbol] + list(universe)))
+    closes = fetch_fn(req_symbols) or {}
+
+    target_series = closes.get(symbol)
+    if (target_series is None or target_series.dropna().empty) and symbol.endswith(".TW"):
+        alt_symbol = symbol[:-3] + ".TWO"
+        closes_alt = fetch_fn([alt_symbol]) or {}
+        if alt_symbol in closes_alt and not closes_alt[alt_symbol].dropna().empty:
+            symbol = alt_symbol
+            target_series = closes_alt[alt_symbol]
+            closes[alt_symbol] = target_series
+
+    if target_series is None or target_series.dropna().empty:
+        return {
+            "symbol": symbol,
+            "rating": None,
+            "raw": None,
+            "universe_size": 0,
+            "returns": {"3m": None, "6m": None, "9m": None, "12m": None},
+            "benchmark": benchmark,
+            "error": f"抓不到 {symbol} 的歷史股價",
+        }
+
+    res = compute_rs(target_series, closes, target_symbol=symbol)
+    err = None
+    if res.get("rating") is None:
+        err = "對照股價不足，無法排名"
+
+    return {
+        "symbol": symbol,
+        "rating": res["rating"],
+        "raw": res["raw"],
+        "universe_size": res["universe_size"],
+        "returns": res["returns"],
+        "benchmark": benchmark,
+        "error": err,
     }
 
 
@@ -505,7 +588,11 @@ def margin_account_call_levels(
         if "元大期貨" in acc_name:
             continue
         debt = float(row.get("融資/質押借款", 0.0))
+        if math.isnan(debt):
+            debt = 0.0
         mv = float(row.get("即時持股市值", 0.0))
+        if math.isnan(mv):
+            mv = 0.0
         if debt > 0 and mv > 0:
             ratio_now = mv / debt
             maint_now_pct = ratio_now * 100.0

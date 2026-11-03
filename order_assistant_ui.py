@@ -33,9 +33,62 @@ from order_assistant import (
     suggest_addback_text,
     taiex_shock_state,
 )
+from order_insights import (
+    account_kind_warnings,
+    account_options,
+    account_view,
+    beta_split_change,
+    default_account,
+    default_put_delta,
+    futures_margin_call_level,
+    hedge_suggestion,
+    leveraged_beta_note,
+    margin_account_call_levels,
+    priority_list,
+    rs_for_ticker,
+    rs_warning,
+)
 from macro_cycle import format_holding_tag, holding_tag
 from macro_cycle_ui import cached_macro_cycle_view
 from portfolio_risk import attach_quotes, fetch_twii, fetch_usdtwd, is_taiex_future, normalize_positions, populate_market_fields
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def _cached_rs(ticker: str, kind: str) -> dict:
+    return rs_for_ticker(ticker, kind)
+
+
+def _priority_table(items: list[dict]):
+    if not items:
+        st.success("沒有追繳風險、觸發停損或超過虧損上限的部位。")
+        return
+
+    rows = []
+    for idx, item in enumerate(items, 1):
+        rows.append(
+            {
+                "順序": idx,
+                "類別": item["category"],
+                "標的": item["ticker"],
+                "帳戶": item["account"],
+                "說明": item["detail"],
+                "金額 (NT$)": item["value"],
+            }
+        )
+    df = pd.DataFrame(rows)
+
+    def paint(row):
+        cat = str(row["類別"])
+        if cat in ("追繳風險", "融資追繳風險"):
+            return ["background-color: #b71c1c; color: white"] * len(row)
+        if cat == "觸發停損":
+            return ["background-color: #e65100; color: white"] * len(row)
+        return [""] * len(row)
+
+    styler = df.style.format({"金額 (NT$)": "NT$ {:,.0f}"})
+    if hasattr(styler, "apply"):
+        styler = styler.apply(paint, axis=1)
+    st.dataframe(styler, width="stretch", hide_index=True)
 
 
 def _queue_regime_reset():
@@ -288,11 +341,26 @@ def _render_order(snapshot, rules: Rules):
         if tag:
             st.caption(f"總經配置：{tag}")
     kind = _order_kind(snapshot, ticker, held) if ticker else "台股"
+    acc_options = account_options(snapshot.accounts)
+    def_acc = default_account(snapshot, kind, held["account"] if held else None)
+    if def_acc not in acc_options:
+        acc_options.append(def_acc)
+    selected_account = st.selectbox(
+        "下單帳戶",
+        acc_options,
+        index=acc_options.index(def_acc),
+        key=f"oa_account_{ticker or 'NA'}",
+    )
+    if held and held.get("account") and held["account"] != selected_account:
+        st.caption(f"持倉在「{held['account']}」，這裡將以「{selected_account}」試算新部位（賣出若該帳戶無部位會警示）。")
+
+    for acc_warn in account_kind_warnings(selected_account, kind):
+        st.warning(acc_warn)
+
     beta = held["beta"] if held else 1.0
     lev = held["lev"] if held else (3.0 if ticker in {"SOXL", "TQQQ"} else 1.0)
     sector = held["sector"] if held else "其他"
     name = held["name"] if held else ticker
-    account = held["account"] if held else None
     with st.expander("新標的才需要改：Beta、槓桿、產業"):
         if not held:
             beta = st.number_input("Beta", value=1.0, step=0.1, key=f"oa_beta_{ticker}")
@@ -320,7 +388,7 @@ def _render_order(snapshot, rules: Rules):
             "leverage": lev,
             "sector": sector,
             "name": name,
-            "account": account,
+            "account": selected_account,
         },
     )
     left, right = st.columns(2)
@@ -330,14 +398,158 @@ def _render_order(snapshot, rules: Rules):
     with right:
         st.markdown("**下單後**")
         _side_metrics(after)
+
+    st.markdown("**處置優先順序（追繳風險與觸發停損排最前）**")
+    _priority_table(priority_list(snapshot, rules, after))
+
+    st.markdown(f"**下單帳戶「{selected_account}」（下單前 → 下單後）**")
+    b_acc = account_view(snapshot, selected_account)
+    a_acc = account_view(after, selected_account)
+    ca1, ca2, ca3, ca4 = st.columns(4)
+    ca1.metric("帳戶現金", f"NT$ {a_acc['cash']:,.0f}", f"NT$ {a_acc['cash'] - b_acc['cash']:+,.0f}")
+    ca2.metric("帳戶淨值", f"NT$ {a_acc['nav']:,.0f}", f"NT$ {a_acc['nav'] - b_acc['nav']:+,.0f}")
+    ca3.metric("帳戶槓桿", f"{a_acc['leverage']:.2f}x", f"{a_acc['leverage'] - b_acc['leverage']:+.2f}x", delta_color="inverse")
+    if a_acc["available_margin"] is not None and b_acc["available_margin"] is not None:
+        ca4.metric("可動用保證金", f"NT$ {a_acc['available_margin']:,.0f}", f"NT$ {a_acc['available_margin'] - b_acc['available_margin']:+,.0f}")
+    elif a_acc["available_margin"] is not None:
+        ca4.metric("可動用保證金", f"NT$ {a_acc['available_margin']:,.0f}")
+    else:
+        ca4.metric("可動用保證金", "—")
+
     _metric_row(snapshot.metrics, after.metrics)
     st.caption(
         f"經濟槓桿（期貨改以契約名目計）：{economic_leverage(snapshot):.2f}x → {economic_leverage(after):.2f}x。"
         "上方的合併槓桿與第四頁相同（實質曝險 ÷ 淨值）。"
     )
+
+    st.markdown("**Beta 拆解（下單前 → 下單後）**")
+    beta_df = pd.DataFrame(beta_split_change(snapshot.metrics, after.metrics)).rename(
+        columns={
+            "label": "市場",
+            "before": "下單前 Beta",
+            "after": "下單後 Beta",
+            "delta": "變動",
+            "exposure_before": "下單前曝險",
+            "exposure_after": "下單後曝險",
+        }
+    )
+    st.dataframe(
+        beta_df.style.format(
+            {
+                "下單前 Beta": "{:.2f}",
+                "下單後 Beta": "{:.2f}",
+                "變動": "{:+.2f}",
+                "下單前曝險": "NT$ {:,.0f}",
+                "下單後曝險": "NT$ {:,.0f}",
+            }
+        ),
+        width="stretch",
+        hide_index=True,
+    )
+    lev_note = leveraged_beta_note(lev, beta)
+    if lev_note:
+        st.info(lev_note)
+    st.caption("槓桿 ETF 只用標的槓桿計一次（曝險 = 市值 × 槓桿），不再乘 Beta；曝險有正負號，空單／買賣權依 Delta 計。")
+
+    rs_on = st.toggle("計算 RS Rating（抓 13 個月股價，約數秒）", value=True, key="oa_rs_on")
+    rs_str = ""
+    if rs_on and ("期" not in kind and "選" not in kind):
+        try:
+            with st.spinner("正在計算 RS Rating..."):
+                rs_res = _cached_rs(ticker, kind)
+            r_val = rs_res.get("rating")
+            st.metric(
+                "RS Rating",
+                r_val if r_val is not None else "—",
+                help="IBD 式：0.4×3個月 + 0.2×6個月 + 0.2×9個月 + 0.2×12個月報酬，與對照群比百分位 1–99",
+            )
+            rets = rs_res.get("returns", {})
+            ret_texts = []
+            for p_lbl, p_val in (("3m", "3個月"), ("6m", "6個月"), ("9m", "9個月"), ("12m", "12個月")):
+                if rets.get(p_lbl) is not None:
+                    ret_texts.append(f"{p_val} {rets[p_lbl] * 100:+.1f}%")
+            ret_line = "；".join(ret_texts) if ret_texts else "無報酬率資料"
+            bench = rs_res.get("benchmark", "")
+            usize = rs_res.get("universe_size", 0)
+            st.caption(f"對照基準：{bench}（共 {usize} 檔）｜ 過去報酬率：{ret_line}")
+            warn_msg = rs_warning(r_val)
+            if warn_msg:
+                st.warning(warn_msg)
+            if rs_res.get("error"):
+                st.caption(rs_res["error"])
+            if r_val is not None:
+                rs_str = f"RS Rating {r_val}"
+        except Exception as exc:
+            st.caption(f"RS Rating 計算失敗：{exc}")
+
     b_name, b_w = _top_sector(snapshot.metrics["sector_weights"])
     a_name, a_w = _top_sector(after.metrics["sector_weights"])
     st.write(f"最大產業：{b_name} {b_w:.1f}% → {a_name} {a_w:.1f}%")
+
+    st.markdown("**追繳點位**")
+    b_fmc = futures_margin_call_level(snapshot)
+    a_fmc = futures_margin_call_level(after)
+    fmc_note_str = ""
+    if b_fmc or a_fmc:
+        def _fmt_fmc(fmc):
+            if not fmc:
+                return "—"
+            if fmc.get("already"):
+                return "已追繳"
+            if fmc.get("index_level") is None:
+                return fmc.get("direction", "不觸發")
+            return f"台指 {fmc['index_level']:,.0f}（{fmc['direction']} {abs(fmc['move_pct']):.1f}%，{fmc['points']:+,.0f} 點）"
+
+        st.write(f"期貨追繳點位：下單前 {_fmt_fmc(b_fmc)} → 下單後 {_fmt_fmc(a_fmc)}")
+        if a_fmc:
+            fmc_note_str = f"期貨追繳點位下單後：{_fmt_fmc(a_fmc)}"
+
+    m_levels = margin_account_call_levels(after)
+    if m_levels:
+        m_df = pd.DataFrame(m_levels).rename(
+            columns={
+                "account": "帳戶",
+                "market_value": "持股市值",
+                "debt": "融資/質押借款",
+                "maintenance_now_pct": "目前維持率%",
+                "trigger_drop_pct": "觸發追繳跌幅%",
+                "already_call": "已追繳",
+            }
+        )
+        m_df["已追繳"] = m_df["已追繳"].map({True: "是", False: "否"})
+        st.dataframe(
+            m_df.style.format(
+                {
+                    "持股市值": "NT$ {:,.0f}",
+                    "融資/質押借款": "NT$ {:,.0f}",
+                    "目前維持率%": "{:.1f}%",
+                    "觸發追繳跌幅%": "{:.1f}%",
+                }
+            ),
+            width="stretch",
+            hide_index=True,
+        )
+        st.caption("假設整戶維持率 130%、持股同步下跌；美股券商（IB／嘉信）實際維持率依券商規定，僅供參考。")
+
+    st.markdown("**TXO 賣權避險建議（以下單後台股曝險）**")
+    def_pdelta = round(default_put_delta(after.twii if after.twii else 0.0), 2)
+    put_delta = st.number_input(
+        "TXO Put Delta（負值；0 = 不做 Delta 調整）",
+        value=def_pdelta,
+        min_value=-1.0,
+        max_value=0.0,
+        step=0.05,
+        key="oa_order_put_delta",
+    )
+    h_after = hedge_suggestion(after, put_delta if put_delta != 0 else None)
+    h_before = hedge_suggestion(snapshot, put_delta if put_delta != 0 else None)
+    ch1, ch2, ch3, ch4, ch5 = st.columns(5)
+    ch1.metric("台股淨曝險", f"NT$ {h_after['net_exposure']:,.0f}", f"NT$ {h_after['net_exposure'] - h_before['net_exposure']:+,.0f}")
+    ch2.metric("目前避險比率", f"{h_after['current_hedge_ratio'] * 100:.1f}%", f"{(h_after['current_hedge_ratio'] - h_before['current_hedge_ratio']) * 100:+.1f}%")
+    ch3.metric("名目口數", f"{h_after['lots_full']:.2f} 口")
+    ch4.metric("Delta 調整口數", f"{h_after['lots_delta']:.2f} 口" if h_after["lots_delta"] is not None else "—")
+    ch5.metric("建議口數", f"{h_after['suggested_lots']} 口")
+    st.caption(h_after["formula"])
 
     stress_view = []
     for move, label in ((-0.10, "台指 -10%"), (-0.20, "台指 -20%")):
@@ -380,7 +592,15 @@ def _render_order(snapshot, rules: Rules):
     else:
         for note in rule_warnings:
             st.error(note)
-    return f"{side} {ticker} {format_qty_text(ticker, kind, qty)} @ {price:g}。槓桿 {snapshot.metrics['leverage']:.2f}x → {after.metrics['leverage']:.2f}x，現金 {snapshot.metrics['cash_pct']:.1f}% → {after.metrics['cash_pct']:.1f}%。" + (
+
+    order_note_extra = [f"下單帳戶：{selected_account}"]
+    if rs_str:
+        order_note_extra.append(rs_str)
+    if fmc_note_str:
+        order_note_extra.append(fmc_note_str)
+    order_note_extra.append(f"建議 TXO Put 口數：{h_after['suggested_lots']} 口")
+
+    return f"{side} {ticker} {format_qty_text(ticker, kind, qty)} @ {price:g}。" + " ".join(order_note_extra) + f" 槓桿 {snapshot.metrics['leverage']:.2f}x → {after.metrics['leverage']:.2f}x，現金 {snapshot.metrics['cash_pct']:.1f}% → {after.metrics['cash_pct']:.1f}%。" + (
         " " + "；".join(rule_warnings)
     )
 
@@ -599,6 +819,8 @@ def _fragment_plan(snapshot, rules: Rules):
         rotate_fraction=float(st.session_state["oa_rotate_pct"]) / 100.0,
         strict_sector=bool(st.session_state["oa_strict_sector"]),
     )
+    st.markdown("**先處理：追繳風險與觸發停損**")
+    _priority_table(priority_list(snapshot, rules))
     st.markdown(f"**目標槓桿 {rules.target_leverage:.2f}x 執行後**")
     _metric_row(plan["before"], plan["after"])
     _show_action_table(plan["actions"])
@@ -721,6 +943,8 @@ def render_order_assistant(send_to_telegram, load_sheets, beta_fn, load_market=N
     )
 
     with tab_health:
+        st.subheader("處置優先順序")
+        _priority_table(priority_list(snapshot, rules))
         metrics = snapshot.metrics
         h1, h2, h3, h4, h5 = st.columns(5)
         h1.metric("淨值", f"NT$ {metrics['nav']:,.0f}")

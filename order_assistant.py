@@ -477,8 +477,12 @@ def apply_order(snapshot: Snapshot, order: dict) -> tuple[Snapshot, list[str]]:
     if is_taiex_future(ticker) and "期" not in kind:
         kind = "期貨"
     positions = _coerce_positions(snapshot.positions)
-    accounts = _ensure_account(_coerce_accounts(snapshot.accounts), _route_account(snapshot.accounts, kind))
-    account = str(order.get("account") or "").strip() or _route_account(accounts, kind)
+    accounts = _coerce_accounts(snapshot.accounts)
+    explicit = str(order.get("account") or "").strip()
+    account = explicit or _route_account(accounts, kind)
+    known = set(accounts["帳戶名稱"].astype(str).str.strip()) if (not accounts.empty and "帳戶名稱" in accounts.columns) else set()
+    if explicit and account not in known:
+        warnings.append(f"「{account}」不在試算表的帳戶清單，現金以 0 試算")
     accounts = _ensure_account(accounts, account)
 
     if positions.empty or "標的" not in positions.columns:
