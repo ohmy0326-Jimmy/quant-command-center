@@ -18,6 +18,7 @@ from macro_cycle_ui import render_macro_cycle_page
 from order_assistant_ui import render_order_assistant
 from portfolio_risk import (
     attach_quotes,
+    coerce_ticker_kind_pairs,
     fetch_quant_sheets,
     fetch_twii,
     fetch_usdtwd,
@@ -26,6 +27,8 @@ from portfolio_risk import (
     market_beta_and_sector,
     normalize_positions,
     populate_market_fields_parallel,
+    ticker_kind_pairs,
+    value_positions_safely,
 )
 import taifex_quotes
 
@@ -114,24 +117,14 @@ def cached_twii():
 
 
 def _ticker_kind_pairs(frame: pd.DataFrame) -> tuple:
-    if frame is None or frame.empty or "標的" not in frame.columns:
-        return ()
-    has_kind = "種類" in frame.columns
-    pairs = []
-    seen = set()
-    for _, row in frame.iterrows():
-        t = str(row.get("標的") or "").strip()
-        k = str(row.get("種類") or "").strip() if has_kind else ""
-        if t and (t, k) not in seen:
-            seen.add((t, k))
-            pairs.append((t, k))
-    return tuple(pairs)
+    return ticker_kind_pairs(frame)
 
 
 @st.cache_data(ttl=60, show_spinner=False)
 def cached_quote_bundle(pairs: tuple):
     """同一批持倉的報價與 Beta。60 秒內改數字不會重抓。"""
     twii = fetch_twii()
+    pairs = coerce_ticker_kind_pairs(pairs)
     frame = pd.DataFrame([{"標的": t, "種類": k} for t, k in pairs]) if pairs else pd.DataFrame(columns=["標的", "種類"])
     extras = {}
     prices, betas, sectors = populate_market_fields_parallel(frame, market_beta_and_sector, twii, extras=extras)
@@ -695,10 +688,15 @@ elif page == "第四頁：部位監控與量化風控":
             account_data, nav_data, quant_data = load_quant_database()
             usdtwd_rate = cached_usdtwd()
             df = normalize_positions(quant_data)
-            if not df.empty:
-                bundle = cached_quote_bundle(tuple(dict.fromkeys(df["標的"].astype(str).tolist())))
-                df = attach_quotes(df, bundle["prices"], bundle["betas"], bundle["sectors"])
-            df, account_data, metrics = finalize_valuation(df, account_data, usdtwd_rate)
+            bundle = {}
+            if not df.empty and "標的" in df.columns:
+                bundle = cached_quote_bundle(_ticker_kind_pairs(df))
+            df, account_data, metrics, row_warnings = value_positions_safely(
+                df, account_data, usdtwd_rate,
+                bundle.get("prices"), bundle.get("betas"), bundle.get("sectors"), extras=bundle.get("extras"),
+            )
+            for row_warning in row_warnings:
+                st.warning(f"⚠️ {row_warning}")
             total_net_liq = metrics["nav"]
             portfolio_beta = metrics["beta"]
             total_exposure = metrics["exposure"]

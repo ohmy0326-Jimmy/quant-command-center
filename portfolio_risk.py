@@ -457,6 +457,94 @@ def populate_market_fields_parallel(df: pd.DataFrame, beta_fn, twii_price: float
     return prices, betas, sectors
 
 
+def ticker_kind_pairs(frame: pd.DataFrame) -> tuple:
+    """持倉表裡不重複的 (標的, 種類)。報價快取一律用這個當鍵。"""
+    if frame is None or frame.empty or "標的" not in frame.columns:
+        return ()
+    has_kind = "種類" in frame.columns
+    pairs = []
+    seen = set()
+    for _, row in frame.iterrows():
+        t = str(row.get("標的") or "").strip()
+        k = str(row.get("種類") or "").strip() if has_kind else ""
+        if t and (t, k) not in seen:
+            seen.add((t, k))
+            pairs.append((t, k))
+    return tuple(pairs)
+
+
+def coerce_ticker_kind_pairs(items) -> tuple:
+    """把報價請求整理成 (標的, 種類)。
+
+    舊呼叫端可能只傳代號字串，例如 ("FMF", "MUU")。直接用 `for t, k in items`
+    會把字串拆成字元，出現 too many values to unpack。這裡把字串視為種類空白。
+    """
+    pairs = []
+    for item in items or ():
+        if isinstance(item, str):
+            t, k = item, ""
+        elif isinstance(item, (tuple, list)) and len(item) >= 1:
+            t = item[0]
+            k = item[1] if len(item) >= 2 else ""
+        else:
+            t, k = item, ""
+        t = str(t if t is not None else "").strip()
+        k = str(k if k is not None else "").strip()
+        if t:
+            pairs.append((t, k))
+    return tuple(dict.fromkeys(pairs))
+
+
+def _row_label(df: pd.DataFrame, idx) -> str:
+    row = df.loc[idx]
+    acct = str(row.get("帳戶", "") or "").strip()
+    ticker = str(row.get("標的", "") or "").strip()
+    try:
+        sheet_row = f"第 {int(idx) + 2} 列"  # get_all_records 從第 2 列開始
+    except (TypeError, ValueError):
+        sheet_row = f"列 {idx}"
+    who = " / ".join(x for x in (acct, ticker) if x)
+    return f"{sheet_row}（{who}）" if who else sheet_row
+
+
+def value_positions_safely(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: float, prices: dict | None = None, betas: dict | None = None, sectors: dict | None = None, extras: dict | None = None):
+    """attach_quotes + finalize_valuation，但單一壞列不會讓整頁失敗。
+
+    整批成功就直接回傳。失敗時逐列試算，把會出錯的列排除後重算，
+    回傳 (持倉表, 帳戶表, 指標, 警告清單)，警告會寫出是哪一列與錯誤訊息。
+    """
+    prices = prices or {}
+    betas = betas or {}
+    sectors = sectors or {}
+
+    def run(frame):
+        if frame is not None and not frame.empty and "標的" in frame.columns:
+            frame = attach_quotes(frame, prices, betas, sectors, extras=extras)
+        return finalize_valuation(frame, accounts, usdtwd)
+
+    try:
+        valued, acc, metrics = run(positions)
+        return valued, acc, metrics, []
+    except Exception as whole_err:
+        if positions is None or positions.empty:
+            raise
+        warnings = []
+        bad = []
+        for idx in positions.index:
+            try:
+                run(positions.loc[[idx]])
+            except Exception as row_err:
+                bad.append(idx)
+                warnings.append(f"{_row_label(positions, idx)} 無法計算，已暫時排除：{row_err}")
+        if not bad or len(bad) == len(positions.index):
+            # 沒有單一列能重現，或每一列都失敗：問題不在某一列，照原樣回報。
+            raise whole_err
+        kept = positions.drop(index=bad)
+        kept.attrs = dict(positions.attrs)
+        valued, acc, metrics = run(kept)
+        return valued, acc, metrics, warnings
+
+
 def attach_quotes(df: pd.DataFrame, prices: dict, betas: dict, sectors: dict, extras: dict | None = None) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame() if df is None else df.copy()
