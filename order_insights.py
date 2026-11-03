@@ -771,6 +771,7 @@ def priority_list(
 
     # 優先級 2: 超過虧損上限
     breaches = loss_breaches(snapshot, rules)
+    account_of = {pos["ticker"]: pos["account"] for pos in positions_as_dicts(getattr(snapshot, "valued", None))}
     for breach in breaches:
         if breach["ticker"] not in cat1_tickers:
             items.append(
@@ -778,7 +779,7 @@ def priority_list(
                     "priority": 2,
                     "category": "超過虧損上限",
                     "ticker": breach["ticker"],
-                    "account": breach.get("account", ""),
+                    "account": breach.get("account") or account_of.get(breach["ticker"], ""),
                     "detail": breach["reason"],
                     "value": breach["trim_value"],
                 }
