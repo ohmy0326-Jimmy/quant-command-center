@@ -38,7 +38,7 @@ X-API-Key: <READONLY_API_KEY>
 
 每個 JSON 都有：
 
-- `schema_version`：目前 `1.2.0`
+- `schema_version`：目前 `1.3.0`（1.3.0 新增 `beta_leverage` 與部位層的 Beta／名目欄位，舊欄位全部保留）
 - `as_of`：`Asia/Taipei` 的 ISO 8601，例如 `2026-10-29T22:00:00+08:00`
 
 機器可讀的 JSON Schema 在 [`readonly_api.schema.json`](readonly_api.schema.json)，由 `api/schemas.py` 的 Pydantic 模型產生。
@@ -49,7 +49,7 @@ X-API-Key: <READONLY_API_KEY>
 
 ```json
 {
-  "schema_version": "1.2.0",
+  "schema_version": "1.3.0",
   "as_of": "2026-10-29T22:00:00+08:00",
   "status": "ok"
 }
@@ -57,9 +57,26 @@ X-API-Key: <READONLY_API_KEY>
 
 ## GET /v1/portfolio
 
-成功時 **200**。數字與第四頁相同，幣別是台幣。`leverage` 是實質曝險 ÷ 淨值（畫面上會再四捨五入到小數兩位）。`cash_pct` 是現金 ÷ 淨值 × 100 的百分點（畫面上四捨五入到小數一位），`9.5` 表示 9.5%。`total_beta` 為總組合 Beta（(台股與台指期貨 Beta 曝險 + 美股 Beta 曝險) ÷ 總淨值），`beta` 欄位亦設為 `total_beta`。`tw_beta` 與 `us_beta` 分別為台股/台指期貨與美股分區 Beta（分區 Beta 曝險 ÷ 分區淨值）。`tw_nav` 與 `us_nav` 分別為台股/台指期貨與美股分區淨值。`tw_exposure` 與 `us_exposure` 分別為台股/台指期貨與美股的實質 Beta 曝險（臺指期貨曝險現為名目合約總值：口數 × 指數點 × 乘數）。
+成功時 **200**。數字與第四頁相同，幣別是台幣。`leverage` 是名目曝險 ÷ 淨值（畫面上會再四捨五入到小數兩位）。`cash_pct` 是現金 ÷ 淨值 × 100 的百分點（畫面上四捨五入到小數一位），`9.5` 表示 9.5%。`total_beta` 為總組合 Beta（(台股與台指期貨 Beta 曝險 + 美股 Beta 曝險) ÷ 總淨值），`beta` 欄位亦設為 `total_beta`。`tw_beta` 與 `us_beta` 分別為台股/台指期貨與美股分區 Beta（分區 Beta 曝險 ÷ 分區淨值）。`tw_nav` 與 `us_nav` 分別為台股/台指期貨與美股分區淨值。`tw_exposure` 與 `us_exposure` 分別為台股/台指期貨與美股的實質 Beta 曝險（臺指期貨曝險現為名目合約總值：口數 × 指數點 × 乘數）。
 
-`price` 是原幣報價（臺指期是指數點，美股是美元）。`market_value` 與 `pnl` 是台幣：分別對應第四頁的「即時市值(台幣)」與「淨未實現損益(原幣) × 換算匯率」。股票損益已含 0.3% 證交稅估算，不會再從淨值扣一次。期貨市值是佔用保證金加未實現損益。
+### 槓桿與 Beta 的口徑（1.3.0）
+
+| 名詞 | 定義 |
+|---|---|
+| 名目曝險 | 現股／ETF＝市值 × 槓桿倍數（SOXL 3、MUU 2、00663L 2、一般股票 1）；期貨＝報價 × 乘數 × 口數；選擇權＝\|Delta × 口數 × 乘數 × 標的價\| |
+| Beta | 套在名目曝險上的 Beta。槓桿 ETF＝**標的**一年 Beta（SOXL→SOXX 對 S&P 500；台股槓桿 ETF 對加權指數定義 1）；一般股票＝自身一年 Beta；臺指期＝1 |
+| Beta 曝險 | Σ(名目曝險 × Beta)。等於 市值 × (槓桿 × 標的 Beta)，**槓桿只乘一次** |
+| 槓桿 | 名目曝險 ÷ 淨值 |
+| 部位平均 Beta | Beta 曝險 ÷ 名目曝險 |
+| 帳戶 Beta | Beta 曝險 ÷ 淨值＝槓桿 × 部位平均 Beta |
+
+`beta_leverage.tw`／`.us`／`.total` 各有 `notional_exposure`、`beta_exposure`、`nav`、`leverage`、`avg_beta`、`account_beta`。台股＋美股＝合計（名目曝險、Beta 曝險、淨值都可直接相加）。
+
+舊欄位對照：`exposure`＝`beta_leverage.total.notional_exposure`、`leverage`＝`beta_leverage.total.leverage`、`beta`／`total_beta`＝`beta_leverage.total.account_beta`、`tw_beta`／`us_beta`＝分區帳戶 Beta。**`tw_exposure`／`us_exposure` 一直是 Beta 曝險，不是名目曝險**，所以兩者相加不等於 `exposure`；要對名目曝險請用 `beta_leverage.tw.notional_exposure` 與 `beta_leverage.us.notional_exposure`。
+
+部位層新增：`equity_value`（計入淨值的價值；期貨＝保證金＋未實現損益）、`leverage`、`notional_exposure`、`underlying`、`underlying_beta`、`beta`（套在名目上）、`effective_beta`（套在市值上＝槓桿 × 標的 Beta）、`beta_exposure`、`beta_source`。
+
+`price` 是原幣報價（臺指期是指數點，美股是美元）。`market_value` 與 `pnl` 是台幣：分別對應第四頁的「即時市值(台幣)」與「淨未實現損益(原幣) × 換算匯率」。股票損益已含 0.3% 證交稅估算，不會再從淨值扣一次。1.3.0 起期貨 `market_value` 是名目市值（報價 × 乘數 × 口數），舊的「保證金加未實現損益」改放 `equity_value`。
 
 `yuanta_futures.equity` 是元大期貨權益數＝本日餘額（`cash_ledger`）＋期貨未實現損益（期交所即時／夜盤價）。本日餘額與第四頁同一條：有 `Futures_Ledger` 校正點就自動推算（校正餘額＋校正日之後的 `Trade_Log` 已實現損益−手續費−期交稅±出入金）；分頁或校正點缺少時退回 Active_Positions 元大期貨現金欄（目前是 B7）；現金欄也無效才用備援 168308。欄位格式見 [`futures_ledger.md`](futures_ledger.md)。
 
@@ -67,7 +84,7 @@ X-API-Key: <READONLY_API_KEY>
 
 ```json
 {
-  "schema_version": "1.2.0",
+  "schema_version": "1.3.0",
   "as_of": "2026-10-29T22:00:00+08:00",
   "currency": "TWD",
   "usdtwd": 30.0,

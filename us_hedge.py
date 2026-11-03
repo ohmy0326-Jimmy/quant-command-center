@@ -109,6 +109,7 @@ def us_spx_exposure(snapshot: Snapshot, beta_fn: Callable | None = None, overrid
     """計算美股部位對 S&P 500 的實質曝險。"""
     rows = []
     exposure_twd = 0.0
+    notional_twd = 0.0
     fallback_rows = []
 
     if snapshot.valued is not None and not snapshot.valued.empty:
@@ -120,8 +121,14 @@ def us_spx_exposure(snapshot: Snapshot, beta_fn: Callable | None = None, overrid
             ticker = str(row.get("標的", "")).upper()
             name = str(row.get("名稱", ""))
             mv_twd = _num(row.get("即時市值(台幣)"), 0.0)
-            lev = _num(row.get("標的槓桿"), 1.0)
+            lev = _num(row.get("採用槓桿"), None)
+            if lev is None:
+                lev = _num(row.get("標的槓桿"), 1.0)
+            notional = _num(row.get("實質曝險(台幣)"), None)
+            if notional is None:
+                notional = mv_twd * lev
             exposure = _num(row.get("Beta曝險(台幣)"), 0.0)
+            notional_twd += notional
             
             eff_beta = _num(row.get("有效Beta"), None)
             u = str(row.get("標的代號", ""))
@@ -145,6 +152,7 @@ def us_spx_exposure(snapshot: Snapshot, beta_fn: Callable | None = None, overrid
                 "beta_source": src,
                 "eff_beta": eff_beta,
                 "exposure_twd": exposure,
+                "notional_twd": notional,
                 "method": method,
             })
 
@@ -159,6 +167,9 @@ def us_spx_exposure(snapshot: Snapshot, beta_fn: Callable | None = None, overrid
         "page4_us_exposure": float(snapshot.metrics.get("us_exposure", 0.0)),
         "us_nav": us_nav,
         "us_beta_spx": (exposure_twd / us_nav) if us_nav > 0 else 0.0,
+        "notional_twd": notional_twd,
+        "us_leverage": (notional_twd / us_nav) if us_nav > 0 else 0.0,
+        "us_avg_beta": (exposure_twd / notional_twd) if notional_twd > 0 else 0.0,
         "fallback_rows": fallback_rows,
     }
 

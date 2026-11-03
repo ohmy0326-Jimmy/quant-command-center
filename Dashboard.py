@@ -17,6 +17,7 @@ from app_secrets import read_secret
 from macro_cycle_ui import render_macro_cycle_page
 from order_assistant_ui import render_order_assistant
 from beta_rules import BETA_FALLBACK_STATE_KEY
+from beta_leverage_ui import render_beta_leverage_table
 from portfolio_risk import (
     attach_quotes,
     coerce_ticker_kind_pairs,
@@ -773,6 +774,8 @@ elif page == "第四頁：部位監控與量化風控":
                 b_col1.metric("台股 Beta", f"{metrics['tw_beta']:.2f}", f"TW 淨值: NT$ {metrics['tw_nav']:,.0f}")
                 b_col2.metric("美股 Beta", f"{metrics['us_beta']:.2f}", f"US 淨值: NT$ {metrics['us_nav']:,.0f}")
                 b_col3.metric("總 Beta", f"{metrics['total_beta']:.2f}", neutrality_status)
+                # 槓桿＝名目曝險÷淨值；部位平均 Beta＝Σ(曝險×Beta)÷曝險；帳戶 Beta＝Σ(曝險×Beta)÷淨值
+                render_beta_leverage_table(st, metrics)
 
                 if metrics.get("expired_removed"):
                     st.info(f"ℹ️ 已自動過期排除之選擇權標的：{', '.join(metrics['expired_removed'])}")
@@ -861,22 +864,22 @@ elif page == "第四頁：部位監控與量化風控":
                 base_cols = ['帳戶', '產業別', '種類', '標的', '名稱', 'Beta值', '有效Beta', 'Beta來源', '真實風險權重 (%)', '標的槓桿', '持有數量', '平均成本', '即時報價']
                 if '報價來源' in df.columns:
                     base_cols.append('報價來源')
-                base_cols.extend(['顯示_投入總金額(原幣)', '顯示_即時市值(原幣)', '淨未實現損益(原幣)', '報酬率 (%)', '最大虧損比例'])
+                base_cols.extend(['顯示_投入總金額(原幣)', '顯示_即時市值(原幣)', '實質曝險(台幣)', '曝險Beta', 'Beta曝險(台幣)', '淨未實現損益(原幣)', '報酬率 (%)', '最大虧損比例'])
                 cols = [c for c in base_cols if c in df.columns]
                 display_df = df[cols].copy()
-                display_df.rename(columns={'顯示_投入總金額(原幣)': '投入總金額', '顯示_即時市值(原幣)': '即時市值(原幣)', '淨未實現損益(原幣)': '淨損益(原幣)'}, inplace=True)
+                display_df.rename(columns={'顯示_投入總金額(原幣)': '投入總金額', '顯示_即時市值(原幣)': '即時市值(原幣)', '淨未實現損益(原幣)': '淨損益(原幣)', '實質曝險(台幣)': '名目曝險(台幣)'}, inplace=True)
                 display_df['最大虧損比例'] = display_df['最大虧損比例'].apply(lambda x: f"{x:.0f}%" if x > -100 else "未設定")
 
                 st.dataframe(display_df.style.format({
                     "Beta值": "{:.2f}", "有效Beta": "{:.2f}", "真實風險權重 (%)": "{:.2f}%", "標的槓桿": "{:.1f}x", "持有數量": "{:,.0f}",
                     "平均成本": "{:,.2f}", "即時報價": "{:,.2f}", "投入總金額": "{:,.0f}",
-                    "即時市值(原幣)": "{:,.0f}", "淨損益(原幣)": "{:,.0f}", "報酬率 (%)": "{:+.2f}%"
+                    "即時市值(原幣)": "{:,.0f}", "名目曝險(台幣)": "{:,.0f}", "曝險Beta": "{:.2f}", "Beta曝險(台幣)": "{:,.0f}", "淨損益(原幣)": "{:,.0f}", "報酬率 (%)": "{:+.2f}%"
                 }, precision=2), use_container_width=True, hide_index=True)
 
                 if metrics.get("beta_fallbacks_used"):
                     names = "、".join(f"{item.get('標的')}（{item.get('Beta來源')}）" for item in metrics["beta_fallbacks_used"])
                     st.warning(f"以下持倉抓不到標的即時一年 Beta，暫用預設值：{names}。預設值可在第六頁「下單輔助系統」→「新標的才需要改：Beta、槓桿、產業」修改。")
-                st.caption("Beta值＝這檔自己的一年 Beta；有效Beta＝計入 Beta 曝險的數字（槓桿 ETF＝槓桿 × 標的一年 Beta，對 S&P 500 或加權指數）。")
+                st.caption("Beta值＝這檔自己的一年 Beta；有效Beta＝套在市值上的 Beta（槓桿 ETF＝槓桿 × 標的一年 Beta，對 S&P 500 或加權指數）；曝險Beta＝套在名目曝險上的 Beta（槓桿 ETF＝標的一年 Beta）。Beta曝險＝名目曝險 × 曝險Beta＝市值 × 有效Beta，槓桿只乘一次。期貨的即時市值是名目市值（報價 × 乘數 × 口數），不是未實現損益。")
 
             st.markdown("---")
             st.subheader("🤖 AI 避險基金經理人即時壓力測試與風控審查")
