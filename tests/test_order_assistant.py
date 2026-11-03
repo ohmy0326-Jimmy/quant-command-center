@@ -65,27 +65,57 @@ class ValuationTests(unittest.TestCase):
         tw = valued[valued["標的"] == "2330"].iloc[0]
         self.assertAlmostEqual(tw["淨未實現損益(原幣)"], 9670.0, places=6)
         self.assertAlmostEqual(tw["即時市值(台幣)"], 110000.0, places=6)
-        # nav = 50000 + 110000 + 7500 - 10000 + 370422 = 527922
-        self.assertAlmostEqual(metrics["nav"], 527922.0, places=6)
+        # nav = 50000 + 110000 + 7500 - 10000 + 368308 = 525808
+        self.assertAlmostEqual(metrics["nav"], 525808.0, places=6)
         # exposure = 2330 (110k) + SOXL (7.5k*3=22.5k) + TX notional (1 * 21000 * 200 * 1 = 4.2M) = 4,332,500
         self.assertAlmostEqual(metrics["exposure"], 4_332_500.0, places=6)
-        self.assertAlmostEqual(metrics["leverage"], 4_332_500 / 527922, places=8)
+        self.assertAlmostEqual(metrics["leverage"], 4_332_500 / 525808, places=8)
         self.assertAlmostEqual(metrics["cash"], 50000.0, places=6)
         # tw_exp = 110,000 * 1.2 + 4,200,000 = 4,332,000; us_exp = 7,500 * 3 = 22,500
-        # total_beta = (4,332,000 + 22,500) / 527,922 = 4,354,500 / 527,922
-        self.assertAlmostEqual(metrics["beta"], 4_354_500 / 527922, places=8)
-        self.assertAlmostEqual(metrics["total_beta"], 4_354_500 / 527922, places=8)
-        self.assertAlmostEqual(metrics["margin_ratio"], 370422 / 538000 * 100, places=6)
+        # total_beta = (4,332,000 + 22,500) / 525,808 = 4,354,500 / 525,808
+        self.assertAlmostEqual(metrics["beta"], 4_354_500 / 525808, places=8)
+        self.assertAlmostEqual(metrics["total_beta"], 4_354_500 / 525808, places=8)
+        self.assertAlmostEqual(metrics["margin_ratio"], 368308 / 538000 * 100, places=6)
         self.assertTrue(metrics["margin_call"])
         self.assertAlmostEqual(metrics["futures_equity"], YUANTA_FUTURES_BASE_EQUITY + 200000, places=6)
         # 0.3% 稅只進損益欄，沒有從淨值再扣一次。
-        self.assertAlmostEqual(metrics["nav"], 50000 + 110000 + 7500 - 10000 + 370422, places=6)
+        self.assertAlmostEqual(metrics["nav"], 50000 + 110000 + 7500 - 10000 + 368308, places=6)
 
     def test_futures_account_without_positions_uses_base_equity(self):
-        accounts = pd.DataFrame([{"帳戶名稱": "元大期貨", "現金餘額": 999, "融資/質押借款": 0}])
+        accounts = pd.DataFrame([{"帳戶名稱": "元大期貨", "現金餘額": 0, "融資/質押借款": 0}])
         _valued, accounts_out, metrics = finalize_valuation(pd.DataFrame(), accounts, 32)
         self.assertAlmostEqual(accounts_out.iloc[0]["帳戶淨值"], YUANTA_FUTURES_BASE_EQUITY, places=6)
         self.assertAlmostEqual(metrics["nav"], YUANTA_FUTURES_BASE_EQUITY, places=6)
+
+    def test_futures_account_uses_sheet_cash_ledger(self):
+        accounts = pd.DataFrame([{"帳戶名稱": "元大期貨", "現金餘額": 999, "融資/質押借款": 0}])
+        _valued, accounts_out, metrics = finalize_valuation(pd.DataFrame(), accounts, 32)
+        self.assertAlmostEqual(accounts_out.iloc[0]["帳戶淨值"], 999.0, places=6)
+        self.assertAlmostEqual(metrics["nav"], 999.0, places=6)
+
+    def test_yuanta_broker_reconciliation(self):
+        positions = pd.DataFrame(
+            [
+                _stock("元大期貨", "台股期貨", "FMF", 2, 46733, 45185, lev=1, beta=1, sector="微台指"),
+            ]
+        )
+        accounts = pd.DataFrame(
+            [
+                {"帳戶名稱": "元大期貨", "現金餘額": 168308, "融資/質押借款": 0},
+            ]
+        )
+        valued, accounts_out, metrics = finalize_valuation(positions, accounts, usdtwd=30.0)
+        self.assertAlmostEqual(accounts_out.iloc[0]["帳戶淨值"], 137348.0, places=6)
+        self.assertAlmostEqual(metrics["futures_initial"], 70100.0, places=6)
+        self.assertAlmostEqual(metrics["futures_maint"], 53800.0, places=6)
+        self.assertAlmostEqual(metrics["excess_margin"], 67248.0, places=6)
+        self.assertAlmostEqual(accounts_out.iloc[0]["權益比率%/現金水位%"], round(137348 / 70100 * 100, 1), places=6)
+        self.assertAlmostEqual(metrics["risk_indicator"], 137348 / 70100 * 100, places=6)
+        self.assertAlmostEqual(metrics["margin_call_distance"], 137348 - 53800, places=6)
+        self.assertAlmostEqual(metrics["margin_call_points"], (137348 - 53800) / 20.0, places=6)
+        self.assertAlmostEqual(metrics["futures_cash_ledger"], 168308.0, places=6)
+        self.assertAlmostEqual(accounts_out.iloc[0]["現金餘額"], 168308.0, places=6)
+        self.assertAlmostEqual(metrics["cash"], 67248.0, places=6)
 
 
 class OrderImpactTests(unittest.TestCase):
@@ -288,19 +318,19 @@ class SpecificationRefinementTests(unittest.TestCase):
             ]
         )
         # 台股戶: cash 100k + stock 200k = 300k NAV
-        # 元大期貨: 170422 base equity NAV
+        # 元大期貨: 168308 base equity NAV
         # 美股戶: cash 50k + stock 100*100*30=300k = 350k NAV
-        # tw_nav = 300,000 + 170,422 = 470,422
+        # tw_nav = 300,000 + 168,308 = 468,308
         # us_nav = 350,000
-        # nav = 820,422
+        # nav = 818,308
         _valued, _acc, metrics = finalize_valuation(positions, accounts, usdtwd=30.0)
-        self.assertAlmostEqual(metrics["tw_nav"], 470422.0, places=6)
+        self.assertAlmostEqual(metrics["tw_nav"], 468308.0, places=6)
         self.assertAlmostEqual(metrics["us_nav"], 350000.0, places=6)
-        self.assertAlmostEqual(metrics["nav"], 820422.0, places=6)
+        self.assertAlmostEqual(metrics["nav"], 818308.0, places=6)
         self.assertAlmostEqual(metrics["tw_nav"] + metrics["us_nav"], metrics["nav"], places=6)
-        self.assertAlmostEqual(metrics["tw_beta"], 200000 / 470422, places=6)
+        self.assertAlmostEqual(metrics["tw_beta"], 200000 / 468308, places=6)
         self.assertAlmostEqual(metrics["us_beta"], 450000 / 350000, places=6)
-        self.assertAlmostEqual(metrics["total_beta"], 650000 / 820422, places=6)
+        self.assertAlmostEqual(metrics["total_beta"], 650000 / 818308, places=6)
 
     def test_parse_expiry_formats(self):
         from portfolio_risk import parse_expiry

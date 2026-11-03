@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.1.0",
+  "schema_version": "1.2.0",
   "header": "X-API-Key",
   "models": {
     "health": {
@@ -7,7 +7,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.1.0"
+            "1.2.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -110,14 +110,39 @@
           "additionalProperties": false,
           "properties": {
             "equity": {
-              "description": "元大期貨權益，台幣。基期 170422 再加未實現損益，與第四頁相同。",
+              "description": "元大期貨權益數，台幣。本日餘額（試算表現金欄，空白時用 168308）加期貨未實現損益（期交所報價）。",
               "title": "Equity",
+              "type": "number"
+            },
+            "cash_ledger": {
+              "default": 0.0,
+              "description": "元大期貨本日餘額（現金賬）。",
+              "title": "Cash Ledger",
+              "type": "number"
+            },
+            "initial_margin": {
+              "default": 0.0,
+              "description": "原始保證金總額，台幣。",
+              "title": "Initial Margin",
               "type": "number"
             },
             "maintenance_margin": {
               "description": "維持保證金合計，台幣。",
               "title": "Maintenance Margin",
               "type": "number"
+            },
+            "risk_indicator_pct": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "權益比率＝權益數 ÷ 原始保證金 × 100。",
+              "title": "Risk Indicator Pct"
             },
             "margin_ratio_pct": {
               "anyOf": [
@@ -132,9 +157,28 @@
               "title": "Margin Ratio Pct"
             },
             "excess_margin": {
-              "description": "期貨帳戶現金餘額（權益高於維持保證金的部分）。",
+              "description": "可動用保證金＝權益數−原始保證金（可為負）。",
               "title": "Excess Margin",
               "type": "number"
+            },
+            "margin_call_distance": {
+              "default": 0.0,
+              "description": "距追繳金額＝權益數 − 維持保證金（低於維持保證金時為負）。",
+              "title": "Margin Call Distance",
+              "type": "number"
+            },
+            "margin_call_points": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "距追繳點數＝距追繳金額 ÷ 臺指期每點市值總合。無期貨部位時為 null。",
+              "title": "Margin Call Points"
             },
             "margin_call": {
               "description": "權益低於維持保證金時為 true。",
@@ -157,7 +201,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.1.0"
+            "1.2.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -277,7 +321,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.1.0"
+            "1.2.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -324,7 +368,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.1.0"
+            "1.2.0"
           ],
           "title": "Schema Version",
           "type": "string"

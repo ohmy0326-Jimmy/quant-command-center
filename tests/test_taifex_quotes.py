@@ -60,6 +60,34 @@ class TestTaifexQuotes(TestCase):
         self.assertEqual(q.source, "TAIFEX")
         self.assertFalse(q.is_fallback)
 
+    def test_option_expiry_date(self):
+        def mock_post(url, json=None, headers=None, timeout=None):
+            m = MagicMock()
+            m.status_code = 200
+            m.json.return_value = {
+                "RtCode": "0",
+                "RtData": {
+                    "Items": [
+                        {"item": "202611W1", "dispName": "202611W1(2026/11/04)"},
+                        {"item": "202611", "dispName": "202611(2026/11/18)"},
+                    ]
+                },
+            }
+            return m
+
+        taifex_quotes._http_post = mock_post
+        d1 = taifex_quotes.option_expiry_date("202611W1")
+        self.assertEqual(d1, date(2026, 11, 4))
+
+        taifex_quotes._http_post = lambda *args, **kwargs: None
+        taifex_quotes.clear_cache()
+
+        self.assertEqual(taifex_quotes.option_expiry_date("202611"), date(2026, 11, 18))
+        self.assertEqual(taifex_quotes.option_expiry_date("202611W1"), date(2026, 11, 4))
+        self.assertEqual(taifex_quotes.option_expiry_date("202611F1"), date(2026, 11, 6))
+        self.assertEqual(taifex_quotes.option_expiry_date("202612W2"), date(2026, 12, 9))
+        self.assertIsNone(taifex_quotes.option_expiry_date("invalid_expiry"))
+
     def test_day_quote_newer(self):
         def mock_post(url, json=None, headers=None, timeout=None):
             m = MagicMock()

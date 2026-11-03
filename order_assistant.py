@@ -14,11 +14,11 @@ import pandas as pd
 from portfolio_risk import (
     FUTURES_MARGIN,
     STOCK_TAX_RATE,
-    YUANTA_FUTURES_BASE_EQUITY,
     _futures_margin_row,
     finalize_valuation,
     futures_multiplier,
     is_taiex_future,
+    yuanta_cash_ledger,
 )
 
 TXO_MULTIPLIER = 50.0  # 台指選擇權每點新台幣
@@ -994,7 +994,7 @@ def taiex_shock_state(snapshot: Snapshot, move: float, book=None) -> dict:
                 futures_maint += sum(maint for _pnl, _mv, _fx, maint in subset)
             else:
                 contrib = 0.0
-            equity = YUANTA_FUTURES_BASE_EQUITY + contrib
+            equity = yuanta_cash_ledger(account["cash"]) + contrib
             futures_equity += equity
             nav += equity
         else:

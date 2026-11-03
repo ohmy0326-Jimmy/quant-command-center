@@ -529,6 +529,57 @@ def list_option_expiries(cid: str = "TXO") -> list[str]:
     return [val for _key, _idx, val in expiries]
 
 
+def option_expiry_date(expiry: str, cid: str = "TXO") -> date | None:
+    if not expiry or not isinstance(expiry, str):
+        return None
+    expiry = expiry.strip()
+    try:
+        body = {"SymbolType": "O", "KindID": "1", "CID": cid, "MarketType": "0"}
+        rt = _post("getCmdyMonthDDLItemByKind", body, ttl=SYMBOL_CACHE_TTL_SECONDS)
+        if rt and isinstance(rt, dict):
+            items = rt.get("Items", [])
+            for item in items:
+                if str(item.get("item", "")).strip() == expiry:
+                    disp = str(item.get("dispName", ""))
+                    m = re.search(r"(\d{4})/(\d{2})/(\d{2})", disp)
+                    if m:
+                        return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except Exception:
+        pass
+
+    try:
+        mw = re.match(r"^(\d{4})(\d{2})W(\d)$", expiry)
+        if mw:
+            return _nth_weekday(int(mw.group(1)), int(mw.group(2)), 2, int(mw.group(3)))
+
+        mf = re.match(r"^(\d{4})(\d{2})F(\d)$", expiry)
+        if mf:
+            return _nth_weekday(int(mf.group(1)), int(mf.group(2)), 4, int(mf.group(3)))
+
+        mm = re.match(r"^(\d{4})(\d{2})$", expiry)
+        if mm:
+            return _nth_weekday(int(mm.group(1)), int(mm.group(2)), 2, 3)
+    except Exception:
+        pass
+
+    return None
+
+
+def _nth_weekday(year: int, month: int, target_weekday: int, n: int) -> date | None:
+    if n < 1:
+        return None
+    try:
+        first = date(year, month, 1)
+        offset = (target_weekday - first.weekday()) % 7
+        day = 1 + offset + (n - 1) * 7
+        d = date(year, month, day)
+        if d.month != month:
+            return None
+        return d
+    except ValueError:
+        return None
+
+
 def get_option_quote(
     strike: float,
     call_put: str,
