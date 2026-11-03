@@ -117,6 +117,97 @@ class ValuationTests(unittest.TestCase):
         self.assertAlmostEqual(accounts_out.iloc[0]["現金餘額"], 168308.0, places=6)
         self.assertAlmostEqual(metrics["cash"], 67248.0, places=6)
 
+    def test_option_row_gets_no_futures_margin(self):
+        positions = pd.DataFrame(
+            [
+                {
+                    "帳戶": "元大期貨",
+                    "種類": "台股期貨",
+                    "標的": "FMF",
+                    "名稱": "FMF",
+                    "持有數量": 2,
+                    "平均成本": 46733,
+                    "投入總金額": 0,
+                    "最大虧損比例": -100,
+                    "標的槓桿": 1.0,
+                    "即時報價": 45185,
+                    "Beta值": 1.0,
+                    "產業別": "微台指",
+                    "合約乘數": math.nan,
+                },
+                {
+                    "帳戶": "元大期貨",
+                    "種類": "台指選擇權",
+                    "標的": "TXO202611W1C45000",
+                    "名稱": "TXO 202611W1 C 45000",
+                    "持有數量": 1,
+                    "平均成本": 100,
+                    "投入總金額": 5000,
+                    "最大虧損比例": -100,
+                    "標的槓桿": 1.0,
+                    "即時報價": 120,
+                    "Beta值": 1.0,
+                    "產業別": "其他",
+                    "合約乘數": 50,
+                },
+            ]
+        )
+        accounts = pd.DataFrame(
+            [
+                {"帳戶名稱": "元大期貨", "現金餘額": 168308, "融資/質押借款": 0},
+            ]
+        )
+        valued, accounts_out, metrics = finalize_valuation(positions, accounts, usdtwd=30.0)
+        self.assertAlmostEqual(accounts_out.iloc[0]["原始保證金總額"], 70100.0, places=6)
+        self.assertAlmostEqual(accounts_out.iloc[0]["維持保證金總額"], 53800.0, places=6)
+        expected_nav = 168308 + (45185 - 46733) * 20 + 120 * 1 * 50
+        self.assertAlmostEqual(accounts_out.iloc[0]["帳戶淨值"], expected_nav, places=6)
+
+    def test_option_no_quote_label_surfaces(self):
+        positions = pd.DataFrame(
+            [
+                {
+                    "帳戶": "元大期貨",
+                    "種類": "台股期貨",
+                    "標的": "FMF",
+                    "名稱": "FMF",
+                    "持有數量": 2,
+                    "平均成本": 46733,
+                    "投入總金額": 0,
+                    "最大虧損比例": -100,
+                    "標的槓桿": 1.0,
+                    "即時報價": 45185,
+                    "Beta值": 1.0,
+                    "產業別": "微台指",
+                    "合約乘數": math.nan,
+                    "報價來源": "TAIFEX 微臺指期 TMFL6-M 夜盤 19:35 成交價 45,185",
+                },
+                {
+                    "帳戶": "元大期貨",
+                    "種類": "台指選擇權",
+                    "標的": "TXO202611W1C45000",
+                    "名稱": "TXO 202611W1 C 45000",
+                    "持有數量": 1,
+                    "平均成本": 100,
+                    "投入總金額": 5000,
+                    "最大虧損比例": -100,
+                    "標的槓桿": 1.0,
+                    "即時報價": 120,
+                    "Beta值": 1.0,
+                    "產業別": "其他",
+                    "合約乘數": 50,
+                    "報價來源": "無報價，暫用成本價",
+                },
+            ]
+        )
+        accounts = pd.DataFrame(
+            [
+                {"帳戶名稱": "元大期貨", "現金餘額": 168308, "融資/質押借款": 0},
+            ]
+        )
+        valued, accounts_out, metrics = finalize_valuation(positions, accounts, usdtwd=30.0)
+        self.assertIn("無報價，暫用成本價", metrics["futures_price_labels"])
+
 
 class OrderImpactTests(unittest.TestCase):
     def _book(self):

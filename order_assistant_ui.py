@@ -148,9 +148,9 @@ def _public_error(exc: Exception) -> str:
 def _load_live(load_sheets, beta_fn, load_market=None):
     accounts, _nav_hist, quant = load_sheets()
     raw = normalize_positions(quant)
-    tickers = tuple(raw["標的"].tolist()) if not raw.empty and "標的" in raw.columns else tuple()
+    pairs = tuple(dict.fromkeys(zip(raw["標的"].astype(str), raw["種類"].astype(str) if "種類" in raw.columns else [""] * len(raw)))) if not raw.empty and "標的" in raw.columns else tuple()
     if load_market is not None:
-        usdtwd, twii, prices, betas, sectors = load_market(tickers)
+        usdtwd, twii, prices, betas, sectors = load_market(pairs)
     else:
         usdtwd = fetch_usdtwd()
         twii = fetch_twii()

@@ -163,7 +163,8 @@ def load_market_for_page6(tickers: tuple):
     usdtwd = cached_usdtwd()
     if not tickers:
         return usdtwd, cached_twii(), {}, {}, {}
-    bundle = cached_quote_bundle(tuple((t, "") for t in dict.fromkeys(tickers)))
+    pairs = tuple(dict.fromkeys((t, "") if isinstance(t, str) else (str(t[0]), str(t[1])) for t in tickers))
+    bundle = cached_quote_bundle(pairs)
     return usdtwd, bundle["twii"], bundle["prices"], bundle["betas"], bundle["sectors"]
 
 

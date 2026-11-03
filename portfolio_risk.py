@@ -569,7 +569,8 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
         df["維持保證金(原幣)"] = 0.0
 
         for idx, row in df.iterrows():
-            if "期" in str(row["種類"]):
+            if "期" in str(row["種類"]) and not is_option_row(row):
+                # 賣方選擇權保證金未計入（TODO）
                 occupied, maint = _futures_margin_row(str(row["標的"]), abs(float(row["持有數量"])), abs(float(row["名目合約總值(原幣)"])))
                 df.at[idx, "實質佔用本金(原幣)"] = occupied
                 df.at[idx, "維持保證金(原幣)"] = maint
@@ -748,7 +749,8 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
             taiex_lots_mult = 0.0
 
             if not subset.empty:
-                fut_sub = subset[subset["種類"].astype(str).str.contains("期", na=False)]
+                # 賣方選擇權保證金未計入（TODO）
+                fut_sub = subset[[("期" in str(r["種類"])) and not is_option_row(r) for _, r in subset.iterrows()]]
                 if not fut_sub.empty:
                     initial_m = float(fut_sub["實質佔用本金(原幣)"].sum())
                     maint_m = float(fut_sub["維持保證金(原幣)"].sum())
@@ -909,7 +911,7 @@ def _metrics_from_frames(
     metrics["beta"] = total_beta
 
     if not df.empty and "報價來源" in df.columns:
-        fut_rows = df[df["種類"].astype(str).str.contains("期", na=False)]
+        fut_rows = df[[("期" in str(r["種類"]) or is_option_row(r)) for _, r in df.iterrows()]]
         if not fut_rows.empty:
             raw_labels = fut_rows["報價來源"].astype(str).tolist()
             metrics["futures_price_labels"] = list(dict.fromkeys([l for l in raw_labels if l and l != "nan"]))
