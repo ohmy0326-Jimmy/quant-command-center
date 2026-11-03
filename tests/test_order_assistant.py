@@ -4,8 +4,10 @@ import math
 from datetime import date
 import os
 import unittest
+from unittest.mock import patch
 
 import pandas as pd
+import portfolio_risk
 
 from order_assistant import (
     Rules,
@@ -207,6 +209,15 @@ class ValuationTests(unittest.TestCase):
         )
         valued, accounts_out, metrics = finalize_valuation(positions, accounts, usdtwd=30.0)
         self.assertIn("無報價，暫用成本價", metrics["futures_price_labels"])
+
+    def test_us_option_keeps_yahoo_quote_not_taifex(self):
+        with patch("taifex_quotes.get_option_quote") as taifex_opt, patch("portfolio_risk._fetch_yahoo_price", return_value=1.23):
+            _t, price, _b, _s, extras = portfolio_risk._quote_one_ex(
+                "MUU261030C00045000", 23000.0, lambda t, tw: (1.0, "其他"), kind="美股選擇權"
+            )
+        taifex_opt.assert_not_called()
+        self.assertAlmostEqual(price, 1.23, places=6)
+        self.assertNotIn("無報價", extras.get("報價來源", ""))
 
 
 class OrderImpactTests(unittest.TestCase):

@@ -350,31 +350,27 @@ def _quote_one_ex(ticker: str, twii_price: float, beta_fn, kind: str = ""):
         kind_str = str(kind)
         is_opt = is_option_row({"種類": kind_str, "名稱": ticker, "標的": ticker})
 
-        parsed_opt = taifex_quotes.parse_txo_symbol(ticker)
-        if parsed_opt is not None or (is_opt and t_upper.startswith("TXO")):
-            if parsed_opt is None:
-                parsed_opt = taifex_quotes.parse_txo_symbol(t_upper)
+        parsed_opt = taifex_quotes.parse_txo_symbol(ticker) if "美" not in kind_str else None
+        if parsed_opt is not None:
+            opt_q = taifex_quotes.get_option_quote(parsed_opt["strike"], parsed_opt["call_put"], expiry=parsed_opt.get("expiry"))
+            price = opt_q.price if (opt_q and opt_q.price is not None) else np.nan
+            extras["報價來源"] = opt_q.label if (opt_q and opt_q.price is not None) else "無報價，暫用成本價"
+            extras["合約乘數"] = opt_q.multiplier if opt_q else 50.0
 
-            if parsed_opt is not None:
-                opt_q = taifex_quotes.get_option_quote(parsed_opt["strike"], parsed_opt["call_put"], expiry=parsed_opt.get("expiry"))
-                price = opt_q.price if (opt_q and opt_q.price is not None) else np.nan
-                extras["報價來源"] = opt_q.label if (opt_q and opt_q.price is not None) else "無報價，暫用成本價"
-                extras["合約乘數"] = opt_q.multiplier if opt_q else 50.0
+            tx_q = taifex_quotes.get_futures_quote("TX", fallback_price=twii_price)
+            und_px = tx_q.price if (tx_q and tx_q.price is not None) else twii_price
+            extras["標的現價"] = und_px
 
-                tx_q = taifex_quotes.get_futures_quote("TX", fallback_price=twii_price)
-                und_px = tx_q.price if (tx_q and tx_q.price is not None) else twii_price
-                extras["標的現價"] = und_px
+            if pd.notna(price) and price is not None and parsed_opt.get("expiry"):
+                exp_date = taifex_quotes.option_expiry_date(parsed_opt["expiry"])
+                if exp_date:
+                    delta = taifex_quotes.option_delta_from_quote(price, und_px, parsed_opt["strike"], exp_date, parsed_opt["call_put"])
+                    if delta is not None:
+                        extras["Delta"] = delta
+                        extras["Delta來源"] = "估算(Black-76)"
 
-                if pd.notna(price) and price is not None and parsed_opt.get("expiry"):
-                    exp_date = taifex_quotes.option_expiry_date(parsed_opt["expiry"])
-                    if exp_date:
-                        delta = taifex_quotes.option_delta_from_quote(price, und_px, parsed_opt["strike"], exp_date, parsed_opt["call_put"])
-                        if delta is not None:
-                            extras["Delta"] = delta
-                            extras["Delta來源"] = "估算(Black-76)"
-
-                b_val, s_val = 1.0, DETAILED_SECTOR_MAP.get("TX", "台指選擇權")
-                return ticker, price, b_val, s_val, extras
+            b_val, s_val = 1.0, DETAILED_SECTOR_MAP.get("TX", "台指選擇權")
+            return ticker, price, b_val, s_val, extras
 
         if t_upper in TAIEX_FUTURES:
             fut_q = taifex_quotes.get_futures_quote(t_upper, fallback_price=twii_price)
@@ -911,7 +907,7 @@ def _metrics_from_frames(
     metrics["beta"] = total_beta
 
     if not df.empty and "報價來源" in df.columns:
-        fut_rows = df[[("期" in str(r["種類"]) or is_option_row(r)) for _, r in df.iterrows()]]
+        fut_rows = df[[("期" in str(r["種類"]) or is_option_row(r)) and "美" not in str(r["種類"]) for _, r in df.iterrows()]]
         if not fut_rows.empty:
             raw_labels = fut_rows["報價來源"].astype(str).tolist()
             metrics["futures_price_labels"] = list(dict.fromkeys([l for l in raw_labels if l and l != "nan"]))

@@ -15,6 +15,23 @@ class TestTaifexQuotes(TestCase):
     def tearDown(self):
         taifex_quotes.clear_cache()
 
+    def test_parse_txo_symbol(self):
+        self.assertIsNone(taifex_quotes.parse_txo_symbol("MUU261030C00045000"))
+        self.assertIsNone(taifex_quotes.parse_txo_symbol("SNXX261030C00020000"))
+        self.assertIsNone(taifex_quotes.parse_txo_symbol("AAPL"))
+
+        res1 = taifex_quotes.parse_txo_symbol("TXO202611W1C45000")
+        self.assertEqual(res1, {"expiry": "202611W1", "call_put": "C", "strike": 45000.0})
+
+        res2 = taifex_quotes.parse_txo_symbol("TXO 202611W1 C 45000")
+        self.assertEqual(res2, {"expiry": "202611W1", "call_put": "C", "strike": 45000.0})
+
+        res3 = taifex_quotes.parse_txo_symbol("TXO-202612-P-22000")
+        self.assertEqual(res3, {"expiry": "202612", "call_put": "P", "strike": 22000.0})
+
+        res4 = taifex_quotes.parse_txo_symbol("台指 202611 買權 45000")
+        self.assertEqual(res4, {"expiry": "202611", "call_put": "C", "strike": 45000.0})
+
     def test_night_quote_newer_than_day(self):
         def mock_post(url, json=None, headers=None, timeout=None):
             m = MagicMock()

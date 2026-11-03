@@ -756,9 +756,11 @@ def parse_txo_symbol(text: str) -> dict[str, Any] | None:
     if not text:
         return None
     s = text.upper().strip()
+    if not re.search(r"(?:TXO|TX[1-5U-Z]|台指)", s):
+        return None
     s = s.replace("CALL", "C").replace("PUT", "P").replace("買權", "C").replace("賣權", "P")
     m = re.search(
-        r"(?:TXO|TX[1-5U-Z])?[-_ ]*(\d{6}(?:[WF]\d)?)[-_ ]*([CP])[-_ ]*(\d+(?:\.\d+)?)",
+        r"(?:TXO|TX[1-5U-Z]|台指)?[-_ ]*(20\d{2}(?:0[1-9]|1[0-2])(?:[WF][1-5])?)[-_ ]*([CP])[-_ ]*(\d+(?:\.\d+)?)",
         s,
     )
     if not m:
