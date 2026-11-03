@@ -6,17 +6,40 @@
 
 from __future__ import annotations
 
+import math
 import os
 import re
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
 import requests
 import yfinance as yf
 
-# 第四頁寫死的元大期貨權益起算點（未實現損益另外加計）。
-# 下單輔助沿用同一個常數，試算結果才對得上第四頁。
-YUANTA_FUTURES_BASE_EQUITY = 170422.0
+import taifex_quotes
+
+# 元大期貨備援本日餘額（未含未平倉損益之現金帳頁面），最後確認日期 2026-11-02（來自元大 App）。
+YUANTA_FUTURES_BASE_EQUITY = 168308.0
+
+
+def yuanta_cash_ledger(value) -> float:
+    """元大期貨本日餘額 (cash ledger, 不含未平倉損益)。
+
+    若傳入有效正數則直接使用；否則（0、空值、負數、NaN）回退至 YUANTA_FUTURES_BASE_EQUITY。
+    """
+    if value is None:
+        return YUANTA_FUTURES_BASE_EQUITY
+    try:
+        if pd.isna(value):
+            return YUANTA_FUTURES_BASE_EQUITY
+        val = float(value)
+        if math.isnan(val) or math.isinf(val) or val <= 0:
+            return YUANTA_FUTURES_BASE_EQUITY
+        return val
+    except (ValueError, TypeError):
+        return YUANTA_FUTURES_BASE_EQUITY
+
 
 # (原始保證金, 維持保證金)，單位：TWD／口。數字來自第四頁。
 FUTURES_MARGIN = {
@@ -61,6 +84,7 @@ DETAILED_SECTOR_MAP = {
     "TX": "臺指期貨",
     "MTX": "小型臺指",
     "FMF": "微型臺指期",
+    "TMF": "微型臺指期",
 }
 
 
@@ -158,7 +182,7 @@ def market_beta_and_sector(ticker, is_tw: bool) -> tuple[float, str]:
         except Exception:
             refined_sector = "其他與衍生品"
 
-    if t_upper in ["TX", "MTX", "FMF"]:
+    if t_upper in TAIEX_FUTURES:
         return 1.0, str(refined_sector)
 
     try:
@@ -178,16 +202,94 @@ def market_beta_and_sector(ticker, is_tw: bool) -> tuple[float, str]:
         return 1.0, str(refined_sector)
 
 
-def normalize_positions(quant_data: pd.DataFrame) -> pd.DataFrame:
+def is_option_row(row) -> bool:
+    kind = str(row.get("種類", "")).lower()
+    if any(k in kind for k in ("選擇權", "期權", "option")):
+        return True
+    name = str(row.get("名稱", "")).lower()
+    if any(k in name for k in ("call", "put", "買權", "賣權")):
+        return True
+    return False
+
+
+def parse_expiry(row) -> date | None:
+    expiry_cols = ("到期日", "到期日期", "到期", "Expiry", "Expiration", "expiry", "expiration")
+    for col in expiry_cols:
+        if col in row and pd.notna(row[col]):
+            val = row[col]
+            if str(val).strip():
+                try:
+                    num = float(val)
+                    if 30000 < num < 100000:
+                        return (pd.Timestamp("1899-12-30") + pd.Timedelta(days=num)).date()
+                except (ValueError, TypeError):
+                    pass
+                dt = pd.to_datetime(val, errors="coerce")
+                if pd.notna(dt):
+                    return dt.date()
+
+    if is_option_row(row):
+        for text_val in (str(row.get("名稱", "")), str(row.get("標的", ""))):
+            if not text_val:
+                continue
+            m = re.search(r"[A-Z]{1,6}(\d{2})(\d{2})(\d{2})[CP]\d{8}", text_val, re.IGNORECASE)
+            if m:
+                try:
+                    yy, mm, dd = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                    year = 2000 + yy if yy < 80 else 1900 + yy
+                    return date(year, mm, dd)
+                except ValueError:
+                    pass
+            m = re.search(r"(?<!\d)(20\d{2})[-/](0[1-9]|1[0-2])[-/](0[1-9]|[12]\d|3[01])(?!\d)", text_val)
+            if m:
+                try:
+                    return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                except ValueError:
+                    pass
+            m = re.search(r"(?<!\d)(20\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])(?!\d)", text_val)
+            if m:
+                try:
+                    return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                except ValueError:
+                    pass
+            m = re.search(r"(?<!\d)(0[1-9]|1[0-2])[-/](0[1-9]|[12]\d|3[01])[-/](20\d{2})(?!\d)", text_val)
+            if m:
+                try:
+                    return date(int(m.group(3)), int(m.group(1)), int(m.group(2)))
+                except ValueError:
+                    pass
+    return None
+
+
+def normalize_positions(quant_data: pd.DataFrame, today: date | None = None) -> pd.DataFrame:
     """清洗持倉表。欄位定義與第四頁進入報價迴圈之前相同。"""
     if quant_data is None or quant_data.empty or "標的" not in quant_data.columns:
         return pd.DataFrame()
 
     df = quant_data.copy()
-    df["標的"] = df["標的"].astype(str).str.strip().str.upper()
+    raw_target = df["標的"].astype(str).str.strip().str.upper()
+    df["標的"] = raw_target
     df = df[df["標的"] != ""].copy()
     if df.empty:
         return pd.DataFrame()
+
+    if today is None:
+        today = datetime.now(ZoneInfo("Asia/Taipei")).date()
+
+    expired_removed = []
+    keep_mask = []
+    for _idx, row in df.iterrows():
+        exp = parse_expiry(row)
+        if exp is not None and exp < today:
+            expired_removed.append(str(row["標的"]).strip().upper())
+            keep_mask.append(False)
+        else:
+            keep_mask.append(True)
+
+    df = df[keep_mask].copy()
+    df.attrs["expired_removed"] = list(dict.fromkeys(expired_removed))
+    if df.empty:
+        return df
 
     df["持有數量"] = pd.to_numeric(df["持有數量"], errors="coerce").fillna(0.0)
     df["平均成本"] = pd.to_numeric(df["平均成本"], errors="coerce").fillna(0.0)
@@ -221,71 +323,258 @@ def _page4_is_tw_market(ticker: str) -> bool:
     return (t_upper in ["TE", "TF"]) or (".TW" in t_upper) or (".TWO" in t_upper) or (len(t_upper) == 3 and t_upper.isalpha())
 
 
-def _quote_one(ticker, twii_price: float, beta_fn):
-    """單一代號的報價、Beta、產業。例外時的回退與第四頁逐檔迴圈相同。"""
+def _fetch_yahoo_price(ticker: str, is_tw_market: bool) -> float:
+    if is_tw_market:
+        try:
+            headers = {"User-Agent": "Mozilla/5.0"}
+            res = requests.get(f"https://tw.stock.yahoo.com/quote/{ticker}", headers=headers, timeout=5)
+            match = re.search(r'"regularMarketPrice":(?:{"raw":)?([0-9.]+)', res.text)
+            return float(match.group(1)) if match else float(yf.Ticker(ticker).history(period="1d")["Close"].iloc[-1])
+        except Exception:
+            try:
+                return float(yf.Ticker(ticker).history(period="1d")["Close"].iloc[-1])
+            except Exception:
+                return np.nan
+    else:
+        try:
+            hist = yf.Ticker(ticker).history(period="5d")
+            return float(hist["Close"].iloc[-1]) if not hist.empty else np.nan
+        except Exception:
+            return np.nan
+
+
+def _quote_one_ex(ticker: str, twii_price: float, beta_fn, kind: str = ""):
+    extras = {}
     try:
         t_upper = str(ticker).upper()
-        if t_upper in ["TX", "MTX", "FMF", "TMF"]:
-            sector = "微型臺指期" if t_upper == "FMF" else ("小型臺指" if t_upper == "MTX" else "臺指期貨")
-            return ticker, twii_price, 1.0, sector
+        kind_str = str(kind)
+        is_opt = is_option_row({"種類": kind_str, "名稱": ticker, "標的": ticker})
+
+        parsed_opt = taifex_quotes.parse_txo_symbol(ticker) if "美" not in kind_str else None
+        if parsed_opt is not None:
+            opt_q = taifex_quotes.get_option_quote(parsed_opt["strike"], parsed_opt["call_put"], expiry=parsed_opt.get("expiry"))
+            price = opt_q.price if (opt_q and opt_q.price is not None) else np.nan
+            extras["報價來源"] = opt_q.label if (opt_q and opt_q.price is not None) else "無報價，暫用成本價"
+            extras["合約乘數"] = opt_q.multiplier if opt_q else 50.0
+
+            tx_q = taifex_quotes.get_futures_quote("TX", fallback_price=twii_price)
+            und_px = tx_q.price if (tx_q and tx_q.price is not None) else twii_price
+            extras["標的現價"] = und_px
+
+            if pd.notna(price) and price is not None and parsed_opt.get("expiry"):
+                exp_date = taifex_quotes.option_expiry_date(parsed_opt["expiry"])
+                if exp_date:
+                    delta = taifex_quotes.option_delta_from_quote(price, und_px, parsed_opt["strike"], exp_date, parsed_opt["call_put"])
+                    if delta is not None:
+                        extras["Delta"] = delta
+                        extras["Delta來源"] = "估算(Black-76)"
+
+            b_val, s_val = 1.0, DETAILED_SECTOR_MAP.get("TX", "台指選擇權")
+            return ticker, price, b_val, s_val, extras
+
+        if t_upper in TAIEX_FUTURES:
+            fut_q = taifex_quotes.get_futures_quote(t_upper, fallback_price=twii_price)
+            price = fut_q.price if (fut_q and fut_q.price is not None) else np.nan
+            extras["報價來源"] = fut_q.label if (fut_q and fut_q.price is not None) else "無報價，暫用成本價"
+            extras["合約乘數"] = fut_q.multiplier if fut_q else futures_multiplier(t_upper)
+            sector = DETAILED_SECTOR_MAP.get(t_upper, "臺指期貨")
+            return ticker, price, 1.0, sector, extras
+
+        if ("期" in kind_str) and not is_opt:
+            fut_q = taifex_quotes.get_futures_quote(ticker)
+            if fut_q and fut_q.price is not None:
+                b_val, s_val = beta_fn(ticker, True)
+                extras["報價來源"] = fut_q.label
+                extras["合約乘數"] = fut_q.multiplier
+                return ticker, fut_q.price, b_val, s_val, extras
+
+            is_tw_market = _page4_is_tw_market(ticker)
+            b_val, s_val = beta_fn(ticker, is_tw_market)
+            px = _fetch_yahoo_price(ticker, is_tw_market)
+            extras["報價來源"] = ("TW Yahoo(備援)" if is_tw_market else "Yahoo(備援)") if pd.notna(px) else "無報價，暫用成本價"
+            extras["合約乘數"] = futures_multiplier(ticker)
+            return ticker, px, b_val, s_val, extras
 
         is_tw_market = _page4_is_tw_market(ticker)
         b_val, s_val = beta_fn(ticker, is_tw_market)
-        if is_tw_market:
-            try:
-                headers = {"User-Agent": "Mozilla/5.0"}
-                res = requests.get(f"https://tw.stock.yahoo.com/quote/{ticker}", headers=headers, timeout=5)
-                match = re.search(r'"regularMarketPrice":(?:{"raw":)?([0-9.]+)', res.text)
-                price = float(match.group(1)) if match else float(yf.Ticker(ticker).history(period="1d")["Close"].iloc[-1])
-            except Exception:
-                price = float(yf.Ticker(ticker).history(period="1d")["Close"].iloc[-1])
-        else:
-            hist = yf.Ticker(ticker).history(period="5d")
-            price = float(hist["Close"].iloc[-1]) if not hist.empty else np.nan
-        return ticker, price, b_val, s_val
+        px = _fetch_yahoo_price(ticker, is_tw_market)
+        extras["報價來源"] = ("TW Yahoo" if is_tw_market else "Yahoo") if pd.notna(px) else "無報價，暫用成本價"
+        return ticker, px, b_val, s_val, extras
+
     except Exception:
-        return ticker, np.nan, 1.0, "其他"
+        return ticker, np.nan, 1.0, "其他", {"報價來源": "無報價，暫用成本價"}
 
 
-def populate_market_fields(df: pd.DataFrame, beta_fn, twii_price: float):
+def _quote_one(ticker, twii_price: float, beta_fn, kind: str = ""):
+    """單一代號的報價、Beta、產業。例外時的回退與第四頁逐檔迴圈相同。"""
+    t, p, b, s, _ex = _quote_one_ex(ticker, twii_price, beta_fn, kind=kind)
+    return t, p, b, s
+
+
+def populate_market_fields(df: pd.DataFrame, beta_fn, twii_price: float, extras: dict | None = None):
     """抓即時報價、Beta、產業。期貨用台指現貨，其餘路徑與第四頁相同。"""
     prices, betas, sectors = {}, {}, {}
     if df is None or df.empty or "標的" not in df.columns:
         return prices, betas, sectors
     for ticker in df["標的"].unique().tolist():
-        ticker, price, beta, sector = _quote_one(ticker, twii_price, beta_fn)
+        sub = df[df["標的"] == ticker]
+        kind = str(sub["種類"].iloc[0]) if "種類" in sub.columns and not sub.empty else ""
+        ticker, price, beta, sector, ex_dict = _quote_one_ex(ticker, twii_price, beta_fn, kind=kind)
         prices[ticker] = price
         betas[ticker] = beta
         sectors[ticker] = sector
+        if extras is not None:
+            extras[ticker] = ex_dict
     return prices, betas, sectors
 
 
-def populate_market_fields_parallel(df: pd.DataFrame, beta_fn, twii_price: float, max_workers: int = 8):
+def populate_market_fields_parallel(df: pd.DataFrame, beta_fn, twii_price: float, max_workers: int = 8, extras: dict | None = None):
     """同一套逐檔公式，只是同時下載。回傳的價格與 Beta 與序列版相同。"""
     if df is None or df.empty or "標的" not in df.columns:
         return {}, {}, {}
     tickers = df["標的"].unique().tolist()
     if len(tickers) <= 1:
-        return populate_market_fields(df, beta_fn, twii_price)
+        return populate_market_fields(df, beta_fn, twii_price, extras=extras)
+
+    ticker_kinds = []
+    for ticker in tickers:
+        sub = df[df["標的"] == ticker]
+        kind = str(sub["種類"].iloc[0]) if "種類" in sub.columns and not sub.empty else ""
+        ticker_kinds.append((ticker, kind))
+
     from concurrent.futures import ThreadPoolExecutor
 
     prices, betas, sectors = {}, {}, {}
     workers = max(1, min(max_workers, len(tickers)))
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        for ticker, price, beta, sector in pool.map(lambda ticker: _quote_one(ticker, twii_price, beta_fn), tickers):
+        results = pool.map(lambda tk: _quote_one_ex(tk[0], twii_price, beta_fn, kind=tk[1]), ticker_kinds)
+        for ticker, price, beta, sector, ex_dict in results:
             prices[ticker] = price
             betas[ticker] = beta
             sectors[ticker] = sector
+            if extras is not None:
+                extras[ticker] = ex_dict
     return prices, betas, sectors
 
 
-def attach_quotes(df: pd.DataFrame, prices: dict, betas: dict, sectors: dict) -> pd.DataFrame:
+def ticker_kind_pairs(frame: pd.DataFrame) -> tuple:
+    """持倉表裡不重複的 (標的, 種類)。報價快取一律用這個當鍵。"""
+    if frame is None or frame.empty or "標的" not in frame.columns:
+        return ()
+    has_kind = "種類" in frame.columns
+    pairs = []
+    seen = set()
+    for _, row in frame.iterrows():
+        t = str(row.get("標的") or "").strip()
+        k = str(row.get("種類") or "").strip() if has_kind else ""
+        if t and (t, k) not in seen:
+            seen.add((t, k))
+            pairs.append((t, k))
+    return tuple(pairs)
+
+
+def coerce_ticker_kind_pairs(items) -> tuple:
+    """把報價請求整理成 (標的, 種類)。
+
+    舊呼叫端可能只傳代號字串，例如 ("FMF", "MUU")。直接用 `for t, k in items`
+    會把字串拆成字元，出現 too many values to unpack。這裡把字串視為種類空白。
+    """
+    pairs = []
+    for item in items or ():
+        if isinstance(item, str):
+            t, k = item, ""
+        elif isinstance(item, (tuple, list)) and len(item) >= 1:
+            t = item[0]
+            k = item[1] if len(item) >= 2 else ""
+        else:
+            t, k = item, ""
+        t = str(t if t is not None else "").strip()
+        k = str(k if k is not None else "").strip()
+        if t:
+            pairs.append((t, k))
+    return tuple(dict.fromkeys(pairs))
+
+
+def _row_label(df: pd.DataFrame, idx) -> str:
+    row = df.loc[idx]
+    acct = str(row.get("帳戶", "") or "").strip()
+    ticker = str(row.get("標的", "") or "").strip()
+    try:
+        sheet_row = f"第 {int(idx) + 2} 列"  # get_all_records 從第 2 列開始
+    except (TypeError, ValueError):
+        sheet_row = f"列 {idx}"
+    who = " / ".join(x for x in (acct, ticker) if x)
+    return f"{sheet_row}（{who}）" if who else sheet_row
+
+
+def value_positions_safely(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: float, prices: dict | None = None, betas: dict | None = None, sectors: dict | None = None, extras: dict | None = None):
+    """attach_quotes + finalize_valuation，但單一壞列不會讓整頁失敗。
+
+    整批成功就直接回傳。失敗時逐列試算，把會出錯的列排除後重算，
+    回傳 (持倉表, 帳戶表, 指標, 警告清單)，警告會寫出是哪一列與錯誤訊息。
+    """
+    prices = prices or {}
+    betas = betas or {}
+    sectors = sectors or {}
+
+    def run(frame):
+        if frame is not None and not frame.empty and "標的" in frame.columns:
+            frame = attach_quotes(frame, prices, betas, sectors, extras=extras)
+        return finalize_valuation(frame, accounts, usdtwd)
+
+    try:
+        valued, acc, metrics = run(positions)
+        return valued, acc, metrics, []
+    except Exception as whole_err:
+        if positions is None or positions.empty:
+            raise
+        warnings = []
+        bad = []
+        for idx in positions.index:
+            try:
+                run(positions.loc[[idx]])
+            except Exception as row_err:
+                bad.append(idx)
+                warnings.append(f"{_row_label(positions, idx)} 無法計算，已暫時排除：{row_err}")
+        if not bad or len(bad) == len(positions.index):
+            # 沒有單一列能重現，或每一列都失敗：問題不在某一列，照原樣回報。
+            raise whole_err
+        kept = positions.drop(index=bad)
+        kept.attrs = dict(positions.attrs)
+        valued, acc, metrics = run(kept)
+        return valued, acc, metrics, warnings
+
+
+def attach_quotes(df: pd.DataFrame, prices: dict, betas: dict, sectors: dict, extras: dict | None = None) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame() if df is None else df.copy()
     out = df.copy()
     out["即時報價"] = out["標的"].map(prices).fillna(out["平均成本"])
     out["Beta值"] = out["標的"].map(betas).fillna(1.0)
     out["產業別"] = out["標的"].map(sectors).fillna("其他")
+
+    if extras:
+        labels_map = out["標的"].map(lambda t: extras.get(t, {}).get("報價來源", ""))
+        if "報價來源" not in out.columns:
+            out["報價來源"] = labels_map
+        else:
+            out["報價來源"] = out["報價來源"].fillna(labels_map)
+
+        has_sheet_delta = ("Delta" in out.columns) and out["Delta"].notna()
+
+        for key in ("合約乘數", "標的現價", "Delta"):
+            ex_series = out["標的"].map(lambda t: extras.get(t, {}).get(key, np.nan))
+            if key not in out.columns:
+                out[key] = ex_series
+            else:
+                out[key] = out[key].fillna(ex_series)
+
+        delta_src_series = out["標的"].map(lambda t: extras.get(t, {}).get("Delta來源", ""))
+        if "Delta來源" not in out.columns:
+            out["Delta來源"] = np.where(has_sheet_delta, "試算表", delta_src_series)
+        else:
+            out["Delta來源"] = np.where(has_sheet_delta, "試算表", out["Delta來源"].fillna(delta_src_series))
+
     return out
 
 
@@ -306,11 +595,27 @@ def _empty_metrics() -> dict:
         "cash_pct": 0.0,
         "debt": 0.0,
         "beta": 0.0,
+        "tw_beta": 0.0,
+        "us_beta": 0.0,
+        "total_beta": 0.0,
+        "tw_exposure": 0.0,
+        "us_exposure": 0.0,
+        "tw_nav": 0.0,
+        "us_nav": 0.0,
+        "beta_weighted_avg": 0.0,
+        "options_missing_delta": [],
+        "expired_removed": [],
         "margin_ratio": None,
+        "risk_indicator": None,
         "futures_equity": 0.0,
         "futures_maint": 0.0,
+        "futures_initial": 0.0,
+        "futures_cash_ledger": 0.0,
         "excess_margin": 0.0,
         "margin_call": False,
+        "margin_call_distance": 0.0,
+        "margin_call_points": None,
+        "futures_price_labels": [],
         "sector_weights": {},
     }
 
@@ -347,39 +652,153 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
         df["實質佔用本金(原幣)"] = df["名目合約總值(原幣)"].abs().astype(float)
         df["維持保證金(原幣)"] = 0.0
 
-        # 期貨認定只看「種類」是否含「期」，與第四頁相同。
         for idx, row in df.iterrows():
-            if "期" in str(row["種類"]):
+            if "期" in str(row["種類"]) and not is_option_row(row):
+                # 賣方選擇權保證金未計入（TODO）
                 occupied, maint = _futures_margin_row(str(row["標的"]), abs(float(row["持有數量"])), abs(float(row["名目合約總值(原幣)"])))
                 df.at[idx, "實質佔用本金(原幣)"] = occupied
                 df.at[idx, "維持保證金(原幣)"] = maint
 
         is_futures_mask = df["種類"].astype(str).str.contains("期", na=False)
 
-        def calc_futures_pnl(row):
-            mult = futures_multiplier(row["標的"])
-            return (row["即時報價"] - row["平均成本"]) * row["持有數量"] * mult
+        def calc_row_pnl(row):
+            t_str = str(row["標的"]).strip().upper()
+            is_opt = is_option_row(row)
+            mult = futures_multiplier(t_str)
+            if "合約乘數" in row and pd.notna(row["合約乘數"]):
+                try:
+                    c_mult = float(row["合約乘數"])
+                    if c_mult > 0:
+                        mult = c_mult
+                except (ValueError, TypeError):
+                    pass
+            if is_opt:
+                if "美" not in str(row["種類"]):
+                    mult_opt = mult if ("合約乘數" in row and pd.notna(row["合約乘數"]) and float(row["合約乘數"]) > 0) else 50.0
+                    return (float(row["即時報價"]) - float(row["平均成本"])) * float(row["持有數量"]) * mult_opt
+                else:
+                    return 0.0
+            return (float(row["即時報價"]) - float(row["平均成本"])) * float(row["持有數量"]) * mult
 
-        df["淨未實現損益(原幣)"] = np.where(is_futures_mask, df.apply(calc_futures_pnl, axis=1), 0.0)
+        df["淨未實現損益(原幣)"] = np.where(is_futures_mask, df.apply(calc_row_pnl, axis=1), 0.0)
 
         stock_mask = ~is_futures_mask
         if stock_mask.any():
-            cost = df.loc[stock_mask, "平均成本"]
-            notional = df.loc[stock_mask, "名目合約總值(原幣)"]
-            price = df.loc[stock_mask, "即時報價"]
-            stock_latest = np.where(cost != 0, notional * (price / cost), notional)
-            df.loc[stock_mask, "淨未實現損益(原幣)"] = (stock_latest - notional) - (np.abs(stock_latest) * STOCK_TAX_RATE)
+            for idx in df[stock_mask].index:
+                row = df.loc[idx]
+                if is_option_row(row) and "美" not in str(row["種類"]):
+                    mult_opt = 50.0
+                    if "合約乘數" in row and pd.notna(row["合約乘數"]):
+                        try:
+                            cm = float(row["合約乘數"])
+                            if cm > 0:
+                                mult_opt = cm
+                        except (ValueError, TypeError):
+                            pass
+                    df.at[idx, "淨未實現損益(原幣)"] = (float(row["即時報價"]) - float(row["平均成本"])) * float(row["持有數量"]) * mult_opt
+                else:
+                    cost = float(row["平均成本"])
+                    notional = float(row["名目合約總值(原幣)"])
+                    price = float(row["即時報價"])
+                    stock_latest = notional * (price / cost) if cost != 0 else notional
+                    df.at[idx, "淨未實現損益(原幣)"] = (stock_latest - notional) - (abs(stock_latest) * STOCK_TAX_RATE)
 
         occupied_abs = df["實質佔用本金(原幣)"].abs()
         df["報酬率 (%)"] = np.where(occupied_abs != 0, (df["淨未實現損益(原幣)"] / occupied_abs) * 100.0, 0.0).astype(float)
         df["顯示_投入總金額(原幣)"] = np.where(is_futures_mask, df["實質佔用本金(原幣)"], df["名目合約總值(原幣)"]).astype(float)
-        df["顯示_即時市值(原幣)"] = np.where(
-            is_futures_mask,
-            df["實質佔用本金(原幣)"] + df["淨未實現損益(原幣)"],
-            df["即時報價"] * df["持有數量"],
-        ).astype(float)
+
+        def calc_display_mv(row):
+            t_str = str(row["標的"]).strip().upper()
+            is_opt = is_option_row(row)
+            if is_opt and "美" not in str(row["種類"]):
+                mult_opt = 50.0
+                if "合約乘數" in row and pd.notna(row["合約乘數"]):
+                    try:
+                        cm = float(row["合約乘數"])
+                        if cm > 0:
+                            mult_opt = cm
+                    except (ValueError, TypeError):
+                        pass
+                return float(row["即時報價"]) * float(row["持有數量"]) * mult_opt
+            if "期" in str(row["種類"]):
+                return float(row["實質佔用本金(原幣)"]) + float(row["淨未實現損益(原幣)"])
+            return float(row["即時報價"]) * float(row["持有數量"])
+
+        df["顯示_即時市值(原幣)"] = df.apply(calc_display_mv, axis=1).astype(float)
         df["即時市值(台幣)"] = (df["顯示_即時市值(原幣)"].abs() * df["換算匯率"]).astype(float)
-        df["實質曝險(台幣)"] = (df["即時市值(台幣)"] * df["標的槓桿"]).astype(float)
+
+        options_missing_delta = []
+        df["實質曝險(台幣)"] = 0.0
+        df["Beta曝險(台幣)"] = 0.0
+
+        for idx, row in df.iterrows():
+            ticker_str = str(row["標的"]).strip().upper()
+            kind_str = str(row["種類"])
+            qty = float(row["持有數量"])
+            px = float(row["即時報價"])
+            fx = float(row["換算匯率"])
+            is_opt = is_option_row(row)
+            is_fut = ("期" in kind_str) and not is_opt
+
+            row_mult = float(row["合約乘數"]) if ("合約乘數" in df.columns and pd.notna(row["合約乘數"]) and float(row["合約乘數"]) > 0) else futures_multiplier(ticker_str)
+
+            if is_opt:
+                delta_val = None
+                for dcol in ("Delta", "delta"):
+                    if dcol in df.columns and pd.notna(row[dcol]):
+                        try:
+                            delta_val = float(row[dcol])
+                            break
+                        except (ValueError, TypeError):
+                            pass
+
+                if delta_val is None:
+                    if ticker_str not in options_missing_delta:
+                        options_missing_delta.append(ticker_str)
+                    beta_exp = 0.0
+                    gross_exp = 0.0
+                else:
+                    opt_mult = 100.0 if "美" in kind_str else 50.0
+                    if "合約乘數" in df.columns and pd.notna(row["合約乘數"]):
+                        try:
+                            cm = float(row["合約乘數"])
+                            if cm > 0:
+                                opt_mult = cm
+                        except (ValueError, TypeError):
+                            pass
+                    und_px = px
+                    if "標的現價" in df.columns and pd.notna(row["標的現價"]):
+                        try:
+                            und_px = float(row["標的現價"])
+                        except (ValueError, TypeError):
+                            pass
+                    beta_exp = delta_val * qty * opt_mult * und_px * fx
+                    gross_exp = abs(beta_exp)
+
+                df.at[idx, "實質曝險(台幣)"] = gross_exp
+                df.at[idx, "Beta曝險(台幣)"] = beta_exp
+
+            elif is_fut:
+                gross_exp = abs(qty) * px * row_mult * fx
+                df.at[idx, "實質曝險(台幣)"] = gross_exp
+                if is_taiex_future(ticker_str):
+                    df.at[idx, "Beta曝險(台幣)"] = qty * px * row_mult * fx
+                else:
+                    mkt_val_twd = float(row["即時市值(台幣)"])
+                    lev = float(row["標的槓桿"])
+                    beta = float(row["Beta值"])
+                    sens = lev if lev > 1 else beta
+                    sign = 1.0 if qty > 0 else (-1.0 if qty < 0 else 0.0)
+                    df.at[idx, "Beta曝險(台幣)"] = mkt_val_twd * sens * sign
+
+            else:
+                mkt_val_twd = float(row["即時市值(台幣)"])
+                lev = float(row["標的槓桿"])
+                beta = float(row["Beta值"])
+                df.at[idx, "實質曝險(台幣)"] = mkt_val_twd * lev
+                sens = lev if lev > 1 else beta
+                sign = 1.0 if qty > 0 else (-1.0 if qty < 0 else 0.0)
+                df.at[idx, "Beta曝險(台幣)"] = mkt_val_twd * sens * sign
     else:
         df = pd.DataFrame()
 
@@ -393,32 +812,85 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
         if not df.empty:
             acc_market = df.groupby("帳戶")["即時市值(台幣)"].sum()
             acc_exp = df.groupby("帳戶")["實質曝險(台幣)"].sum()
-            acc_maint = df.groupby("帳戶")["維持保證金(原幣)"].sum()
         else:
-            acc_market, acc_exp, acc_maint = pd.Series(dtype=float), pd.Series(dtype=float), pd.Series(dtype=float)
+            acc_market, acc_exp = pd.Series(dtype=float), pd.Series(dtype=float)
 
         account_data["即時持股市值"] = account_data["帳戶名稱"].map(acc_market).fillna(0.0).astype(float)
         account_data["名目曝險"] = account_data["帳戶名稱"].map(acc_exp).fillna(0.0).astype(float)
-        account_data["維持保證金總額"] = account_data["帳戶名稱"].map(acc_maint).fillna(0.0).astype(float)
+        account_data["原始保證金總額"] = 0.0
+        account_data["維持保證金總額"] = 0.0
+        account_data["可動用保證金"] = 0.0
+        account_data["距追繳金額"] = 0.0
+        account_data["距追繳點數"] = np.nan
         account_data["帳戶淨值"] = 0.0
 
         for idx, row in account_data.iterrows():
             acc_name = str(row["帳戶名稱"]).strip()
+            subset = df[df["帳戶"] == acc_name] if not df.empty else pd.DataFrame()
+
+            initial_m = 0.0
+            maint_m = 0.0
+            taiex_lots_mult = 0.0
+
+            if not subset.empty:
+                # 賣方選擇權保證金未計入（TODO）
+                fut_sub = subset[[("期" in str(r["種類"])) and not is_option_row(r) for _, r in subset.iterrows()]]
+                if not fut_sub.empty:
+                    initial_m = float(fut_sub["實質佔用本金(原幣)"].sum())
+                    maint_m = float(fut_sub["維持保證金(原幣)"].sum())
+                for _, frow in subset.iterrows():
+                    t_str = str(frow["標的"]).strip().upper()
+                    if is_taiex_future(t_str):
+                        c_mult = float(frow["合約乘數"]) if ("合約乘數" in subset.columns and pd.notna(frow["合約乘數"]) and float(frow["合約乘數"]) > 0) else futures_multiplier(t_str)
+                        taiex_lots_mult += abs(float(frow["持有數量"])) * c_mult
+
+            account_data.at[idx, "原始保證金總額"] = initial_m
+            account_data.at[idx, "維持保證金總額"] = maint_m
+
             if "元大期貨" in acc_name:
-                subset = df[df["帳戶"] == acc_name] if not df.empty else pd.DataFrame()
+                cash_ledger = yuanta_cash_ledger(row["現金餘額"])
+                futures_pnl = 0.0
+                option_val = 0.0
                 if not subset.empty:
-                    contrib = float(subset["淨未實現損益(原幣)"].sum() * subset["換算匯率"].iloc[0])
-                else:
-                    contrib = 0.0
-                net_val = float(YUANTA_FUTURES_BASE_EQUITY + contrib)
-                maint_m = float(row["維持保證金總額"])
+                    for _, srow in subset.iterrows():
+                        fx = float(srow["換算匯率"])
+                        is_opt = is_option_row(srow)
+                        is_fut = ("期" in str(srow["種類"])) and not is_opt
+                        if is_opt:
+                            c_mult = 50.0
+                            if "合約乘數" in subset.columns and pd.notna(srow["合約乘數"]):
+                                try:
+                                    cm = float(srow["合約乘數"])
+                                    if cm > 0:
+                                        c_mult = cm
+                                except (ValueError, TypeError):
+                                    pass
+                            option_val += float(srow["即時報價"]) * float(srow["持有數量"]) * c_mult * fx
+                        elif is_fut:
+                            futures_pnl += float(srow["淨未實現損益(原幣)"]) * fx
+
+                net_val = float(cash_ledger + futures_pnl + option_val)
                 account_data.at[idx, "帳戶淨值"] = net_val
-                account_data.at[idx, "現金餘額"] = float(max(0.0, net_val - maint_m))
+                account_data.at[idx, "現金餘額"] = cash_ledger
+                avail = net_val - initial_m
+                dist = net_val - maint_m
+                account_data.at[idx, "可動用保證金"] = avail
+                account_data.at[idx, "距追繳金額"] = dist
+                if taiex_lots_mult > 0:
+                    account_data.at[idx, "距追繳點數"] = dist / taiex_lots_mult
             else:
                 cash = float(row["現金餘額"])
                 mkt_val = float(row["即時持股市值"])
                 debt = float(row["融資/質押借款"])
-                account_data.at[idx, "帳戶淨值"] = cash + mkt_val - debt
+                net_val = cash + mkt_val - debt
+                account_data.at[idx, "帳戶淨值"] = net_val
+                if initial_m > 0 or maint_m > 0:
+                    avail = net_val - initial_m
+                    dist = net_val - maint_m
+                    account_data.at[idx, "可動用保證金"] = avail
+                    account_data.at[idx, "距追繳金額"] = dist
+                    if taiex_lots_mult > 0:
+                        account_data.at[idx, "距追繳點數"] = dist / taiex_lots_mult
 
         nav = float(account_data["帳戶淨值"].sum())
         account_data["槓桿率 (倍)"] = np.round(
@@ -427,56 +899,161 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
         ).astype(float)
         account_data["權益比率%/現金水位%"] = np.round(
             np.where(
-                account_data["維持保證金總額"] > 0,
-                (account_data["帳戶淨值"] / account_data["維持保證金總額"]) * 100.0,
+                account_data["原始保證金總額"] > 0,
+                (account_data["帳戶淨值"] / account_data["原始保證金總額"]) * 100.0,
                 np.where(account_data["帳戶淨值"] != 0, (account_data["現金餘額"] / account_data["帳戶淨值"]) * 100.0, 0.0),
             ),
             1,
         ).astype(float)
+
+        acc_market_types = {}
+        for idx, row in account_data.iterrows():
+            acc_name = str(row["帳戶名稱"]).strip()
+            if "元大期貨" in acc_name:
+                acc_market_types[acc_name] = "TW"
+            else:
+                subset = df[df["帳戶"] == acc_name] if not df.empty else pd.DataFrame()
+                if not subset.empty:
+                    is_us_flags = subset["種類"].astype(str).str.contains("美")
+                    if is_us_flags.all():
+                        acc_market_types[acc_name] = "US"
+                    elif (~is_us_flags).all():
+                        acc_market_types[acc_name] = "TW"
+                    else:
+                        acc_market_types[acc_name] = "MIXED"
+                else:
+                    if any(k in acc_name.upper() for k in ("美", "US", "複委託", "海外")):
+                        acc_market_types[acc_name] = "US"
+                    else:
+                        acc_market_types[acc_name] = "TW"
+
+        tw_nav = 0.0
+        us_nav = 0.0
+        for idx, row in account_data.iterrows():
+            acc_name = str(row["帳戶名稱"]).strip()
+            acc_nav = float(row["帳戶淨值"])
+            mtype = acc_market_types[acc_name]
+            if mtype == "TW":
+                tw_nav += acc_nav
+            elif mtype == "US":
+                us_nav += acc_nav
+            else:
+                subset = df[df["帳戶"] == acc_name]
+                us_subset = subset[subset["種類"].astype(str).str.contains("美")]
+                us_mv = float(us_subset["即時市值(台幣)"].sum())
+                us_nav += us_mv
+                tw_nav += (acc_nav - us_mv)
     else:
         nav = 0.0
+        tw_nav = 0.0
+        us_nav = 0.0
 
     if not df.empty:
         df["真實風險權重 (%)"] = np.where(nav > 0, (df["實質曝險(台幣)"] / nav) * 100.0, 0.0).astype(float)
 
-    metrics = _metrics_from_frames(df, account_data, nav)
+    expired_removed = positions.attrs.get("expired_removed", []) if positions is not None else []
+    metrics = _metrics_from_frames(df, account_data, nav, tw_nav, us_nav, options_missing_delta if not df.empty else [], expired_removed)
     return df, account_data, metrics
 
 
-def _metrics_from_frames(df: pd.DataFrame, account_data: pd.DataFrame, nav: float) -> dict:
+def _metrics_from_frames(
+    df: pd.DataFrame,
+    account_data: pd.DataFrame,
+    nav: float,
+    tw_nav: float = 0.0,
+    us_nav: float = 0.0,
+    options_missing_delta: list[str] | None = None,
+    expired_removed: list[str] | None = None,
+) -> dict:
     metrics = _empty_metrics()
     metrics["nav"] = float(nav)
+    metrics["tw_nav"] = float(tw_nav)
+    metrics["us_nav"] = float(us_nav)
+    metrics["options_missing_delta"] = list(dict.fromkeys(options_missing_delta or []))
+    metrics["expired_removed"] = list(expired_removed or [])
+
     position_exposure = float(df["實質曝險(台幣)"].sum()) if not df.empty and "實質曝險(台幣)" in df.columns else 0.0
     metrics["position_exposure"] = position_exposure
     if position_exposure > 0:
-        metrics["beta"] = float((df["實質曝險(台幣)"] / position_exposure * df["Beta值"]).sum())
+        metrics["beta_weighted_avg"] = float((df["實質曝險(台幣)"] / position_exposure * df["Beta值"]).sum())
     metrics["sector_weights"] = _sector_weights(df)
+
+    if not df.empty and "Beta曝險(台幣)" in df.columns:
+        is_us = df["種類"].astype(str).str.contains("美")
+        tw_exp = float(df[~is_us]["Beta曝險(台幣)"].sum())
+        us_exp = float(df[is_us]["Beta曝險(台幣)"].sum())
+    else:
+        tw_exp = 0.0
+        us_exp = 0.0
+
+    metrics["tw_exposure"] = tw_exp
+    metrics["us_exposure"] = us_exp
+    metrics["tw_beta"] = (tw_exp / tw_nav) if tw_nav > 0 else 0.0
+    metrics["us_beta"] = (us_exp / us_nav) if us_nav > 0 else 0.0
+    total_beta = ((tw_exp + us_exp) / nav) if nav > 0 else 0.0
+    metrics["total_beta"] = total_beta
+    metrics["beta"] = total_beta
+
+    if not df.empty and "報價來源" in df.columns:
+        fut_rows = df[[("期" in str(r["種類"]) or is_option_row(r)) and "美" not in str(r["種類"]) for _, r in df.iterrows()]]
+        if not fut_rows.empty:
+            raw_labels = fut_rows["報價來源"].astype(str).tolist()
+            metrics["futures_price_labels"] = list(dict.fromkeys([l for l in raw_labels if l and l != "nan"]))
 
     if account_data is None or account_data.empty or "帳戶淨值" not in account_data.columns:
         return metrics
 
     exposure = float(account_data["名目曝險"].sum())
-    cash = float(account_data["現金餘額"].sum())
     debt = float(account_data["融資/質押借款"].sum()) if "融資/質押借款" in account_data.columns else 0.0
     metrics["exposure"] = exposure
-    metrics["cash"] = cash
     metrics["debt"] = debt
     metrics["leverage"] = (exposure / nav) if nav > 0 else 0.0
-    metrics["cash_pct"] = (cash / nav * 100.0) if nav > 0 else 0.0
 
     names = account_data["帳戶名稱"].astype(str)
-    fut = account_data[names.str.contains("元大期貨")]
-    if fut.empty and "維持保證金總額" in account_data.columns:
-        fut = account_data[account_data["維持保證金總額"] > 0]
+    fut_mask = names.str.contains("元大期貨")
+    if "原始保證金總額" in account_data.columns:
+        fut_mask = fut_mask | (account_data["原始保證金總額"] > 0)
+    elif "維持保證金總額" in account_data.columns:
+        fut_mask = fut_mask | (account_data["維持保證金總額"] > 0)
+
+    non_fut = account_data[~fut_mask]
+    fut = account_data[fut_mask]
+
+    non_fut_cash = float(non_fut["現金餘額"].sum()) if not non_fut.empty else 0.0
+
     if not fut.empty:
         equity = float(fut["帳戶淨值"].sum())
+        initial = float(fut["原始保證金總額"].sum()) if "原始保證金總額" in fut.columns else 0.0
         maint = float(fut["維持保證金總額"].sum())
+        cash_ledger_tot = float(fut["現金餘額"].sum())
+        avail = equity - initial
+        dist = equity - maint
+
         metrics["futures_equity"] = equity
+        metrics["futures_initial"] = initial
         metrics["futures_maint"] = maint
-        metrics["excess_margin"] = float(fut["現金餘額"].sum())
+        metrics["futures_cash_ledger"] = cash_ledger_tot
+        metrics["excess_margin"] = avail
+        metrics["margin_call_distance"] = dist
+
         if maint > 0:
             metrics["margin_ratio"] = equity / maint * 100.0
             metrics["margin_call"] = bool(equity < maint)
+        if initial > 0:
+            metrics["risk_indicator"] = equity / initial * 100.0
+
+        if "距追繳點數" in fut.columns:
+            pts = fut["距追繳點數"].dropna()
+            if not pts.empty:
+                metrics["margin_call_points"] = float(pts.iloc[0])
+
+        total_cash = non_fut_cash + max(0.0, avail)
+    else:
+        total_cash = non_fut_cash
+
+    metrics["cash"] = total_cash
+    metrics["cash_pct"] = (total_cash / nav * 100.0) if nav > 0 else 0.0
+
     return metrics
 
 

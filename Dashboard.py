@@ -18,6 +18,7 @@ from macro_cycle_ui import render_macro_cycle_page
 from order_assistant_ui import render_order_assistant
 from portfolio_risk import (
     attach_quotes,
+    coerce_ticker_kind_pairs,
     fetch_quant_sheets,
     fetch_twii,
     fetch_usdtwd,
@@ -26,7 +27,10 @@ from portfolio_risk import (
     market_beta_and_sector,
     normalize_positions,
     populate_market_fields_parallel,
+    ticker_kind_pairs,
+    value_positions_safely,
 )
+import taifex_quotes
 
 # ==========================================
 # 網頁基本設定與密碼驗證防護（支援環境變數與 Secret）
@@ -112,13 +116,19 @@ def cached_twii():
     return fetch_twii()
 
 
-@st.cache_data(ttl=180, show_spinner=False)
-def cached_quote_bundle(tickers: tuple):
-    """同一批持倉的報價與 Beta。180 秒內改數字不會重抓。"""
+def _ticker_kind_pairs(frame: pd.DataFrame) -> tuple:
+    return ticker_kind_pairs(frame)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def cached_quote_bundle(pairs: tuple):
+    """同一批持倉的報價與 Beta。60 秒內改數字不會重抓。"""
     twii = fetch_twii()
-    frame = pd.DataFrame({"標的": list(tickers)})
-    prices, betas, sectors = populate_market_fields_parallel(frame, market_beta_and_sector, twii)
-    return {"prices": prices, "betas": betas, "sectors": sectors, "twii": float(twii)}
+    pairs = coerce_ticker_kind_pairs(pairs)
+    frame = pd.DataFrame([{"標的": t, "種類": k} for t, k in pairs]) if pairs else pd.DataFrame(columns=["標的", "種類"])
+    extras = {}
+    prices, betas, sectors = populate_market_fields_parallel(frame, market_beta_and_sector, twii, extras=extras)
+    return {"prices": prices, "betas": betas, "sectors": sectors, "twii": float(twii), "extras": extras}
 
 
 def load_book_for_page5():
@@ -127,8 +137,8 @@ def load_book_for_page5():
     frame = normalize_positions(quant)
     usdtwd = cached_usdtwd()
     if not frame.empty and "標的" in frame.columns:
-        bundle = cached_quote_bundle(tuple(dict.fromkeys(frame["標的"].astype(str).tolist())))
-        frame = attach_quotes(frame, bundle["prices"], bundle["betas"], bundle["sectors"])
+        bundle = cached_quote_bundle(_ticker_kind_pairs(frame))
+        frame = attach_quotes(frame, bundle["prices"], bundle["betas"], bundle["sectors"], extras=bundle.get("extras"))
     valued, _accounts, metrics = finalize_valuation(frame, account_data, usdtwd)
     positions = []
     if valued is not None and not valued.empty and "即時市值(台幣)" in valued.columns:
@@ -146,7 +156,8 @@ def load_market_for_page6(tickers: tuple):
     usdtwd = cached_usdtwd()
     if not tickers:
         return usdtwd, cached_twii(), {}, {}, {}
-    bundle = cached_quote_bundle(tuple(dict.fromkeys(tickers)))
+    pairs = tuple(dict.fromkeys((t, "") if isinstance(t, str) else (str(t[0]), str(t[1])) for t in tickers))
+    bundle = cached_quote_bundle(pairs)
     return usdtwd, bundle["twii"], bundle["prices"], bundle["betas"], bundle["sectors"]
 
 
@@ -210,6 +221,7 @@ def clear_market_caches():
     cached_history_map.clear()
     cached_top_holdings_map.clear()
     get_market_beta_and_sector.clear()
+    taifex_quotes.clear_cache()
 
 
 # 初始化各頁面 AI 記憶狀態
@@ -676,10 +688,15 @@ elif page == "第四頁：部位監控與量化風控":
             account_data, nav_data, quant_data = load_quant_database()
             usdtwd_rate = cached_usdtwd()
             df = normalize_positions(quant_data)
-            if not df.empty:
-                bundle = cached_quote_bundle(tuple(dict.fromkeys(df["標的"].astype(str).tolist())))
-                df = attach_quotes(df, bundle["prices"], bundle["betas"], bundle["sectors"])
-            df, account_data, metrics = finalize_valuation(df, account_data, usdtwd_rate)
+            bundle = {}
+            if not df.empty and "標的" in df.columns:
+                bundle = cached_quote_bundle(_ticker_kind_pairs(df))
+            df, account_data, metrics, row_warnings = value_positions_safely(
+                df, account_data, usdtwd_rate,
+                bundle.get("prices"), bundle.get("betas"), bundle.get("sectors"), extras=bundle.get("extras"),
+            )
+            for row_warning in row_warnings:
+                st.warning(f"⚠️ {row_warning}")
             total_net_liq = metrics["nav"]
             portfolio_beta = metrics["beta"]
             total_exposure = metrics["exposure"]
@@ -739,9 +756,14 @@ elif page == "第四頁：部位監控與量化風控":
 
                 st.subheader("⚖️ 投資組合 Beta 係數與中性化戰情計分板")
                 b_col1, b_col2, b_col3 = st.columns(3)
-                b_col1.metric("整體資產加權 Beta", f"{portfolio_beta:.2f}", "量化中性化指標")
-                b_col2.metric("部位中性化判定", neutrality_status, "區間: -0.2 ~ +0.2 為中性")
-                b_col3.metric("總實質曝險部位", f"NT$ {total_exposure_sum:,.0f}", "")
+                b_col1.metric("台股 Beta", f"{metrics['tw_beta']:.2f}", f"TW 淨值: NT$ {metrics['tw_nav']:,.0f}")
+                b_col2.metric("美股 Beta", f"{metrics['us_beta']:.2f}", f"US 淨值: NT$ {metrics['us_nav']:,.0f}")
+                b_col3.metric("總 Beta", f"{metrics['total_beta']:.2f}", neutrality_status)
+
+                if metrics.get("expired_removed"):
+                    st.info(f"ℹ️ 已自動過期排除之選擇權標的：{', '.join(metrics['expired_removed'])}")
+                if metrics.get("options_missing_delta"):
+                    st.warning(f"⚠️ 以下選擇權缺少 Delta 數值，Beta 曝險以 0 計算：{', '.join(metrics['options_missing_delta'])}")
                 st.markdown("---")
 
                 st.subheader("🏢 各精細產業別持股曝險與資金佔比分佈")
@@ -768,11 +790,39 @@ elif page == "第四頁：部位監控與量化風控":
                 c3.metric("總借款負債 (TWD)", f"NT$ {total_debt:,.0f}", "")
                 c4.metric("🌍 合併總槓桿率", f"{global_leverage}x", "警戒線: 1.5x")
                 c5.metric("💰 總現金水位", f"{global_cash_pct}%", "健康區間: >40%")
-                
-                st.dataframe(account_data[['帳戶名稱', '現金餘額', '融資/質押借款', '名目曝險', '帳戶淨值', '槓桿率 (倍)', '權益比率%/現金水位%']].style.format({
+
+                if metrics.get("futures_initial", 0) > 0:
+                    fc1, fc2, fc3, fc4, fc5 = st.columns(5)
+                    fc1.metric("元大權益數", f"NT$ {metrics.get('futures_equity', 0):,.0f}", f"本日餘額 NT$ {metrics.get('futures_cash_ledger', 0):,.0f}")
+                    risk_ind = metrics.get("risk_indicator", 0) or 0.0
+                    fc2.metric("權益比率(權益/原始)", f"{risk_ind:.1f}%")
+                    fc3.metric("可動用保證金", f"NT$ {metrics.get('excess_margin', 0):,.0f}")
+                    fc4.metric("原始/維持保證金", f"{metrics.get('futures_initial', 0):,.0f} / {metrics.get('futures_maint', 0):,.0f}")
+
+                    mc_dist = metrics.get("margin_call_distance", 0)
+                    mc_pts = metrics.get("margin_call_points")
+                    if metrics.get("margin_call"):
+                        fc5.error(f"距追繳: NT$ {mc_dist:,.0f}")
+                    else:
+                        delta_str = f"約 {mc_pts:,.0f} 點" if (mc_pts is not None and not pd.isna(mc_pts)) else None
+                        fc5.metric("距追繳", f"NT$ {mc_dist:,.0f}", delta_str)
+
+                labels = metrics.get("futures_price_labels")
+                if labels:
+                    lbl_text = "期貨報價：" + "；".join(labels)
+                    if any("備援" in l or "無報價" in l for l in labels):
+                        st.warning(lbl_text)
+                    else:
+                        st.caption(lbl_text)
+
+                acc_cols = [c for c in ['帳戶名稱', '現金餘額', '融資/質押借款', '名目曝險', '帳戶淨值', '可動用保證金', '距追繳金額', '槓桿率 (倍)', '權益比率%/現金水位%'] if c in account_data.columns]
+                fmt_dict = {
                     "現金餘額": "NT$ {:,.0f}", "融資/質押借款": "NT$ {:,.0f}", "名目曝險": "NT$ {:,.0f}",
-                    "帳戶淨值": "NT$ {:,.0f}", "槓桿率 (倍)": "{:.2f}x", "權益比率%/現金水位%": "{:.1f}%"
-                }), use_container_width=True, hide_index=True)
+                    "帳戶淨值": "NT$ {:,.0f}", "可動用保證金": "NT$ {:,.0f}", "距追繳金額": "NT$ {:,.0f}",
+                    "槓桿率 (倍)": "{:.2f}x", "權益比率%/現金水位%": "{:.1f}%"
+                }
+                st.dataframe(account_data[acc_cols].style.format(fmt_dict), use_container_width=True, hide_index=True)
+                st.caption("元大期貨：現金餘額＝本日餘額；帳戶淨值＝權益數＝本日餘額＋期貨未實現損益（期交所即時/夜盤價）；權益比率＝權益數÷原始保證金。")
 
             st.markdown("---")
             st.subheader("🎯 微觀持倉、Beta 值與精細產業即時損益追蹤")
@@ -785,7 +835,12 @@ elif page == "第四頁：部位監控與量化風控":
                 c_a.metric("全帳戶持倉投入總金額 (TWD)", f"NT$ {total_invested_twd:,.0f}", "")
                 c_b.metric("總淨未實現損益 (TWD)", f"NT$ {total_pnl_twd:,.0f}", f"{total_roi_pct:+.2f}%")
                 
-                display_df = df[['帳戶', '產業別', '種類', '標的', '名稱', 'Beta值', '真實風險權重 (%)', '標的槓桿', '持有數量', '平均成本', '即時報價', '顯示_投入總金額(原幣)', '顯示_即時市值(原幣)', '淨未實現損益(原幣)', '報酬率 (%)', '最大虧損比例']].copy()
+                base_cols = ['帳戶', '產業別', '種類', '標的', '名稱', 'Beta值', '真實風險權重 (%)', '標的槓桿', '持有數量', '平均成本', '即時報價']
+                if '報價來源' in df.columns:
+                    base_cols.append('報價來源')
+                base_cols.extend(['顯示_投入總金額(原幣)', '顯示_即時市值(原幣)', '淨未實現損益(原幣)', '報酬率 (%)', '最大虧損比例'])
+                cols = [c for c in base_cols if c in df.columns]
+                display_df = df[cols].copy()
                 display_df.rename(columns={'顯示_投入總金額(原幣)': '投入總金額', '顯示_即時市值(原幣)': '即時市值(原幣)', '淨未實現損益(原幣)': '淨損益(原幣)'}, inplace=True)
                 display_df['最大虧損比例'] = display_df['最大虧損比例'].apply(lambda x: f"{x:.0f}%" if x > -100 else "未設定")
 

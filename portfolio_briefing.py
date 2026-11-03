@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-SCHEMA_VERSION = "1.0.0"
+SCHEMA_VERSION = "1.2.0"
 TAIPEI = ZoneInfo("Asia/Taipei")
 
 
@@ -81,26 +81,43 @@ def position_records(positions: pd.DataFrame) -> list[dict]:
 def yuanta_from_metrics(metrics: dict) -> dict:
     """元大期貨權益與維持保證金，沿用第四頁寫進 metrics 的數字。"""
     ratio = metrics.get("margin_ratio")
+    pts = metrics.get("margin_call_points")
+    if pts is not None and pd.isna(pts):
+        pts = None
+    risk_ind = metrics.get("risk_indicator")
     return {
         "equity": float(metrics.get("futures_equity") or 0.0),
+        "cash_ledger": float(metrics.get("futures_cash_ledger") or 0.0),
+        "initial_margin": float(metrics.get("futures_initial") or 0.0),
         "maintenance_margin": float(metrics.get("futures_maint") or 0.0),
+        "risk_indicator_pct": float(risk_ind) if risk_ind is not None else None,
         "margin_ratio_pct": None if ratio is None else float(ratio),
         "excess_margin": float(metrics.get("excess_margin") or 0.0),
+        "margin_call_distance": float(metrics.get("margin_call_distance") or 0.0),
+        "margin_call_points": float(pts) if pts is not None else None,
         "margin_call": bool(metrics.get("margin_call")),
     }
 
 
 def portfolio_payload(positions: pd.DataFrame, metrics: dict, *, usdtwd: float, as_of: datetime) -> dict:
+    total_beta = float(metrics.get("total_beta", metrics.get("beta", 0.0)))
     return {
         "schema_version": SCHEMA_VERSION,
         "as_of": format_as_of(as_of),
         "currency": "TWD",
         "usdtwd": float(usdtwd),
-        "net_value": float(metrics["nav"]),
-        "exposure": float(metrics["exposure"]),
-        "leverage": float(metrics["leverage"]),
-        "cash_pct": float(metrics["cash_pct"]),
-        "beta": float(metrics["beta"]),
+        "net_value": float(metrics.get("nav", 0.0)),
+        "exposure": float(metrics.get("exposure", 0.0)),
+        "leverage": float(metrics.get("leverage", 0.0)),
+        "cash_pct": float(metrics.get("cash_pct", 0.0)),
+        "beta": total_beta,
+        "tw_beta": float(metrics.get("tw_beta", 0.0)),
+        "us_beta": float(metrics.get("us_beta", 0.0)),
+        "total_beta": total_beta,
+        "tw_nav": float(metrics.get("tw_nav", 0.0)),
+        "us_nav": float(metrics.get("us_nav", 0.0)),
+        "tw_exposure": float(metrics.get("tw_exposure", 0.0)),
+        "us_exposure": float(metrics.get("us_exposure", 0.0)),
         "positions": position_records(positions),
         "yuanta_futures": yuanta_from_metrics(metrics),
     }
@@ -125,8 +142,9 @@ def load_live_book(as_of: datetime | None = None) -> LiveBook:
     usdtwd = fetch_usdtwd()
     positions = normalize_positions(quant_data)
     if not positions.empty:
-        prices, betas, sectors = populate_market_fields_parallel(positions, market_beta_and_sector, fetch_twii())
-        positions = attach_quotes(positions, prices, betas, sectors)
+        extras = {}
+        prices, betas, sectors = populate_market_fields_parallel(positions, market_beta_and_sector, fetch_twii(), extras=extras)
+        positions = attach_quotes(positions, prices, betas, sectors, extras=extras)
     valued, _accounts, metrics = finalize_valuation(positions, accounts, usdtwd)
     moment = as_of or taipei_now()
     return LiveBook(portfolio_payload(valued, metrics, usdtwd=usdtwd, as_of=moment), valued, metrics)

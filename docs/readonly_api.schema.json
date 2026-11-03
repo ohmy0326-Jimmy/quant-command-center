@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.0.0",
+  "schema_version": "1.2.0",
   "header": "X-API-Key",
   "models": {
     "health": {
@@ -7,7 +7,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.0.0"
+            "1.2.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -110,14 +110,39 @@
           "additionalProperties": false,
           "properties": {
             "equity": {
-              "description": "元大期貨權益，台幣。基期 170422 再加未實現損益，與第四頁相同。",
+              "description": "元大期貨權益數，台幣。本日餘額（試算表現金欄，空白時用 168308）加期貨未實現損益（期交所報價）。",
               "title": "Equity",
+              "type": "number"
+            },
+            "cash_ledger": {
+              "default": 0.0,
+              "description": "元大期貨本日餘額（現金賬）。",
+              "title": "Cash Ledger",
+              "type": "number"
+            },
+            "initial_margin": {
+              "default": 0.0,
+              "description": "原始保證金總額，台幣。",
+              "title": "Initial Margin",
               "type": "number"
             },
             "maintenance_margin": {
               "description": "維持保證金合計，台幣。",
               "title": "Maintenance Margin",
               "type": "number"
+            },
+            "risk_indicator_pct": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "權益比率＝權益數 ÷ 原始保證金 × 100。",
+              "title": "Risk Indicator Pct"
             },
             "margin_ratio_pct": {
               "anyOf": [
@@ -132,9 +157,28 @@
               "title": "Margin Ratio Pct"
             },
             "excess_margin": {
-              "description": "期貨帳戶現金餘額（權益高於維持保證金的部分）。",
+              "description": "可動用保證金＝權益數−原始保證金（可為負）。",
               "title": "Excess Margin",
               "type": "number"
+            },
+            "margin_call_distance": {
+              "default": 0.0,
+              "description": "距追繳金額＝權益數 − 維持保證金（低於維持保證金時為負）。",
+              "title": "Margin Call Distance",
+              "type": "number"
+            },
+            "margin_call_points": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "距追繳點數＝距追繳金額 ÷ 臺指期每點市值總合。無期貨部位時為 null。",
+              "title": "Margin Call Points"
             },
             "margin_call": {
               "description": "權益低於維持保證金時為 true。",
@@ -157,7 +201,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.0.0"
+            "1.2.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -199,8 +243,43 @@
           "type": "number"
         },
         "beta": {
-          "description": "曝險加權 Beta。第四頁 metrics.beta。",
+          "description": "總 Beta（(TW 曝險 + US 曝險) / 總淨值）。第四頁 metrics.beta。",
           "title": "Beta",
+          "type": "number"
+        },
+        "tw_beta": {
+          "description": "台股 Beta（TW 曝險 / TW 淨值）。",
+          "title": "Tw Beta",
+          "type": "number"
+        },
+        "us_beta": {
+          "description": "美股 Beta（US 曝險 / US 淨值）。",
+          "title": "Us Beta",
+          "type": "number"
+        },
+        "total_beta": {
+          "description": "總 Beta（(TW 曝險 + US 曝險) / 總淨值）。",
+          "title": "Total Beta",
+          "type": "number"
+        },
+        "tw_nav": {
+          "description": "台股淨值（台股市值 + 元大期貨權益 + 台股現金 - 融資/質押）。",
+          "title": "Tw Nav",
+          "type": "number"
+        },
+        "us_nav": {
+          "description": "美股淨值（US 市值 + US 現金 - US 借款）。",
+          "title": "Us Nav",
+          "type": "number"
+        },
+        "tw_exposure": {
+          "description": "台股 Beta 曝險，台幣。",
+          "title": "Tw Exposure",
+          "type": "number"
+        },
+        "us_exposure": {
+          "description": "美股 Beta 曝險，台幣。",
+          "title": "Us Exposure",
           "type": "number"
         },
         "positions": {
@@ -224,6 +303,13 @@
         "leverage",
         "cash_pct",
         "beta",
+        "tw_beta",
+        "us_beta",
+        "total_beta",
+        "tw_nav",
+        "us_nav",
+        "tw_exposure",
+        "us_exposure",
         "positions",
         "yuanta_futures"
       ],
@@ -235,7 +321,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.0.0"
+            "1.2.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -282,7 +368,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.0.0"
+            "1.2.0"
           ],
           "title": "Schema Version",
           "type": "string"

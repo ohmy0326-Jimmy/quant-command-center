@@ -38,7 +38,7 @@ X-API-Key: <READONLY_API_KEY>
 
 每個 JSON 都有：
 
-- `schema_version`：目前 `1.0.0`
+- `schema_version`：目前 `1.2.0`
 - `as_of`：`Asia/Taipei` 的 ISO 8601，例如 `2026-10-29T22:00:00+08:00`
 
 機器可讀的 JSON Schema 在 [`readonly_api.schema.json`](readonly_api.schema.json)，由 `api/schemas.py` 的 Pydantic 模型產生。
@@ -49,7 +49,7 @@ X-API-Key: <READONLY_API_KEY>
 
 ```json
 {
-  "schema_version": "1.0.0",
+  "schema_version": "1.2.0",
   "as_of": "2026-10-29T22:00:00+08:00",
   "status": "ok"
 }
@@ -57,23 +57,30 @@ X-API-Key: <READONLY_API_KEY>
 
 ## GET /v1/portfolio
 
-成功時 **200**。數字與第四頁相同，幣別是台幣。`leverage` 是實質曝險 ÷ 淨值（畫面上會再四捨五入到小數兩位）。`cash_pct` 是現金 ÷ 淨值 × 100 的百分點（畫面上四捨五入到小數一位），`9.5` 表示 9.5%。`beta` 是曝險加權 Beta。
+成功時 **200**。數字與第四頁相同，幣別是台幣。`leverage` 是實質曝險 ÷ 淨值（畫面上會再四捨五入到小數兩位）。`cash_pct` 是現金 ÷ 淨值 × 100 的百分點（畫面上四捨五入到小數一位），`9.5` 表示 9.5%。`total_beta` 為總組合 Beta（(台股與台指期貨 Beta 曝險 + 美股 Beta 曝險) ÷ 總淨值），`beta` 欄位亦設為 `total_beta`。`tw_beta` 與 `us_beta` 分別為台股/台指期貨與美股分區 Beta（分區 Beta 曝險 ÷ 分區淨值）。`tw_nav` 與 `us_nav` 分別為台股/台指期貨與美股分區淨值。`tw_exposure` 與 `us_exposure` 分別為台股/台指期貨與美股的實質 Beta 曝險（臺指期貨曝險現為名目合約總值：口數 × 指數點 × 乘數）。
 
 `price` 是原幣報價（臺指期是指數點，美股是美元）。`market_value` 與 `pnl` 是台幣：分別對應第四頁的「即時市值(台幣)」與「淨未實現損益(原幣) × 換算匯率」。股票損益已含 0.3% 證交稅估算，不會再從淨值扣一次。期貨市值是佔用保證金加未實現損益。
 
-`yuanta_futures.equity` 是元大期貨權益（170422 起算再加未實現損益）。`maintenance_margin` 是維持保證金。`margin_ratio_pct` 是權益 ÷ 維持保證金 × 100。`margin_call` 在權益低於維持保證金時為 true。
+`yuanta_futures.equity` 是元大期貨權益數＝本日餘額（`cash_ledger`，試算表元大現金欄，空白時用 168308）＋期貨未實現損益（期交所即時／夜盤價）。`initial_margin`／`maintenance_margin` 是原始／維持保證金。`risk_indicator_pct` 是權益數 ÷ 原始保證金 × 100（對應元大「風險指標」）；`margin_ratio_pct` 是權益數 ÷ 維持保證金 × 100。`excess_margin` 是可動用保證金＝權益數－原始保證金（可為負）。`margin_call_distance` 是權益數－維持保證金，`margin_call_points` 換算成臺指點數。`margin_call` 在權益低於維持保證金時為 true。
 
 ```json
 {
-  "schema_version": "1.0.0",
+  "schema_version": "1.2.0",
   "as_of": "2026-10-29T22:00:00+08:00",
   "currency": "TWD",
   "usdtwd": 30.0,
-  "net_value": 527922.0,
-  "exposure": 1033500.0,
-  "leverage": 1.957675,
-  "cash_pct": 9.471247,
-  "beta": 1.064828,
+  "net_value": 525808.0,
+  "exposure": 4332500.0,
+  "leverage": 8.2397,
+  "cash_pct": 9.509174,
+  "beta": 8.28154,
+  "tw_beta": 8.357965,
+  "us_beta": 3.0,
+  "total_beta": 8.28154,
+  "tw_nav": 518308.0,
+  "us_nav": 7500.0,
+  "tw_exposure": 4332000.0,
+  "us_exposure": 22500.0,
   "positions": [
     {
       "symbol": "2330",
@@ -85,11 +92,16 @@ X-API-Key: <READONLY_API_KEY>
     }
   ],
   "yuanta_futures": {
-    "equity": 370422.0,
+    "equity": 368308.0,
     "maintenance_margin": 538000.0,
-    "margin_ratio_pct": 68.852416,
-    "excess_margin": 0.0,
-    "margin_call": true
+    "margin_ratio_pct": 68.458736,
+    "excess_margin": -332692.0,
+    "margin_call": true,
+    "cash_ledger": 168308.0,
+    "initial_margin": 701000.0,
+    "risk_indicator_pct": 52.540371,
+    "margin_call_distance": -169692.0,
+    "margin_call_points": -848.46
   }
 }
 ```

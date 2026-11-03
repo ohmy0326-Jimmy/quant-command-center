@@ -69,11 +69,14 @@ class Page4SnapshotTests(unittest.TestCase):
         self.assertEqual(payload["schema_version"], SCHEMA_VERSION)
         self.assertEqual(payload["as_of"], "2026-10-29T22:00:00+08:00")
         self.assertEqual(payload["currency"], "TWD")
-        self.assertAlmostEqual(payload["net_value"], 527922.0, places=6)
-        self.assertAlmostEqual(payload["exposure"], 1_033_500.0, places=6)
-        self.assertAlmostEqual(payload["leverage"], 1_033_500 / 527922, places=8)
-        self.assertAlmostEqual(payload["cash_pct"], 50000 / 527922 * 100, places=8)
-        self.assertAlmostEqual(payload["beta"], 1_100_500 / 1_033_500, places=8)
+        self.assertAlmostEqual(payload["net_value"], 525808.0, places=6)
+        self.assertAlmostEqual(payload["exposure"], 4_332_500.0, places=6)
+        self.assertAlmostEqual(payload["leverage"], 4_332_500 / 525808, places=8)
+        self.assertAlmostEqual(payload["cash_pct"], 50000 / 525808 * 100, places=8)
+        self.assertAlmostEqual(payload["beta"], 4_354_500 / 525808, places=8)
+        self.assertAlmostEqual(payload["total_beta"], 4_354_500 / 525808, places=8)
+        self.assertAlmostEqual(payload["tw_nav"], 518308.0, places=6)
+        self.assertAlmostEqual(payload["us_nav"], 7500.0, places=6)
         self.assertAlmostEqual(payload["net_value"], metrics["nav"], places=8)
         self.assertAlmostEqual(payload["leverage"], metrics["leverage"], places=8)
 
@@ -91,9 +94,9 @@ class Page4SnapshotTests(unittest.TestCase):
         yuanta = payload["yuanta_futures"]
         self.assertAlmostEqual(yuanta["equity"], YUANTA_FUTURES_BASE_EQUITY + 200000, places=6)
         self.assertAlmostEqual(yuanta["maintenance_margin"], 538000, places=6)
-        self.assertAlmostEqual(yuanta["margin_ratio_pct"], 370422 / 538000 * 100, places=6)
+        self.assertAlmostEqual(yuanta["margin_ratio_pct"], 368308 / 538000 * 100, places=6)
         self.assertTrue(yuanta["margin_call"])
-        self.assertAlmostEqual(yuanta["excess_margin"], 0.0, places=6)
+        self.assertAlmostEqual(yuanta["excess_margin"], -332692.0, places=6)
 
     def test_empty_book_has_no_positions(self):
         payload = portfolio_payload(pd.DataFrame(), {"nav": 0, "exposure": 0, "leverage": 0, "cash_pct": 0, "beta": 0}, usdtwd=32, as_of=AS_OF)
@@ -120,8 +123,10 @@ class AdvicePromptTests(unittest.TestCase):
             f"請給予 3 點風控建議。"
         )
         self.assertEqual(text, expected)
-        self.assertIn("合併總槓桿率: 1.96x", text)
-        self.assertIn("總現金水位: 9.5%", text)
+        # TX notional exposure 4,200,000 + 2330 110,000 + SOXL (7,500 * 3) 22,500 = 4,332,500 total exposure
+        # NAV = 525,808 => leverage = 4,332,500 / 525,808 = 8.2396... -> 8.24x
+        self.assertIn(f"合併總槓桿率: {leverage:.2f}x", text)
+        self.assertIn(f"總現金水位: {cash_pct:.1f}%", text)
         self.assertEqual(RISK_MANAGER_MODEL, "gemini-3.8-flash")
 
     def test_empty_positions_prompt(self):
@@ -312,6 +317,13 @@ class ApiHttpTests(unittest.TestCase):
                 "leverage",
                 "cash_pct",
                 "beta",
+                "tw_beta",
+                "us_beta",
+                "total_beta",
+                "tw_nav",
+                "us_nav",
+                "tw_exposure",
+                "us_exposure",
                 "positions",
                 "yuanta_futures",
             },
@@ -319,9 +331,20 @@ class ApiHttpTests(unittest.TestCase):
         self.assertEqual(set(body["positions"][0]), {"symbol", "name", "qty", "price", "market_value", "pnl"})
         self.assertEqual(
             set(body["yuanta_futures"]),
-            {"equity", "maintenance_margin", "margin_ratio_pct", "excess_margin", "margin_call"},
+            {
+                "equity",
+                "maintenance_margin",
+                "margin_ratio_pct",
+                "excess_margin",
+                "margin_call",
+                "cash_ledger",
+                "initial_margin",
+                "risk_indicator_pct",
+                "margin_call_distance",
+                "margin_call_points",
+            },
         )
-        self.assertAlmostEqual(body["net_value"], 527922.0, places=4)
+        self.assertAlmostEqual(body["net_value"], 525808.0, places=4)
         self.assertEqual(body["as_of"], "2026-10-29T22:00:00+08:00")
         self.assertEqual(body["positions"][0]["symbol"], "2330")
         self.assertEqual(accepted.headers["cache-control"], "no-store")
@@ -364,7 +387,7 @@ class ApiHttpTests(unittest.TestCase):
         self.assertIn("+08:00", body["generated_at"])
         self.assertEqual(body["schema_version"], SCHEMA_VERSION)
         self.assertIn("請給予 3 點風控建議。", self.prompts[0])
-        self.assertIn("NT$ 527,922", self.prompts[0])
+        self.assertIn("NT$ 525,808", self.prompts[0])
         self.assertNotIn(API_KEY, first.text)
 
         second = self.client.get("/v1/ai-advice", headers=headers)

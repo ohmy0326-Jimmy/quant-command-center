@@ -33,10 +33,15 @@ class PositionResponse(BaseModel):
 class YuantaFuturesResponse(BaseModel):
     model_config = _MODEL
 
-    equity: float = Field(description="元大期貨權益，台幣。基期 170422 再加未實現損益，與第四頁相同。")
+    equity: float = Field(description="元大期貨權益數，台幣。本日餘額（試算表現金欄，空白時用 168308）加期貨未實現損益（期交所報價）。")
+    cash_ledger: float = Field(default=0.0, description="元大期貨本日餘額（現金賬）。")
+    initial_margin: float = Field(default=0.0, description="原始保證金總額，台幣。")
     maintenance_margin: float = Field(description="維持保證金合計，台幣。")
+    risk_indicator_pct: float | None = Field(default=None, description="權益比率＝權益數 ÷ 原始保證金 × 100。")
     margin_ratio_pct: float | None = Field(description="權益 ÷ 維持保證金 × 100。沒有保證金時為 null。")
-    excess_margin: float = Field(description="期貨帳戶現金餘額（權益高於維持保證金的部分）。")
+    excess_margin: float = Field(description="可動用保證金＝權益數−原始保證金（可為負）。")
+    margin_call_distance: float = Field(default=0.0, description="距追繳金額＝權益數 − 維持保證金（低於維持保證金時為負）。")
+    margin_call_points: float | None = Field(default=None, description="距追繳點數＝距追繳金額 ÷ 臺指期每點市值總合。無期貨部位時為 null。")
     margin_call: bool = Field(description="權益低於維持保證金時為 true。")
 
 
@@ -51,7 +56,14 @@ class PortfolioResponse(BaseModel):
     exposure: float = Field(description="總實質曝險，台幣。第四頁 metrics.exposure。")
     leverage: float = Field(description="實質曝險 ÷ 淨值。畫面上四捨五入到小數兩位。")
     cash_pct: float = Field(description="現金 ÷ 淨值 × 100，百分點。13.4 表示 13.4%。畫面上四捨五入到小數一位。")
-    beta: float = Field(description="曝險加權 Beta。第四頁 metrics.beta。")
+    beta: float = Field(description="總 Beta（(TW 曝險 + US 曝險) / 總淨值）。第四頁 metrics.beta。")
+    tw_beta: float = Field(description="台股 Beta（TW 曝險 / TW 淨值）。")
+    us_beta: float = Field(description="美股 Beta（US 曝險 / US 淨值）。")
+    total_beta: float = Field(description="總 Beta（(TW 曝險 + US 曝險) / 總淨值）。")
+    tw_nav: float = Field(description="台股淨值（台股市值 + 元大期貨權益 + 台股現金 - 融資/質押）。")
+    us_nav: float = Field(description="美股淨值（US 市值 + US 現金 - US 借款）。")
+    tw_exposure: float = Field(description="台股 Beta 曝險，台幣。")
+    us_exposure: float = Field(description="美股 Beta 曝險，台幣。")
     positions: list[PositionResponse]
     yuanta_futures: YuantaFuturesResponse
 
