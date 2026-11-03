@@ -28,6 +28,7 @@ from order_assistant import (
     iv_percentile,
     iv_traffic_light,
     loss_breaches,
+    order_price_hint,
     parse_tickers,
     positions_as_dicts,
     propose_rebalance,
@@ -36,6 +37,14 @@ from order_assistant import (
     strategy_summary,
     suggest_addback_text,
     taiex_shock_state,
+)
+import taifex_quotes
+from order_calculators import (
+    FUTURES_PRODUCTS,
+    default_margin_per_lot,
+    futures_order_impact,
+    futures_trial,
+    leaps_call_metrics,
 )
 from taiex_vix import fetch_taiex_vix
 from nav_scenario_sim_ui import render_nav_scenario_simulator
@@ -54,6 +63,7 @@ from order_insights import (
     rs_for_ticker,
     rs_warning,
 )
+from refresh_controls import render_refresh_bar
 from macro_cycle import format_holding_tag, holding_tag
 from macro_cycle_ui import cached_macro_cycle_view
 from portfolio_risk import (
@@ -954,6 +964,245 @@ def _render_holding_tags(snapshot, view: dict):
     st.caption("期貨口徑是名目（口數 × 價格 × 乘數），不是未實現損益，也不是保證金。")
 
 
+def _render_leaps_calc(snapshot):
+    st.caption("輸入 LEAPS Call 的報價，用 Black-Scholes 由權利金回推隱含波動率，再算 Delta、時間價值與約當股數。只做試算。")
+    c1, c2, c3, c4 = st.columns(4)
+    ticker = c1.text_input("標的代號", key="oa_leaps_ticker").strip().upper()
+    hint_px = order_price_hint(ticker, snapshot) if ticker else None
+    spot_default = float(hint_px) if (hint_px is not None and hint_px > 0) else 100.0
+    spot_key = f"oa_leaps_spot_{ticker or 'NA'}"
+    if spot_key not in st.session_state:
+        st.session_state[spot_key] = spot_default
+    spot = c2.number_input("標的現價", min_value=0.0, step=0.5, key=spot_key)
+    strike_key = f"oa_leaps_strike_{ticker or 'NA'}"
+    if strike_key not in st.session_state:
+        st.session_state[strike_key] = float(round(spot * 0.8 * 2) / 2 if spot > 0 else 80.0)
+    strike = c3.number_input("履約價", min_value=0.0, step=0.5, key=strike_key)
+    expiry = c4.date_input("到期日", value=date.today() + timedelta(days=440), key="oa_leaps_expiry")
+
+    c5, c6, c7, c8 = st.columns(4)
+    premium = c5.number_input("權利金（每股）", min_value=0.0, value=0.0, step=0.5, key="oa_leaps_premium")
+    rate_pct = c6.number_input("無風險利率（%）", min_value=0.0, value=4.0, step=0.25, key="oa_leaps_rate")
+    contracts = c7.number_input("口數", min_value=1, value=1, step=1, key="oa_leaps_contracts")
+    target = c8.number_input("目標曝險（美元，Delta × 股數 × 現價）", min_value=0.0, value=0.0, step=1000.0, key="oa_leaps_target")
+
+    c9, _ = st.columns([1, 3])
+    ref_pct = c9.number_input("參考波動率（%，例如歷史波動率，0 = 不填）", min_value=0.0, value=0.0, step=0.5, key="oa_leaps_ref_vol")
+
+    if premium <= 0:
+        st.info("填入權利金才會試算。")
+        return None
+
+    res = leaps_call_metrics(
+        spot,
+        strike,
+        expiry,
+        premium,
+        rate=rate_pct / 100,
+        today=date.today(),
+        contracts=int(contracts),
+        target_exposure=target or None,
+        ref_vol=(ref_pct / 100 if ref_pct > 0 else None),
+    )
+    if not res.get("ok"):
+        st.warning(res.get("error", "試算失敗"))
+        return None
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Delta", f"{res['delta']:.3f}")
+    sig = res.get("signal") or {}
+    m2.metric("隱含波動率", f"{res['iv'] * 100:.1f}%", delta=sig.get("label"), delta_color="off")
+    m3.metric(
+        "時間價值占比",
+        f"{res['extrinsic_pct']:.1f}%",
+        help=f"內含價值 US$ {res['intrinsic']:.2f}／時間價值 US$ {res['extrinsic']:.2f}",
+    )
+    m4.metric(
+        "約當股數",
+        f"{res['equivalent_shares']:,.1f} 股",
+        delta=f"{contracts} 口 × Delta × 100",
+        delta_color="off",
+    )
+
+    n1, n2, n3, n4 = st.columns(4)
+    n1.metric("損益兩平價", f"US$ {res['breakeven']:.2f}")
+    n2.metric(
+        "Delta 曝險（美元）",
+        f"US$ {res['delta_exposure']:,.0f}",
+        delta=f"約 NT$ {res['delta_exposure'] * snapshot.usdtwd:,.0f}",
+        delta_color="off",
+    )
+    n3.metric("權利金總額", f"US$ {res['cost_total']:,.0f}")
+    n4.metric("每月時間耗損", f"US$ {res['theta_month_total']:,.0f}")
+
+    sig_label = sig.get("label", "")
+    sig_detail = sig.get("detail", "")
+    sig_text = f"IV 訊號：{sig_label}。{sig_detail}"
+    if sig.get("color") == "green":
+        st.success(sig_text)
+    elif sig.get("color") == "yellow":
+        st.info(sig_text)
+    elif sig.get("color") == "red":
+        st.warning(sig_text)
+
+    n_sug = res.get("suggested_contracts")
+    if n_sug:
+        shares_sug = res.get("suggested_equivalent_shares", 0.0)
+        cost_sug = res.get("suggested_cost", 0.0)
+        st.success(f"要達到目標曝險 US$ {target:,.0f}，建議 {n_sug} 口（約當 {shares_sug:,.0f} 股，權利金 US$ {cost_sug:,.0f}）。")
+
+    for w in res.get("warnings", []):
+        st.warning(w)
+
+    st.caption("時間價值年化 = 時間價值 ÷ 現價 ÷ 剩餘年數。Delta 用回推的 IV 計算；美股選擇權一口 100 股。")
+    return f"LEAPS Call：{ticker or '標的'} 履約價 {strike:.1f} 到期日 {expiry}｜Delta {res['delta']:.3f} × {contracts} 口（約當 {res['equivalent_shares']:,.1f} 股）"
+
+
+def _render_futures_calc(snapshot, rules: Rules):
+    st.caption("大台 TX、小台 MTX、微台 FMF（TMF）。輸入口數、價格、停損價，看保證金、名目曝險、下單後的槓桿與 Beta，以及停損金額允許的最大口數。只做試算。")
+    fc1, fc2, fc3, fc4 = st.columns(4)
+    product = fc1.selectbox("商品", list(FUTURES_PRODUCTS), format_func=lambda c: f"{c}｜{FUTURES_PRODUCTS[c]}", key="oa_fut_product")
+    side_str = fc2.selectbox("方向", ["買進", "賣出"], key="oa_fut_side")
+    lots = fc3.number_input("口數", min_value=0, value=1, step=1, key="oa_fut_lots")
+
+    if "oa_fut_price" not in st.session_state:
+        st.session_state["oa_fut_price"] = float(round(snapshot.twii))
+    price = fc4.number_input("價格", min_value=0.0, step=1.0, key="oa_fut_price")
+
+    if st.button("帶入期交所即時報價", key="oa_fut_quote_btn"):
+        try:
+            quote = taifex_quotes.get_futures_quote(product, fallback_price=float(snapshot.twii))
+            if quote and getattr(quote, "price", None) is not None:
+                st.session_state["oa_fut_price"] = float(quote.price)
+                if getattr(quote, "label", None):
+                    st.session_state["oa_fut_quote_label"] = quote.label
+                st.rerun()
+            else:
+                st.warning("期交所與加權指數都抓不到報價，請手動輸入價格。")
+        except Exception as exc:
+            st.warning(f"報價讀取失敗（{exc.__class__.__name__}），請手動輸入價格。")
+
+    if st.session_state.get("oa_fut_quote_label"):
+        st.caption(st.session_state["oa_fut_quote_label"])
+
+    sc1, sc2, sc3 = st.columns(3)
+    stop_price = sc1.number_input("停損價（0 = 不設停損）", min_value=0.0, value=0.0, step=1.0, key="oa_fut_stop")
+    margin_key = f"oa_fut_margin_{product}"
+    margin = sc2.number_input(
+        "每口原始保證金",
+        min_value=0.0,
+        value=float(default_margin_per_lot(product)),
+        step=1000.0,
+        key=margin_key,
+        help="預設來自系統設定的原始保證金（TX 701,000／MTX 175,250／FMF 35,050），可以改成元大最新公告",
+    )
+    default_max_loss = float(round(rules.max_loss_pct_nav / 100 * snapshot.metrics["nav"]))
+    max_loss = sc3.number_input(
+        "單筆最大虧損（NT$）",
+        min_value=0.0,
+        value=default_max_loss,
+        step=10000.0,
+        key="oa_fut_max_loss",
+        help=f"預設為淨值的 {rules.max_loss_pct_nav:.1f}%",
+    )
+
+    trial = futures_trial(
+        product,
+        int(lots),
+        price,
+        stop_price=(stop_price if stop_price > 0 else None),
+        side=("buy" if side_str == "買進" else "sell"),
+        margin_per_lot=margin,
+        max_loss=max_loss,
+    )
+    if not trial.get("ok"):
+        st.warning(trial.get("error", "試算失敗"))
+        return None
+    if lots == 0:
+        st.info("口數填 0 只算停損上限，不試算下單後部位。")
+
+    mc1, mc2, mc3, mc4 = st.columns(4)
+    mc1.metric(
+        "所需原始保證金",
+        f"NT$ {trial['margin_needed']:,.0f}",
+        delta=f"{lots} 口 × NT$ {margin:,.0f}",
+        delta_color="off",
+    )
+    mc2.metric(
+        "名目曝險",
+        f"NT$ {trial['notional']:,.0f}",
+        delta=f"{lots} × {price:,.0f} × {trial['multiplier']:g}",
+        delta_color="off",
+    )
+    mc3.metric(
+        "停損金額",
+        f"NT$ {trial['stop_loss_total']:,.0f}" if trial.get("stop_loss_total") is not None else "—",
+    )
+    loss_per_lot = trial.get("loss_per_lot")
+    mc4.metric(
+        "停損上限可下口數",
+        f"{trial['max_lots_by_loss']} 口" if trial.get("max_lots_by_loss") is not None else "—",
+        delta=(f"每口停損 NT$ {loss_per_lot:,.0f}" if loss_per_lot is not None else None),
+        delta_color="off",
+    )
+
+    for w in trial.get("warnings", []):
+        st.warning(w)
+
+    impact = None
+    if lots > 0:
+        impact = futures_order_impact(snapshot, trial)
+        for w in impact.get("warnings", []):
+            st.warning(w)
+
+        ic1, ic2, ic3, ic4 = st.columns(4)
+        ic1.metric(
+            "合併槓桿",
+            f"{impact['leverage_after']:.2f}x",
+            delta=f"{impact['leverage_after'] - impact['leverage_before']:+.2f}x",
+            delta_color="inverse",
+            help=f"下單前 {impact['leverage_before']:.2f}x｜上限 {rules.target_leverage:.2f}x",
+        )
+        ic2.metric(
+            "總 Beta",
+            f"{impact['total_beta_after']:.2f}",
+            delta=f"{impact['total_beta_after'] - impact['total_beta_before']:+.2f}",
+            delta_color="off",
+            help=f"下單前 {impact['total_beta_before']:.2f}",
+        )
+        ic3.metric(
+            "台股 Beta",
+            f"{impact['tw_beta_after']:.2f}",
+            delta=f"{impact['tw_beta_after'] - impact['tw_beta_before']:+.2f}",
+            delta_color="off",
+            help=f"下單前 {impact['tw_beta_before']:.2f}",
+        )
+        eq_after = impact.get("equity_ratio_after")
+        eq_before = impact.get("equity_ratio_before")
+        val_str = f"{eq_after:.1f}%" if eq_after is not None else "—"
+        delta_str = f"{eq_after - eq_before:+.1f}%" if (eq_after is not None and eq_before is not None) else None
+        ic4.metric(
+            "權益比率（權益數 ÷ 原始保證金）",
+            val_str,
+            delta=delta_str,
+            delta_color="off",
+        )
+
+        if not impact["margin_sufficient"]:
+            st.error(f"可動用保證金 NT$ {impact['excess_margin_before']:,.0f} 不夠，還差 NT$ {impact['margin_shortfall']:,.0f}。")
+        else:
+            st.caption(f"下單前可動用保證金 NT$ {impact['excess_margin_before']:,.0f}。")
+
+        if impact["leverage_after"] > rules.target_leverage:
+            st.warning(f"下單後槓桿 {impact['leverage_after']:.2f}x 超過上限 {rules.target_leverage:.2f}x。")
+
+    st.caption("槓桿與 Beta 用第四頁同一套估價（finalize_valuation）重算；權益比率 = 權益數 ÷ 原始保證金。名目曝險 = 口數 × 價格 × 乘數（TX 200、MTX 50、FMF／TMF 10）。")
+
+    if lots > 0 and impact is not None:
+        return f"期貨：{side_str} {product} {lots} 口 @ {price:,.0f}（保證金 NT$ {trial['margin_needed']:,.0f}，槓桿 {impact['leverage_before']:.2f}x → {impact['leverage_after']:.2f}x）"
+    return None
+
+
 def render_order_assistant(send_to_telegram, load_sheets, beta_fn, load_market=None, clear_caches=None):
     view = cached_macro_cycle_view()
     if st.session_state.get("oa_apply_regime_defaults"):
@@ -970,13 +1219,17 @@ def render_order_assistant(send_to_telegram, load_sheets, beta_fn, load_market=N
     options = ["線上持倉（與第四頁同一份試算表）", "示範持倉（離線試算）"]
     default_index = 0 if (on_cloud or has_key) else 1
     source = st.radio("資料來源", options, index=default_index, horizontal=True, key="oa_source")
-    refresh_col, _rest = st.columns([1, 3])
-    if refresh_col.button("重新讀取持倉", key="oa_reload"):
-        load_sheets.clear()
-        beta_fn.clear()
-        if clear_caches is not None:
-            clear_caches()
-        st.rerun()
+    render_refresh_bar(
+        "p6",
+        clear_fns=(
+            getattr(load_sheets, "clear", None),
+            getattr(beta_fn, "clear", None),
+            clear_caches,
+            _cached_rs.clear,
+            _cached_taiex_vix.clear,
+        ),
+        session_keys=(),
+    )
 
     using_sample = source.startswith("示範")
     if not using_sample:
@@ -1006,10 +1259,30 @@ def render_order_assistant(send_to_telegram, load_sheets, beta_fn, load_market=N
         "target_leverage": rules.target_leverage,
     }
     order_note = None
+    leaps_note = None
+    futures_note = None
     hedge_note = None
 
-    tab_health, tab_plan, tab_order, tab_hedge, tab_stress, tab_export = st.tabs(
-        ["現況健檢", "調倉建議", "單筆下單試算", "選擇權避險", "壓力測試", "檢查清單"]
+    (
+        tab_health,
+        tab_plan,
+        tab_order,
+        tab_leaps,
+        tab_futures,
+        tab_hedge,
+        tab_stress,
+        tab_export,
+    ) = st.tabs(
+        [
+            "現況健檢",
+            "調倉建議",
+            "單筆下單試算",
+            "LEAPS 試算",
+            "期貨下單試算",
+            "選擇權避險",
+            "壓力測試",
+            "檢查清單",
+        ]
     )
 
     with tab_health:
@@ -1071,6 +1344,14 @@ def render_order_assistant(send_to_telegram, load_sheets, beta_fn, load_market=N
         st.subheader("單筆下單試算")
         order_note = _render_order(snapshot, rules)
 
+    with tab_leaps:
+        st.subheader("LEAPS Call 試算")
+        leaps_note = _render_leaps_calc(snapshot)
+
+    with tab_futures:
+        st.subheader("期貨下單試算")
+        futures_note = _render_futures_calc(snapshot, rules)
+
     with tab_hedge:
         st.subheader("選擇權避險試算")
         hedge_note = _render_hedge(snapshot, rules)
@@ -1110,12 +1391,13 @@ def render_order_assistant(send_to_telegram, load_sheets, beta_fn, load_market=N
     with tab_export:
         st.subheader("檢查清單與 Telegram")
         st.caption("按鈕按下去才會送。沒有按就只留在畫面上。")
+        combined_order_note = " ／ ".join(n for n in (order_note, leaps_note, futures_note) if n) or None
         text = build_checklist_text(
             snapshot,
             rules,
             flags,
             plan=plan,
-            order_note=order_note,
+            order_note=combined_order_note,
             hedge_note=hedge_note,
             addback_text=st.session_state.get("oa_addback_text"),
         )

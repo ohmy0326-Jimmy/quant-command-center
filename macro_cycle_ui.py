@@ -10,7 +10,15 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from macro_cycle import industry_quadrant_points, load_macro_cycle, quadrant_shift, regime_rows, regime_scale_text
-from macro_cycle_live import fetch_auto_results, load_service_key, macro_view_for_orders, read_quant_macro_tabs, remember_live_view
+from macro_cycle_live import (
+    clear_live_view,
+    fetch_auto_results,
+    load_service_key,
+    macro_view_for_orders,
+    read_quant_macro_tabs,
+    remember_live_view,
+)
+from refresh_controls import PAGE5_SESSION_KEYS, render_refresh_bar
 from macro_cycle_sheet import (
     AUTO_CACHE_SECONDS,
     HEAVY_UNDERWEIGHT_PCT,
@@ -28,11 +36,12 @@ def cached_macro_cycle_view() -> dict:
     return macro_view_for_orders()
 
 
-def render_macro_cycle_page(load_book=None):
+def render_macro_cycle_page(load_book=None, clear_caches=None):
+    st.title("第五頁：總經週期與配置")
+    render_refresh_bar("p5", clear_fns=(clear_caches, clear_live_view), session_keys=PAGE5_SESSION_KEYS)
     with st.spinner("正在讀試算表與自動指標…"):
         view = _page5_view()
     book = _cached_book(load_book)
-    st.title("第五頁：總經週期與配置")
     st.markdown(f"[研究報告]({RESEARCH_URL})")
     _show_warnings(view)
     if not view.get("ok"):
