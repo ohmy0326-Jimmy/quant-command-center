@@ -17,6 +17,7 @@ Rating 為該標的 Raw Score 在對照宇宙（Universe，不含標的自身）
 from __future__ import annotations
 
 import math
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 import numpy as np
@@ -29,6 +30,7 @@ from order_assistant import (
     bs_price_greeks,
     loss_breaches,
     positions_as_dicts,
+    split_betas,
     taiex_shock_state,
 )
 
@@ -617,10 +619,36 @@ def margin_account_call_levels(
 # ---------------------------------------------------------------------------
 
 
+def _round_lots_half_up(raw: float) -> int:
+    """口數四捨五入到整數；正好 .5 進位。零或負值回 0。"""
+    if raw is None or not math.isfinite(raw) or raw <= 0:
+        return 0
+    cleaned = Decimal(str(round(float(raw), 10)))
+    return int(cleaned.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+def _coerce_put_delta(put_delta: float | None) -> float | None:
+    """有效避險用的 Put Delta。0、空值或絕對值大於 1 視為不估算。"""
+    if put_delta is None:
+        return None
+    try:
+        delta = float(put_delta)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(delta) or delta == 0.0 or abs(delta) > 1.0:
+        return None
+    return delta
+
+
 def hedge_suggestion(
     snapshot: Snapshot, put_delta: float | None = None, target_ratio: float = 1.0
 ) -> dict:
-    """計算台指選擇權 Put 避險所需的建議口數。"""
+    """依下單後台股淨曝險計算 TXO Put 口數。
+
+    原始口數 = 淨曝險 × target_ratio ÷（台指 × 50），建議口數為四捨五入。
+    Delta 不縮放口數，只用在有效避險曝險（Delta × 建議口數 × 50 × 台指），
+    以及避險前 → 避險後的台股 Beta、避險比率。
+    """
     tw_long = 0.0
     tw_hedge = 0.0
 
@@ -630,39 +658,65 @@ def hedge_suggestion(
             kind = str(row.get("種類", ""))
             if "美" not in kind:
                 b_exp = float(row.get("Beta曝險(台幣)", 0.0))
+                if math.isnan(b_exp):
+                    b_exp = 0.0
                 if b_exp > 0:
                     tw_long += b_exp
                 elif b_exp < 0:
                     tw_hedge += -b_exp
 
     net_exp = float(snapshot.metrics.get("tw_exposure", 0.0))
-    current_hedge_ratio = (tw_hedge / tw_long) if tw_long > 0 else 0.0
+    if math.isnan(net_exp):
+        net_exp = 0.0
+    hedge_ratio_before = (tw_hedge / tw_long) if tw_long > 0 else 0.0
     index = float(snapshot.twii) if snapshot.twii else 0.0
+    if math.isnan(index):
+        index = 0.0
 
-    lots_full = (
+    lots_raw = (
         max(net_exp, 0.0) * float(target_ratio) / (index * TXO_MULTIPLIER)
         if index > 0
         else 0.0
     )
+    suggested_lots = _round_lots_half_up(lots_raw)
 
-    lots_delta = None
-    if put_delta is not None and 0 < abs(float(put_delta)) <= 1.0:
-        lots_delta = lots_full / abs(float(put_delta))
+    delta = _coerce_put_delta(put_delta)
+    delta_hedged_exposure = None
+    if delta is not None and index > 0:
+        delta_hedged_exposure = delta * suggested_lots * TXO_MULTIPLIER * index
 
-    suggested_raw = lots_delta if lots_delta is not None else lots_full
-    suggested_lots = int(math.ceil(suggested_raw))
+    tw_long_after = tw_long
+    tw_hedge_after = tw_hedge
+    if delta_hedged_exposure is not None and delta_hedged_exposure < 0:
+        tw_hedge_after += -delta_hedged_exposure
+    elif delta_hedged_exposure is not None and delta_hedged_exposure > 0:
+        tw_long_after += delta_hedged_exposure
+    hedge_ratio_after = (tw_hedge_after / tw_long_after) if tw_long_after > 0 else 0.0
+
+    exposure_delta = 0.0 if delta_hedged_exposure is None else delta_hedged_exposure
+    betas_before = split_betas(snapshot.metrics)
+    betas_after = split_betas(snapshot.metrics, tw_exposure_delta=exposure_delta)
 
     return {
         "tw_long": tw_long,
         "tw_hedge": tw_hedge,
         "net_exposure": net_exp,
-        "current_hedge_ratio": current_hedge_ratio,
+        "current_hedge_ratio": hedge_ratio_before,
+        "hedge_ratio_before": hedge_ratio_before,
+        "hedge_ratio_after": hedge_ratio_after,
         "index": index,
-        "lots_full": lots_full,
-        "lots_delta": lots_delta,
+        "lots_raw": lots_raw,
+        "lots_full": lots_raw,
         "suggested_lots": suggested_lots,
-        "put_delta": put_delta,
-        "formula": "口數 = 台股淨曝險 ÷ (台指 × 50)，再除以 |Delta|",
+        "put_delta": delta,
+        "delta_hedged_exposure": delta_hedged_exposure,
+        "tw_beta_before": betas_before["tw_beta"],
+        "tw_beta_after": betas_after["tw_beta"],
+        "formula": (
+            "口數 = 下單後台股淨曝險 ÷ (台指 × 50)，四捨五入到整數。"
+            "有效避險曝險 = Delta × 建議口數 × 50 × 台指；"
+            "台股 Beta 與避險比率為避險前 → 避險後。"
+        ),
     }
 
 

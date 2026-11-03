@@ -143,6 +143,14 @@ render_order_assistant(dummy_send, DummyCallable(), DummyCallable())
                 [str(getattr(m, "value", "")) for m in at.markdown] + [str(getattr(h, "value", "")) for h in at.subheader]
             )
             self.assertIn("處置優先順序", all_text)
+            labels = [m.label for m in at.metric]
+            self.assertIn("原始口數", labels)
+            self.assertIn("建議口數", labels)
+            self.assertIn("Delta 調整後避險曝險", labels)
+            self.assertNotIn("Delta 調整口數", labels)
+            self.assertNotIn("名目口數", labels)
+            joined = all_text + " " + " ".join(labels)
+            self.assertIn("避險比率", joined)
 
 
 if __name__ == "__main__":

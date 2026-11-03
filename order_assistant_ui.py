@@ -531,24 +531,32 @@ def _render_order(snapshot, rules: Rules):
         )
         st.caption("假設整戶維持率 130%、持股同步下跌；美股券商（IB／嘉信）實際維持率依券商規定，僅供參考。")
 
-    st.markdown("**TXO 賣權避險建議（以下單後台股曝險）**")
+    st.markdown("**TXO 賣權避險建議（口數只看下單後台股淨曝險）**")
     def_pdelta = round(default_put_delta(after.twii if after.twii else 0.0), 2)
     put_delta = st.number_input(
-        "TXO Put Delta（負值；0 = 不做 Delta 調整）",
+        "TXO Put Delta（負值；只估算有效避險曝險、台股 Beta 與避險比率）",
         value=def_pdelta,
         min_value=-1.0,
         max_value=0.0,
         step=0.05,
         key="oa_order_put_delta",
+        help="預設為 30 天、價外約 5%、波動率 20% 的賣權 Delta。口數 = 下單後台股淨曝險 ÷（台指 × 50），再四捨五入。有效避險曝險 = Delta × 建議口數 × 50 × 台指。填 0 則不估算有效避險。",
     )
     h_after = hedge_suggestion(after, put_delta if put_delta != 0 else None)
-    h_before = hedge_suggestion(snapshot, put_delta if put_delta != 0 else None)
-    ch1, ch2, ch3, ch4, ch5 = st.columns(5)
+    h_before = hedge_suggestion(snapshot, None)
+    ch1, ch2, ch3, ch4 = st.columns(4)
     ch1.metric("台股淨曝險", f"NT$ {h_after['net_exposure']:,.0f}", f"NT$ {h_after['net_exposure'] - h_before['net_exposure']:+,.0f}")
-    ch2.metric("目前避險比率", f"{h_after['current_hedge_ratio'] * 100:.1f}%", f"{(h_after['current_hedge_ratio'] - h_before['current_hedge_ratio']) * 100:+.1f}%")
-    ch3.metric("名目口數", f"{h_after['lots_full']:.2f} 口")
-    ch4.metric("Delta 調整口數", f"{h_after['lots_delta']:.2f} 口" if h_after["lots_delta"] is not None else "—")
-    ch5.metric("建議口數", f"{h_after['suggested_lots']} 口")
+    ch2.metric("原始口數", f"{h_after['lots_raw']:.2f} 口")
+    ch3.metric("建議口數", f"{h_after['suggested_lots']} 口")
+    exp = h_after["delta_hedged_exposure"]
+    ch4.metric("Delta 調整後避險曝險", f"NT$ {exp:,.0f}" if exp is not None else "—")
+    if exp is None:
+        st.caption("Delta 為 0：只顯示依淨曝險算出的口數。")
+    else:
+        st.write(
+            f"台股 Beta {h_after['tw_beta_before']:.2f} → {h_after['tw_beta_after']:.2f}"
+            f"｜避險比率 {h_after['hedge_ratio_before'] * 100:.1f}% → {h_after['hedge_ratio_after'] * 100:.1f}%"
+        )
     st.caption(h_after["formula"])
 
     stress_view = []
@@ -598,7 +606,10 @@ def _render_order(snapshot, rules: Rules):
         order_note_extra.append(rs_str)
     if fmc_note_str:
         order_note_extra.append(fmc_note_str)
-    order_note_extra.append(f"建議 TXO Put 口數：{h_after['suggested_lots']} 口")
+    lot_note = f"建議 TXO Put 口數：{h_after['suggested_lots']} 口（原始 {h_after['lots_raw']:.2f}）"
+    if exp is not None:
+        lot_note += f"，Delta 調整後避險曝險 NT$ {exp:,.0f}"
+    order_note_extra.append(lot_note)
 
     return f"{side} {ticker} {format_qty_text(ticker, kind, qty)} @ {price:g}。" + " ".join(order_note_extra) + f" 槓桿 {snapshot.metrics['leverage']:.2f}x → {after.metrics['leverage']:.2f}x，現金 {snapshot.metrics['cash_pct']:.1f}% → {after.metrics['cash_pct']:.1f}%。" + (
         " " + "；".join(rule_warnings)

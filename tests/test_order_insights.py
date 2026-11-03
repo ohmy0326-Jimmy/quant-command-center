@@ -210,11 +210,80 @@ class TestOrderInsights(unittest.TestCase):
         snap = Snapshot(positions, accounts, 32.0, 20000.0)
 
         # tw_long = 1,000,000; index = 20,000.
-        # lots_full = 1,000,000 / (20,000 * 50) = 1.0
+        # lots = 1,000,000 / (20,000 * 50) = 1.0；Delta 不縮放口數。
         h = hedge_suggestion(snap, put_delta=-0.5, target_ratio=1.0)
+        self.assertAlmostEqual(h["lots_raw"], 1.0)
         self.assertAlmostEqual(h["lots_full"], 1.0)
-        self.assertAlmostEqual(h["lots_delta"], 2.0)
-        self.assertEqual(h["suggested_lots"], 2)
+        self.assertEqual(h["suggested_lots"], 1)
+        self.assertNotIn("lots_delta", h)
+        self.assertAlmostEqual(h["delta_hedged_exposure"], -0.5 * 1 * 50 * 20000)
+        self.assertAlmostEqual(h["hedge_ratio_before"], 0.0)
+        self.assertAlmostEqual(h["hedge_ratio_after"], 0.5)
+        self.assertAlmostEqual(
+            h["tw_beta_after"],
+            (snap.metrics["tw_exposure"] + h["delta_hedged_exposure"]) / snap.metrics["tw_nav"],
+        )
+        self.assertLess(h["tw_beta_after"], h["tw_beta_before"])
+
+    def test_hedge_lots_follow_exposure_only(self):
+        # 13.9 口：舊公式再除以 |−0.17| 會變成約 82 口。
+        positions = pd.DataFrame([_stock("現貨主帳戶", "台股", "2330", 13900, 1000, 1000)])
+        accounts = pd.DataFrame(
+            [{"帳戶名稱": "現貨主帳戶", "現金餘額": 0, "融資/質押借款": 0}]
+        )
+        snap = Snapshot(positions, accounts, 32.0, 20000.0)
+        self.assertAlmostEqual(snap.metrics["tw_exposure"], 13_900_000.0)
+
+        h = hedge_suggestion(snap, put_delta=-0.17)
+        h_other = hedge_suggestion(snap, put_delta=-0.50)
+        h_none = hedge_suggestion(snap, put_delta=None)
+        self.assertAlmostEqual(h["lots_raw"], 13.9, places=6)
+        self.assertEqual(h["suggested_lots"], 14)
+        self.assertEqual(h_other["suggested_lots"], 14)
+        self.assertEqual(h_none["suggested_lots"], 14)
+        self.assertAlmostEqual(h["delta_hedged_exposure"], -0.17 * 14 * 50 * 20000)
+        self.assertIsNone(h_none["delta_hedged_exposure"])
+        self.assertAlmostEqual(h_none["tw_beta_before"], h_none["tw_beta_after"])
+        self.assertAlmostEqual(h_none["hedge_ratio_before"], h_none["hedge_ratio_after"])
+        self.assertGreater(h["hedge_ratio_after"], h["hedge_ratio_before"])
+        self.assertLess(h["tw_beta_after"], h["tw_beta_before"])
+
+        # 0.4 倍曝險 → 原始 0.40 口，四捨五入為 0；舊的 Delta 調整會進位成 1。
+        partial = hedge_suggestion(snap, put_delta=-0.5, target_ratio=0.4 / 13.9)
+        self.assertAlmostEqual(partial["lots_raw"], 0.4, places=6)
+        self.assertEqual(partial["suggested_lots"], 0)
+        self.assertAlmostEqual(partial["delta_hedged_exposure"], 0.0)
+
+    def test_hedge_lot_rounding_and_flat_book(self):
+        accounts = pd.DataFrame(
+            [{"帳戶名稱": "現貨主帳戶", "現金餘額": 0, "融資/質押借款": 0}]
+        )
+
+        def lots_for(qty):
+            snap = Snapshot(
+                pd.DataFrame([_stock("現貨主帳戶", "台股", "2330", qty, 1000, 1000)]),
+                accounts,
+                32.0,
+                20000.0,
+            )
+            return hedge_suggestion(snap, put_delta=-0.17)["suggested_lots"]
+
+        # 每口名目 = 20,000 × 50 = 1,000,000。
+        self.assertEqual(lots_for(1500), 2)  # 1.50 → 2
+        self.assertEqual(lots_for(1490), 1)  # 1.49 → 1
+        self.assertEqual(lots_for(500), 1)  # 0.50 → 1
+        self.assertEqual(lots_for(490), 0)  # 0.49 → 0
+
+        short = Snapshot(
+            pd.DataFrame([_stock("現貨主帳戶", "台股", "2330", -1000, 1000, 1000)]),
+            accounts,
+            32.0,
+            20000.0,
+        )
+        flat = hedge_suggestion(short, put_delta=-0.17)
+        self.assertLessEqual(flat["net_exposure"], 0.0)
+        self.assertEqual(flat["lots_raw"], 0.0)
+        self.assertEqual(flat["suggested_lots"], 0)
 
     def test_triggered_stop_losses_and_priority_list(self):
         positions = pd.DataFrame(
