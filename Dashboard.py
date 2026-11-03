@@ -34,6 +34,7 @@ from portfolio_risk import (
 from sheet_dates import nav_growth_series
 import taifex_quotes
 import taiex_vix
+import us_hedge
 
 # ==========================================
 # 網頁基本設定與密碼驗證防護（支援環境變數與 Secret）
@@ -226,6 +227,7 @@ def clear_market_caches():
     get_market_beta_and_sector.clear()
     taifex_quotes.clear_cache()
     taiex_vix.clear_cache()
+    us_hedge.clear_cache()
 
 
 # 初始化各頁面 AI 記憶狀態
