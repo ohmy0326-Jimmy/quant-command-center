@@ -214,10 +214,7 @@ def beta_split_change(before_metrics: dict, after_metrics: dict) -> list[dict]:
 def leveraged_beta_note(lev: float, beta: float) -> str | None:
     """槓桿 ETF (lev > 1) 設定提醒，說明系統採用槓桿倍數計算曝險。"""
     if lev > 1.0 and beta > 1.0 + 1e-9 and abs(beta - lev) > 0.05:
-        return (
-            f"標的槓桿為 {lev:g}x，系統計算曝險時僅採計槓桿倍數，"
-            f"忽略手動輸入的 Beta 值 {beta:g}（避免槓桿與 Beta 重複計算敏感度）。"
-        )
+        return f"標的槓桿為 {lev:g}x，系統用「槓桿 × 標的一年 Beta」計算 Beta 曝險（抓不到時用預設值，第六頁可修改），不直接用這檔 ETF 自己的 Beta {beta:g}。"
     return None
 
 

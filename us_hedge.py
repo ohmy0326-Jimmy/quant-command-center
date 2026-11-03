@@ -21,7 +21,7 @@ from order_assistant import (
     hedge_profit_plan,
     split_betas,
 )
-from portfolio_risk import is_option_row
+
 
 US_HEDGE_INSTRUMENTS = {
     "SPY": {"label": "SPY（S&P 500 ETF）", "multiplier": 100.0},
@@ -30,35 +30,7 @@ US_HEDGE_INSTRUMENTS = {
 }
 DEFAULT_US_INSTRUMENT = "SPY"
 
-LEVERAGED_UNDERLYING = {
-    "SOXL": ("SOXX", 3.0),
-    "AMUU": ("AMD", 2.0),
-    "MUU": ("MU", 2.0),
-    "SNXX": ("SNDK", 2.0),
-    "LITX": ("LITE", 2.0),
-    "KORU": ("EWY", 3.0),
-    "TQQQ": ("QQQ", 3.0),
-    "QLD": ("QQQ", 2.0),
-    "UPRO": ("SPY", 3.0),
-    "SSO": ("SPY", 2.0),
-    "TECL": ("XLK", 3.0),
-    "NVDL": ("NVDA", 2.0),
-    "USD": ("SMH", 2.0),
-}
-
-FALLBACK_UNDERLYING_BETA = {
-    "SOXX": 1.6,
-    "AMD": 1.9,
-    "MU": 1.8,
-    "SNDK": 2.0,
-    "LITE": 1.8,
-    "EWY": 1.1,
-    "QQQ": 1.15,
-    "SPY": 1.0,
-    "XLK": 1.25,
-    "NVDA": 1.9,
-    "SMH": 1.6,
-}
+from beta_rules import LEVERAGED_UNDERLYING, FALLBACK_UNDERLYING_BETA, effective_beta, fetch_underlying_beta, fallback_underlying_beta  # noqa: F401  (保留舊匯入路徑)
 
 _CACHE: dict[str, tuple[float, dict]] = {}
 _SUCCESS_TTL = 600
@@ -126,32 +98,18 @@ def instrument_prices(spx: float | None, spy: float | None = None) -> dict:
 
 def underlying_beta(ticker: str, beta_fn: Callable | None = None, overrides: dict | None = None) -> tuple[float, str]:
     """取得槓桿 ETF 的底層標的 Beta。"""
-    overrides = overrides or {}
+    res = fetch_underlying_beta(ticker, beta_fn)
+    if res and not math.isnan(res.get("標的Beta", math.nan)):
+        return res["標的Beta"], res["標的Beta來源"]
+    
     u = LEVERAGED_UNDERLYING[ticker][0] if ticker in LEVERAGED_UNDERLYING else ticker
-
-    manual = _num(overrides.get(ticker), None)
-    if manual is not None and manual > 0:
-        return manual, "手動"
-
-    if beta_fn:
-        try:
-            b = _num(beta_fn(u, False)[0], None)
-            if b is not None and b > 0:
-                return b, f"{u} 一年 Beta"
-        except Exception:
-            pass
-
-    if u in FALLBACK_UNDERLYING_BETA:
-        return FALLBACK_UNDERLYING_BETA[u], f"{u} 預設值"
-
-    return 1.0, "未知標的，假設 1.0"
-
+    return fallback_underlying_beta(u, overrides)
 
 def us_spx_exposure(snapshot: Snapshot, beta_fn: Callable | None = None, overrides: dict | None = None) -> dict:
     """計算美股部位對 S&P 500 的實質曝險。"""
     rows = []
     exposure_twd = 0.0
-    overrides = overrides or {}
+    fallback_rows = []
 
     if snapshot.valued is not None and not snapshot.valued.empty:
         for _, row in snapshot.valued.iterrows():
@@ -161,52 +119,19 @@ def us_spx_exposure(snapshot: Snapshot, beta_fn: Callable | None = None, overrid
 
             ticker = str(row.get("標的", "")).upper()
             name = str(row.get("名稱", ""))
-            qty = _num(row.get("持有數量"), 0.0)
             mv_twd = _num(row.get("即時市值(台幣)"), 0.0)
-            lev_col = _num(row.get("標的槓桿"), 1.0)
-            beta_col = _num(row.get("Beta值"), 1.0)
-            beta_exp_col = _num(row.get("Beta曝險(台幣)"), 0.0)
+            lev = _num(row.get("標的槓桿"), 1.0)
+            exposure = _num(row.get("Beta曝險(台幣)"), 0.0)
+            
+            eff_beta = _num(row.get("有效Beta"), None)
+            u = str(row.get("標的代號", ""))
+            ub = _num(row.get("採用標的Beta"), None)
+            src = str(row.get("Beta來源", ""))
+            is_fallback = "預設值" in src
+            method = src or "持倉 Beta（對 S&P 500）"
 
-            row_dict = {"種類": kind, "名稱": name, "標的": ticker}
-            sign_qty = 1.0 if qty >= 0 else -1.0
-
-            if is_option_row(row_dict):
-                exposure = beta_exp_col
-                method = "選擇權 Delta 曝險"
-                eff_beta = None
-                ub = None
-                src = ""
-                u = ""
-                lev = lev_col
-            elif ticker in LEVERAGED_UNDERLYING or lev_col > 1:
-                if ticker in LEVERAGED_UNDERLYING:
-                    u, map_lev = LEVERAGED_UNDERLYING[ticker]
-                    lev = lev_col if lev_col > 1 else map_lev
-                else:
-                    u = ""
-                    lev = lev_col
-
-                if u:
-                    ub, src = underlying_beta(ticker, beta_fn, overrides)
-                else:
-                    ub = _num(overrides.get(ticker), None)
-                    if ub is not None and ub > 0:
-                        src = "手動"
-                    else:
-                        ub = (beta_col / lev) if beta_col > 0 else 1.0
-                        src = "持倉 Beta ÷ 槓桿"
-
-                eff_beta = lev * ub
-                exposure = mv_twd * eff_beta * sign_qty
-                method = f"槓桿 {lev:g}x × 標的 Beta {ub:.2f}"
-            else:
-                eff_beta = beta_col if beta_col > 0 else 1.0
-                exposure = mv_twd * eff_beta * sign_qty
-                method = "持倉 Beta（對 S&P 500）"
-                ub = None
-                src = ""
-                u = ""
-                lev = lev_col
+            if is_fallback:
+                fallback_rows.append(ticker)
 
             exposure_twd += exposure
             rows.append({
@@ -234,6 +159,7 @@ def us_spx_exposure(snapshot: Snapshot, beta_fn: Callable | None = None, overrid
         "page4_us_exposure": float(snapshot.metrics.get("us_exposure", 0.0)),
         "us_nav": us_nav,
         "us_beta_spx": (exposure_twd / us_nav) if us_nav > 0 else 0.0,
+        "fallback_rows": fallback_rows,
     }
 
 

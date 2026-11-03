@@ -16,6 +16,7 @@ from ai_advice import generate_risk_manager_advice
 from app_secrets import read_secret
 from macro_cycle_ui import render_macro_cycle_page
 from order_assistant_ui import render_order_assistant
+from beta_rules import BETA_FALLBACK_STATE_KEY
 from portfolio_risk import (
     attach_quotes,
     coerce_ticker_kind_pairs,
@@ -26,6 +27,7 @@ from portfolio_risk import (
     finalize_valuation,
     load_service_account_info,
     market_beta_and_sector,
+    market_beta_info,
     normalize_positions,
     populate_market_fields_parallel,
     ticker_kind_pairs,
@@ -97,6 +99,14 @@ def get_market_beta_and_sector(ticker, is_tw):
     return market_beta_and_sector(ticker, bool(is_tw))
 
 
+@st.cache_data(ttl=300)
+def get_market_beta_info(ticker, is_tw):
+    return market_beta_info(ticker, bool(is_tw))
+
+
+get_market_beta_and_sector.info = get_market_beta_info
+
+
 def _google_key_from_secrets():
     data = read_secret(None, "google_key")
     if not isinstance(data, dict) and not hasattr(data, "items"):
@@ -142,7 +152,14 @@ def load_book_for_page5():
     usdtwd = cached_usdtwd()
     if not frame.empty and "標的" in frame.columns:
         bundle = cached_quote_bundle(_ticker_kind_pairs(frame))
-        frame = attach_quotes(frame, bundle["prices"], bundle["betas"], bundle["sectors"], extras=bundle.get("extras"))
+        frame = attach_quotes(
+            frame,
+            bundle["prices"],
+            bundle["betas"],
+            bundle["sectors"],
+            extras=bundle.get("extras"),
+            beta_fallbacks=st.session_state.get(BETA_FALLBACK_STATE_KEY),
+        )
     valued, _accounts, metrics = finalize_valuation(frame, account_data, usdtwd)
     positions = []
     if valued is not None and not valued.empty and "即時市值(台幣)" in valued.columns:
@@ -159,10 +176,10 @@ def load_book_for_page5():
 def load_market_for_page6(tickers: tuple):
     usdtwd = cached_usdtwd()
     if not tickers:
-        return usdtwd, cached_twii(), {}, {}, {}
+        return usdtwd, cached_twii(), {}, {}, {}, {}
     pairs = tuple(dict.fromkeys((t, "") if isinstance(t, str) else (str(t[0]), str(t[1])) for t in tickers))
     bundle = cached_quote_bundle(pairs)
-    return usdtwd, bundle["twii"], bundle["prices"], bundle["betas"], bundle["sectors"]
+    return usdtwd, bundle["twii"], bundle["prices"], bundle["betas"], bundle["sectors"], bundle.get("extras") or {}
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -225,6 +242,7 @@ def clear_market_caches():
     cached_history_map.clear()
     cached_top_holdings_map.clear()
     get_market_beta_and_sector.clear()
+    get_market_beta_info.clear()
     taifex_quotes.clear_cache()
     taiex_vix.clear_cache()
     us_hedge.clear_cache()
@@ -700,6 +718,7 @@ elif page == "第四頁：部位監控與量化風控":
             df, account_data, metrics, row_warnings = value_positions_safely(
                 df, account_data, usdtwd_rate,
                 bundle.get("prices"), bundle.get("betas"), bundle.get("sectors"), extras=bundle.get("extras"),
+                beta_fallbacks=st.session_state.get(BETA_FALLBACK_STATE_KEY),
             )
             for row_warning in row_warnings:
                 st.warning(f"⚠️ {row_warning}")
@@ -839,7 +858,7 @@ elif page == "第四頁：部位監控與量化風控":
                 c_a.metric("全帳戶持倉投入總金額 (TWD)", f"NT$ {total_invested_twd:,.0f}", "")
                 c_b.metric("總淨未實現損益 (TWD)", f"NT$ {total_pnl_twd:,.0f}", f"{total_roi_pct:+.2f}%")
                 
-                base_cols = ['帳戶', '產業別', '種類', '標的', '名稱', 'Beta值', '真實風險權重 (%)', '標的槓桿', '持有數量', '平均成本', '即時報價']
+                base_cols = ['帳戶', '產業別', '種類', '標的', '名稱', 'Beta值', '有效Beta', 'Beta來源', '真實風險權重 (%)', '標的槓桿', '持有數量', '平均成本', '即時報價']
                 if '報價來源' in df.columns:
                     base_cols.append('報價來源')
                 base_cols.extend(['顯示_投入總金額(原幣)', '顯示_即時市值(原幣)', '淨未實現損益(原幣)', '報酬率 (%)', '最大虧損比例'])
@@ -849,10 +868,15 @@ elif page == "第四頁：部位監控與量化風控":
                 display_df['最大虧損比例'] = display_df['最大虧損比例'].apply(lambda x: f"{x:.0f}%" if x > -100 else "未設定")
 
                 st.dataframe(display_df.style.format({
-                    "Beta值": "{:.2f}", "真實風險權重 (%)": "{:.2f}%", "標的槓桿": "{:.1f}x", "持有數量": "{:,.0f}",
+                    "Beta值": "{:.2f}", "有效Beta": "{:.2f}", "真實風險權重 (%)": "{:.2f}%", "標的槓桿": "{:.1f}x", "持有數量": "{:,.0f}",
                     "平均成本": "{:,.2f}", "即時報價": "{:,.2f}", "投入總金額": "{:,.0f}",
                     "即時市值(原幣)": "{:,.0f}", "淨損益(原幣)": "{:,.0f}", "報酬率 (%)": "{:+.2f}%"
                 }, precision=2), use_container_width=True, hide_index=True)
+
+                if metrics.get("beta_fallbacks_used"):
+                    names = "、".join(f"{item.get('標的')}（{item.get('Beta來源')}）" for item in metrics["beta_fallbacks_used"])
+                    st.warning(f"以下持倉抓不到標的即時一年 Beta，暫用預設值：{names}。預設值可在第六頁「下單輔助系統」→「新標的才需要改：Beta、槓桿、產業」修改。")
+                st.caption("Beta值＝這檔自己的一年 Beta；有效Beta＝計入 Beta 曝險的數字（槓桿 ETF＝槓桿 × 標的一年 Beta，對 S&P 500 或加權指數）。")
 
             st.markdown("---")
             st.subheader("🤖 AI 避險基金經理人即時壓力測試與風控審查")

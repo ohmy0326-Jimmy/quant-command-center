@@ -65,6 +65,7 @@ from order_insights import (
     rs_warning,
 )
 from refresh_controls import render_refresh_bar
+from beta_rules import BETA_FALLBACK_STATE_KEY, fallback_table_rows, overrides_from_rows
 from macro_cycle import format_holding_tag, holding_tag
 from macro_cycle_ui import cached_macro_cycle_view
 from portfolio_risk import (
@@ -238,21 +239,32 @@ def _public_error(exc: Exception) -> str:
     return f"線上持倉讀取失敗，下面改用示範持倉。原因：{text[:300]}"
 
 
-def _load_live(load_sheets, beta_fn, load_market=None):
+def _load_live(load_sheets, beta_fn, load_market=None, beta_fallbacks=None):
     accounts, _nav_hist, quant = load_sheets()
     raw = normalize_positions(quant)
     pairs = tuple(dict.fromkeys(zip(raw["標的"].astype(str), raw["種類"].astype(str) if "種類" in raw.columns else [""] * len(raw)))) if not raw.empty and "標的" in raw.columns else tuple()
     if load_market is not None:
-        usdtwd, twii, prices, betas, sectors = load_market(pairs)
+        res = load_market(pairs)
+        usdtwd, twii, prices, betas, sectors = res[:5]
+        extras = res[5] if len(res) > 5 else None
     else:
         usdtwd = fetch_usdtwd()
         twii = fetch_twii()
         prices, betas, sectors = ({}, {}, {})
+        extras = {}
         if not raw.empty:
-            prices, betas, sectors = populate_market_fields(raw, beta_fn, twii)
+            prices, betas, sectors = populate_market_fields(raw, beta_fn, twii, extras=extras)
     if not raw.empty:
-        raw = attach_quotes(raw, prices, betas, sectors)
+        raw = attach_quotes(raw, prices, betas, sectors, extras=extras, beta_fallbacks=beta_fallbacks)
     return build_snapshot_from_frames(raw, accounts, usdtwd, twii)
+
+
+def _with_beta_fallbacks(snapshot, overrides):
+    if not overrides:
+        return snapshot
+    positions = snapshot.positions.copy()
+    positions.attrs["beta_fallbacks"] = dict(overrides)
+    return build_snapshot_from_frames(positions, snapshot.accounts, snapshot.usdtwd, snapshot.twii)
 
 
 def build_snapshot_from_frames(raw, accounts, usdtwd, twii):
@@ -408,6 +420,35 @@ def _render_order(snapshot, rules: Rules):
             sector = st.text_input("產業", value=sector, key=f"oa_sector_{ticker}")
         else:
             st.caption(f"沿用持倉：Beta {held['beta']:.2f}、槓桿 {held['lev']:.1f}x、{held['sector']}、{held['kind']}")
+
+        st.markdown("**槓桿 ETF 標的預設 Beta（抓不到即時一年 Beta 時才用）**")
+        df_fb = pd.DataFrame(fallback_table_rows(st.session_state.get(BETA_FALLBACK_STATE_KEY)))
+        edited = st.data_editor(
+            df_fb,
+            key="oa_beta_fallback_editor",
+            hide_index=True,
+            disabled=["標的", "對應槓桿 ETF", "已手動修改"],
+            column_config={
+                "預設 Beta": st.column_config.NumberColumn(min_value=0.1, max_value=5.0, step=0.05, format="%.2f")
+            },
+        )
+        new = overrides_from_rows(edited.to_dict("records"))
+        if new != (st.session_state.get(BETA_FALLBACK_STATE_KEY) or {}):
+            st.session_state[BETA_FALLBACK_STATE_KEY] = new
+            st.rerun()
+
+        if st.button("恢復預設值", key="oa_beta_fallback_reset"):
+            st.session_state.pop(BETA_FALLBACK_STATE_KEY, None)
+            st.session_state.pop("oa_beta_fallback_editor", None)
+            st.rerun()
+
+        fb_used = snapshot.metrics.get("beta_fallbacks_used") or []
+        if fb_used:
+            names = "、".join(f"{x.get('標的')}（{x.get('Beta來源')}）" for x in fb_used)
+            st.caption(f"目前用預設值的持倉：{names}")
+        else:
+            st.caption("目前所有槓桿 ETF 都抓到即時一年 Beta。")
+        st.caption("修改後第四頁、第六頁、美股避險一起套用（同一個瀏覽器分頁）。")
     qty = float(st.session_state["oa_qty"])
     side = st.session_state["oa_side"]
     if qty <= 0 or not ticker:
@@ -899,13 +940,17 @@ def _render_us_hedge(snapshot, rules: Rules, beta_fn=None):
         key=f"oa_us_spot_{inst}",
     )
 
-    exp = us_hedge.us_spx_exposure(snapshot, beta_fn=beta_fn)
+    _ = beta_fn
+    exp = us_hedge.us_spx_exposure(snapshot)
     if not exp["rows"]:
         st.info("沒有美股部位，不需要美股避險。")
         return None
 
     disp_rows = []
     for r in exp["rows"]:
+        src = r.get("beta_source") or r.get("method") or ""
+        if "預設值" in src:
+            src = f"⚠️ {src}"
         disp_rows.append({
             "標的": r["ticker"],
             "名稱": r["name"],
@@ -915,7 +960,7 @@ def _render_us_hedge(snapshot, rules: Rules, beta_fn=None):
             "標的 Beta": f"{r['underlying_beta']:.2f}" if r["underlying_beta"] is not None else "—",
             "有效 Beta": f"{r['eff_beta']:.2f}" if r["eff_beta"] is not None else "—",
             "S&P 曝險(NT$)": r["exposure_twd"],
-            "算法": r["method"],
+            "Beta來源": src,
         })
     df_exp = pd.DataFrame(disp_rows)
     st.dataframe(
@@ -927,12 +972,15 @@ def _render_us_hedge(snapshot, rules: Rules, beta_fn=None):
         hide_index=True,
     )
 
+    if exp.get("fallback_rows"):
+        st.warning(f"{'、'.join(exp['fallback_rows'])} 抓不到標的即時一年 Beta，暫用預設值（可在上方「新標的才需要改」修改）。")
+
     em1, em2, em3 = st.columns(3)
     em1.metric("美股 S&P 曝險", f"NT$ {exp['exposure_twd']:,.0f}", f"US$ {exp['exposure_usd']:,.0f}")
     em2.metric("美股 Beta（對 S&P，美股淨值）", f"{exp['us_beta_spx']:.2f}")
     em3.metric("第四頁美股 Beta", f"{snapshot.metrics.get('us_beta', 0.0):.2f}")
     st.caption(
-        f"槓桿 ETF = 槓桿 × 標的 Beta（SOXL→SOXX、AMUU→AMD、MUU→MU、SNXX→SNDK、LITX→LITE、KORU→EWY），標的 Beta 抓不到時用預設值。"
+        f"槓桿 ETF = 槓桿 × 標的一年 Beta（對 S&P 500），與第四頁同一套算法，所以兩邊美股 Beta 相同。"
         f"第四頁口徑 US Beta：{snapshot.metrics.get('us_beta', 0.0):.2f}（曝險 NT$ {exp['page4_us_exposure']:,.0f} ÷ 美股淨值 NT$ {exp['us_nav']:,.0f}）。"
     )
 
@@ -1481,6 +1529,7 @@ def render_order_assistant(send_to_telegram, load_sheets, beta_fn, load_market=N
 
     on_cloud = bool(os.environ.get("K_SERVICE"))
     has_key = bool(os.environ.get("GCP_KEY_JSON") or os.environ.get("GOOGLE_SERVICE_KEY_JSON"))
+    overrides = dict(st.session_state.get(BETA_FALLBACK_STATE_KEY) or {})
     options = ["線上持倉（與第四頁同一份試算表）", "示範持倉（離線試算）"]
     default_index = 0 if (on_cloud or has_key) else 1
     source = st.radio("資料來源", options, index=default_index, horizontal=True, key="oa_source")
@@ -1489,6 +1538,7 @@ def render_order_assistant(send_to_telegram, load_sheets, beta_fn, load_market=N
         clear_fns=(
             getattr(load_sheets, "clear", None),
             getattr(beta_fn, "clear", None),
+            getattr(getattr(beta_fn, "info", None), "clear", None),
             clear_caches,
             _cached_rs.clear,
             _cached_taiex_vix.clear,
@@ -1503,14 +1553,14 @@ def render_order_assistant(send_to_telegram, load_sheets, beta_fn, load_market=N
     if not using_sample:
         try:
             with st.spinner("正在用第四頁同一套算法讀持倉..."):
-                snapshot = _load_live(load_sheets, beta_fn, load_market)
+                snapshot = _load_live(load_sheets, beta_fn, load_market, beta_fallbacks=overrides)
             st.caption(f"線上持倉。美元／台幣 {snapshot.usdtwd:.2f}，台指 {snapshot.twii:,.0f}。槓桿定義與第四頁相同。")
         except Exception as exc:
             st.warning(_public_error(exc))
-            snapshot = build_sample_snapshot()
+            snapshot = _with_beta_fallbacks(build_sample_snapshot(), overrides)
             using_sample = True
     else:
-        snapshot = build_sample_snapshot()
+        snapshot = _with_beta_fallbacks(build_sample_snapshot(), overrides)
 
     if using_sample:
         st.info("現在是示範持倉（台股、美股、SOXL／00663L、元大期貨），用來熟悉流程。數字不是你的真實帳戶，也不會寫回 Google 試算表。")

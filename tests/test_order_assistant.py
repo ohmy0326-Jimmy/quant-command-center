@@ -74,10 +74,11 @@ class ValuationTests(unittest.TestCase):
         self.assertAlmostEqual(metrics["exposure"], 4_332_500.0, places=6)
         self.assertAlmostEqual(metrics["leverage"], 4_332_500 / 525808, places=8)
         self.assertAlmostEqual(metrics["cash"], 50000.0, places=6)
-        # tw_exp = 110,000 * 1.2 + 4,200,000 = 4,332,000; us_exp = 7,500 * 3 = 22,500
-        # total_beta = (4,332,000 + 22,500) / 525,808 = 4,354,500 / 525,808
-        self.assertAlmostEqual(metrics["beta"], 4_354_500 / 525808, places=8)
-        self.assertAlmostEqual(metrics["total_beta"], 4_354_500 / 525808, places=8)
+        # tw_exp = 110,000 * 1.2 + 4,200,000 = 4,332,000
+        # us_exp = SOXL 市值 7,500 × 槓桿 3 × SOXX 預設 Beta 1.6 = 36,000（舊規則只算槓桿 = 22,500）
+        # total_beta = (4,332,000 + 36,000) / 525,808 = 4,368,000 / 525,808
+        self.assertAlmostEqual(metrics["beta"], 4_368_000 / 525808, places=8)
+        self.assertAlmostEqual(metrics["total_beta"], 4_368_000 / 525808, places=8)
         self.assertAlmostEqual(metrics["margin_ratio"], 368308 / 538000 * 100, places=6)
         self.assertTrue(metrics["margin_call"])
         self.assertAlmostEqual(metrics["futures_equity"], YUANTA_FUTURES_BASE_EQUITY + 200000, places=6)
@@ -236,8 +237,8 @@ class OrderImpactTests(unittest.TestCase):
         self.assertAlmostEqual(updated.metrics["nav"], 1000.0, places=6)
         self.assertAlmostEqual(updated.metrics["exposure"], 800.0, places=6)
         self.assertAlmostEqual(updated.metrics["leverage"], 0.8, places=6)
-        # AAA MV 500 * beta 1 + SOXL MV 100 * leverage 3 = 800 Beta exposure, NAV 1000 => total_beta = 800 / 1000 = 0.8
-        self.assertAlmostEqual(updated.metrics["beta"], 0.8, places=6)
+        # AAA MV 500 * beta 1 + SOXL MV 100 * 槓桿 3 * SOXX 預設 Beta 1.6 = 980, NAV 1000 => 0.98
+        self.assertAlmostEqual(updated.metrics["beta"], 0.98, places=6)
         self.assertAlmostEqual(updated.metrics["cash"], 400.0, places=6)
 
     def test_buy_shortfall_becomes_margin_debt_and_nav_unchanged(self):
@@ -396,7 +397,7 @@ class SpecificationRefinementTests(unittest.TestCase):
         self.assertEqual(metrics["exposure"], 452000.0)
 
     def test_leveraged_etf_beta_exposure(self):
-        # US Leveraged ETF: MV = 100k TWD, 標的槓桿 = 3, Beta = 3.2 => Beta曝險 = 100k * 3 = 300k (not 320k or 960k)
+        # US Leveraged ETF: MV = 100k TWD, 標的槓桿 = 3, 標的 SOXX 無即時資料 => 預設 1.6，Beta曝險 = 100k * 3 * 1.6 = 480k（不用 ETF 自己的 3.2）
         positions = pd.DataFrame([_stock("美股戶", "美股", "SOXL", 100, 31.25, 31.25, lev=3.0, beta=3.2)])
         accounts = pd.DataFrame([{"帳戶名稱": "美股戶", "現金餘額": 0, "融資/質押借款": 0}])
         valued, _acc, metrics = finalize_valuation(positions, accounts, usdtwd=32.0)
@@ -404,7 +405,8 @@ class SpecificationRefinementTests(unittest.TestCase):
         # MV(TWD) = 100 * 31.25 * 32 = 100,000 TWD
         self.assertAlmostEqual(row["即時市值(台幣)"], 100000.0)
         self.assertAlmostEqual(row["實質曝險(台幣)"], 300000.0)
-        self.assertAlmostEqual(row["Beta曝險(台幣)"], 300000.0)
+        self.assertAlmostEqual(row["Beta曝險(台幣)"], 480000.0)
+        self.assertIn("預設值", row["Beta來源"])
 
     def test_split_nav_and_betas(self):
         positions = pd.DataFrame(

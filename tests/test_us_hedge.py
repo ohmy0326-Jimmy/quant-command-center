@@ -12,6 +12,7 @@ from us_hedge import (
     us_strategy_summary,
     us_hedge_stress_table,
     clear_cache,
+    underlying_beta,
 )
 
 def test_hedge_contracts():
@@ -41,17 +42,24 @@ def test_us_spx_exposure():
     nvda_row = next(r for r in res["rows"] if r["ticker"] == "NVDA")
     assert nvda_row["eff_beta"] == 1.7
     
+    # 槓桿 ETF 的 Beta 在報價階段決定（與第四頁同一份資料），避險區塊直接讀估價結果。
+    assert soxl_row["beta_source"].startswith("槓桿 3x")
+    assert res["fallback_rows"] == ["SOXL"]
+    assert res["us_beta_spx"] == pytest.approx(snap.metrics["us_beta"])
+
+
+def test_underlying_beta_helper():
     def mock_beta(u, _):
-        if u == "SOXX": return (2.0, "x")
+        if u == "SOXX":
+            return (2.0, "x")
         raise ValueError()
-        
-    res2 = us_spx_exposure(snap, beta_fn=mock_beta)
-    soxl_row2 = next(r for r in res2["rows"] if r["ticker"] == "SOXL")
-    assert soxl_row2["eff_beta"] == 6.0 # lev 3 * 2.0
-    
-    res3 = us_spx_exposure(snap, overrides={"SOXL": 1.5})
-    soxl_row3 = next(r for r in res3["rows"] if r["ticker"] == "SOXL")
-    assert soxl_row3["eff_beta"] == 4.5 # lev 3 * 1.5
+
+    assert underlying_beta("SOXL", mock_beta)[0] == 2.0
+    b, src = underlying_beta("SOXL", None, {"SOXX": 1.5})
+    assert b == 1.5 and "手動" in src
+    b, src = underlying_beta("SOXL")
+    assert b == 1.6 and "預設值" in src
+
 
 def test_strategies_and_pnl():
     premiums = {"put": 10, "short_put": 4, "call": 6}
