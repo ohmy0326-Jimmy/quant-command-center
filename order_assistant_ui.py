@@ -44,6 +44,7 @@ from order_calculators import (
     FUTURES_PRODUCTS,
     default_margin_per_lot,
     futures_order_impact,
+    ledger_margin_per_lot,
     futures_trial,
     leaps_call_metrics,
 )
@@ -1406,15 +1407,23 @@ def _render_futures_calc(snapshot, rules: Rules):
 
     sc1, sc2, sc3 = st.columns(3)
     stop_price = sc1.number_input("停損價（0 = 不設停損）", min_value=0.0, value=0.0, step=1.0, key="oa_fut_stop")
+    margin_info = ledger_margin_per_lot(product, snapshot.metrics)
     margin_key = f"oa_fut_margin_{product}"
     margin = sc2.number_input(
         "每口原始保證金",
         min_value=0.0,
-        value=float(default_margin_per_lot(product)),
+        value=float(margin_info["value"]),
         step=1000.0,
         key=margin_key,
-        help="預設來自系統設定的原始保證金（TX 701,000／MTX 175,250／FMF 35,050），可以改成元大最新公告",
+        help="預先帶入 Futures_Ledger 的原始保證金（依校正當下口數換算每口）；讀不到時用系統預設（TX 701,000／MTX 175,250／FMF 35,050）。可以改成元大最新公告",
     )
+    margin_source = margin_info["source"]
+    margin_caption = f"保證金來源：{margin_source}"
+    if margin_info.get("basis"):
+        margin_caption += f"（{margin_info['basis']}）"
+    if abs(float(margin) - float(margin_info["value"])) > 1e-6:
+        margin_caption += f"｜已手動改為 NT$ {margin:,.0f}（帶入值 NT$ {margin_info['value']:,.0f}）"
+    sc2.caption(margin_caption)
     default_max_loss = float(round(rules.max_loss_pct_nav / 100 * snapshot.metrics["nav"]))
     max_loss = sc3.number_input(
         "單筆最大虧損（NT$）",
@@ -1505,6 +1514,11 @@ def _render_futures_calc(snapshot, rules: Rules):
             val_str,
             delta=delta_str,
             delta_color="off",
+            help=(
+                f"下單後 權益數 NT$ {impact.get('equity_after', 0.0):,.0f} ÷ 原始保證金 NT$ {impact.get('initial_margin_after', 0.0):,.0f}"
+                f"｜下單前 NT$ {impact.get('equity_before', 0.0):,.0f} ÷ NT$ {impact.get('initial_margin_before', 0.0):,.0f}"
+                f"｜權益數來源：{impact.get('equity_source', '')}"
+            ),
         )
 
         if not impact["margin_sufficient"]:
@@ -1515,7 +1529,7 @@ def _render_futures_calc(snapshot, rules: Rules):
         if impact["leverage_after"] > rules.target_leverage:
             st.warning(f"下單後槓桿 {impact['leverage_after']:.2f}x 超過上限 {rules.target_leverage:.2f}x。")
 
-    st.caption("槓桿與 Beta 用第四頁同一套估價（finalize_valuation）重算；權益比率 = 權益數 ÷ 原始保證金。名目曝險 = 口數 × 價格 × 乘數（TX 200、MTX 50、FMF／TMF 10）。")
+    st.caption("槓桿與 Beta 用第四頁同一套估價（finalize_valuation）重算；權益比率 = 權益數（元大本日餘額＋未平倉損益）÷ 原始保證金（每口值來自 Futures_Ledger，本商品用上面的欄位）。名目曝險 = 口數 × 價格 × 乘數（TX 200、MTX 50、FMF／TMF 10）。")
 
     if lots > 0 and impact is not None:
         return f"期貨：{side_str} {product} {lots} 口 @ {price:,.0f}（保證金 NT$ {trial['margin_needed']:,.0f}，槓桿 {impact['leverage_before']:.2f}x → {impact['leverage_after']:.2f}x）"

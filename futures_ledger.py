@@ -18,6 +18,7 @@ Active_Positions 元大期貨列的現金餘額（目前是 B7）。
 
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass, field
 from datetime import date
@@ -169,6 +170,10 @@ class LedgerQuote:
     tax: float = 0.0
     cashflow: float = 0.0
     margin_note: float | None = None
+    # 每口原始保證金（新台幣），key 為 inventory_key（TX、MTX、TMF、FMF…）。
+    margin_per_lot: dict[str, float] = field(default_factory=dict)
+    # 每個商品的來源說明，例如「校正 35,050 ÷ 1 口」或「設定列」。
+    margin_basis: dict[str, str] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -276,6 +281,7 @@ def quote_yuanta_ledger(
     calibrations: list[dict] = []
     snapshots: list[dict] = []
     flows: list[dict] = []
+    explicit_margin: dict[str, float] = {}
 
     for _, row in frame.iterrows():
         kind = _kind(row.get("類型"))
@@ -284,6 +290,9 @@ def quote_yuanta_ledger(
             key = "*" if key == "*" else symbol_root(key)
             fee = _optional_number(row.get("手續費預設"))
             rate = _optional_number(row.get("稅率預設"))
+            per_lot_margin = _optional_number(row.get("原始保證金"))
+            if per_lot_margin is not None and per_lot_margin > 0 and key != "*":
+                explicit_margin[inventory_key(key)] = per_lot_margin
             if fee is not None:
                 fees[key] = fee
             if rate is not None:
@@ -321,6 +330,8 @@ def quote_yuanta_ledger(
             None,
             "b7",
             "Futures_Ledger 缺少校正點，已退回 Active_Positions 現金餘額（B7）",
+            margin_per_lot=dict(explicit_margin),
+            margin_basis={key: "設定列每口原始保證金" for key in explicit_margin},
             warnings=warnings,
         )
 
@@ -328,6 +339,9 @@ def quote_yuanta_ledger(
     current = calibrations[-1]
     cal_day: date = current["date"]
     books = _books_at(cal_day, snapshots, positions, warnings)
+    margin = _optional_number(current["row"].get("原始保證金"))
+    cal_lots = {key: abs(book.qty) for key, book in books.items() if abs(book.qty) > 1e-9}
+    per_lot, basis = derive_margin_per_lot(margin, cal_lots, explicit_margin)
     realized = 0.0
     fee_total = 0.0
     tax_total = 0.0
@@ -356,7 +370,6 @@ def quote_yuanta_ledger(
     cashflow = sum(item["amount"] for item in flows if item["date"] > cal_day)
     balance = float(current["balance"]) + realized - fee_total - tax_total + cashflow
     stale = (today - cal_day).days > STALE_AFTER_DAYS
-    margin = _optional_number(current["row"].get("原始保證金"))
     label = f"自動推算（最後校正日 {cal_day.isoformat()}）"
     return LedgerQuote(
         True,
@@ -371,8 +384,53 @@ def quote_yuanta_ledger(
         tax=tax_total,
         cashflow=cashflow,
         margin_note=margin,
+        margin_per_lot=per_lot,
+        margin_basis=basis,
         warnings=warnings,
     )
+
+
+def derive_margin_per_lot(
+    total_margin: float | None,
+    lots: dict[str, float],
+    explicit: dict[str, float] | None = None,
+) -> tuple[dict[str, float], dict[str, str]]:
+    """由校正列的原始保證金（帳戶總額）推每口保證金。
+
+    * 設定列有填「原始保證金」的商品，直接當每口保證金（優先）。
+    * 校正當下只有一種期貨（例如微台 1 口）：總額 ÷ 口數。
+    * 多種期貨：扣掉有設定列的商品後，只剩一種沒設定時，用剩下的總額 ÷ 口數；
+      否則無法拆分，只回傳設定列的值。
+    選擇權（TXO）不收原始保證金（買方），不參與拆分。
+    """
+    per_lot: dict[str, float] = {}
+    basis: dict[str, str] = {}
+    for key, value in (explicit or {}).items():
+        if value is not None and value > 0:
+            per_lot[key] = float(value)
+            basis[key] = "設定列每口原始保證金"
+    if total_margin is None or total_margin <= 0:
+        return per_lot, basis
+    futures_lots = {
+        key: qty for key, qty in (lots or {}).items() if qty and qty > 0 and symbol_root(key) != "TXO"
+    }
+    if not futures_lots:
+        return per_lot, basis
+    unknown = [key for key in futures_lots if key not in per_lot]
+    if len(unknown) != 1:
+        return per_lot, basis
+    target = unknown[0]
+    known_total = sum(per_lot[key] * qty for key, qty in futures_lots.items() if key in per_lot)
+    remainder = float(total_margin) - known_total
+    qty = futures_lots[target]
+    if remainder <= 0 or qty <= 0:
+        return per_lot, basis
+    per_lot[target] = remainder / qty
+    if known_total > 0:
+        basis[target] = f"校正原始保證金 {total_margin:,.0f} − 其他商品 {known_total:,.0f}，÷ {qty:g} 口"
+    else:
+        basis[target] = f"校正原始保證金 {total_margin:,.0f} ÷ {qty:g} 口"
+    return per_lot, basis
 
 
 def apply_yuanta_ledger(
@@ -405,6 +463,8 @@ def apply_yuanta_ledger(
     out["_yuanta_flow"] = 0.0
     out["_yuanta_detail"] = ""
     out["_yuanta_warning"] = ""
+    out["_yuanta_margin_total"] = pd.NA
+    out["_yuanta_margin_per_lot"] = ""
     if not hits:
         return out
     if len(hits) > 1:
@@ -431,7 +491,40 @@ def apply_yuanta_ledger(
     out.at[target, "_yuanta_flow"] = float(quote.cashflow)
     out.at[target, "_yuanta_detail"] = quote.detail
     out.at[target, "_yuanta_warning"] = "；".join(quote.warnings)
+    if quote.margin_note is not None:
+        out.at[target, "_yuanta_margin_total"] = float(quote.margin_note)
+    out.at[target, "_yuanta_margin_per_lot"] = _encode_margin(quote.margin_per_lot, quote.margin_basis)
     return out
+
+
+def _encode_margin(per_lot: dict[str, float], basis: dict[str, str]) -> str:
+    if not per_lot:
+        return ""
+    payload = {key: {"per_lot": float(value), "basis": basis.get(key, "")} for key, value in per_lot.items()}
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
+def _decode_margin(text) -> tuple[dict[str, float], dict[str, str]]:
+    raw = _cell_text(text)
+    if not raw:
+        return {}, {}
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}, {}
+    per_lot: dict[str, float] = {}
+    basis: dict[str, str] = {}
+    if not isinstance(payload, dict):
+        return {}, {}
+    for key, item in payload.items():
+        if not isinstance(item, dict):
+            continue
+        value = _optional_number(item.get("per_lot"))
+        if value is None or value <= 0:
+            continue
+        per_lot[str(key)] = value
+        basis[str(key)] = str(item.get("basis") or "")
+    return per_lot, basis
 
 
 def ledger_metrics_from_accounts(account_data: pd.DataFrame) -> dict:
@@ -448,6 +541,9 @@ def ledger_metrics_from_accounts(account_data: pd.DataFrame) -> dict:
         "futures_cash_flow": 0.0,
         "futures_cash_detail": "",
         "futures_cash_warning": "",
+        "futures_ledger_margin_total": None,
+        "futures_ledger_margin_per_lot": {},
+        "futures_ledger_margin_basis": {},
     }
     if account_data is None or account_data.empty or "_yuanta_source" not in account_data.columns:
         return empty
@@ -462,6 +558,8 @@ def ledger_metrics_from_accounts(account_data: pd.DataFrame) -> dict:
         base_num = None
     stale_raw = row.get("_yuanta_stale")
     stale = bool(stale_raw) if not (isinstance(stale_raw, float) and math.isnan(stale_raw)) else False
+    margin_total = _optional_number(row.get("_yuanta_margin_total"))
+    margin_per_lot, margin_basis = _decode_margin(row.get("_yuanta_margin_per_lot"))
     return {
         "futures_cash_source": str(row.get("_yuanta_source") or ""),
         "futures_cash_label": str(row.get("_yuanta_label") or ""),
@@ -474,6 +572,9 @@ def ledger_metrics_from_accounts(account_data: pd.DataFrame) -> dict:
         "futures_cash_flow": float(row.get("_yuanta_flow") or 0.0),
         "futures_cash_detail": str(row.get("_yuanta_detail") or ""),
         "futures_cash_warning": str(row.get("_yuanta_warning") or ""),
+        "futures_ledger_margin_total": margin_total,
+        "futures_ledger_margin_per_lot": margin_per_lot,
+        "futures_ledger_margin_basis": margin_basis,
     }
 
 

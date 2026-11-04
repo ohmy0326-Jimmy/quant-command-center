@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import traceback
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Security
@@ -12,7 +13,7 @@ from fastapi.security import APIKeyHeader
 
 from ai_advice import RISK_MANAGER_MODEL, build_risk_manager_prompt, complete_risk_manager_prompt, page4_advice_figures
 from api.advice_cache import AdviceCache, AdviceTimeout, RateLimited, call_with_timeout
-from api.auth import api_key_matches, expected_api_key, install_redact_filter
+from api.auth import api_key_matches, expected_api_key, install_redact_filter, redact_secrets
 from api.schemas import AdviceResponse, ErrorResponse, HealthResponse, PortfolioResponse
 from portfolio_briefing import SCHEMA_VERSION, format_as_of, load_live_book, taipei_now
 
@@ -100,6 +101,34 @@ async def _http_error(_request, exc: HTTPException):
     return JSONResponse(status_code=exc.status_code, content=_error_body(detail), headers=headers)
 
 
+TRACEBACK_FRAMES = 5
+TRACEBACK_MAX_CHARS = 2000
+MESSAGE_MAX_CHARS = 500
+
+
+def short_traceback(exc: BaseException, frames: int = TRACEBACK_FRAMES, max_chars: int = TRACEBACK_MAX_CHARS) -> str:
+    """最後幾層堆疊（含 raise from 的原因），已塗掉祕密並截斷長度。"""
+    lines = traceback.format_exception(type(exc), exc, exc.__traceback__, limit=-abs(int(frames)))
+    text = redact_secrets("".join(lines).rstrip())
+    if len(text) > max_chars:
+        text = "…" + text[-max_chars:]
+    return text
+
+
+def _log_load_failure(route: str, exc: BaseException) -> None:
+    """記下例外型別、訊息與簡短堆疊，祕密先塗掉。回應本身仍只說 portfolio unavailable。"""
+    message = redact_secrets(str(exc))
+    if len(message) > MESSAGE_MAX_CHARS:
+        message = message[:MESSAGE_MAX_CHARS] + "…"
+    logger.warning(
+        "portfolio load failed route=%s type=%s message=%s\n%s",
+        route,
+        type(exc).__name__,
+        message or "(empty)",
+        short_traceback(exc),
+    )
+
+
 def _no_store(response_model, payload):
     body = response_model.model_validate(payload).model_dump()
     return JSONResponse(status_code=200, content=body, headers={"Cache-Control": "no-store"})
@@ -116,7 +145,7 @@ def portfolio(_: None = Depends(require_api_key), loader=Depends(get_book_loader
     try:
         book = loader()
     except Exception as exc:
-        logger.warning("portfolio load failed: %s", type(exc).__name__)
+        _log_load_failure("/v1/portfolio", exc)
         raise HTTPException(status_code=502, detail="portfolio unavailable") from exc
     return _no_store(PortfolioResponse, book.payload)
 
@@ -138,7 +167,7 @@ def ai_advice(
     try:
         book = loader()
     except Exception as exc:
-        logger.warning("portfolio load failed: %s", type(exc).__name__)
+        _log_load_failure("/v1/ai-advice", exc)
         raise HTTPException(status_code=502, detail="portfolio unavailable") from exc
 
     nav, leverage, beta, cash_pct = page4_advice_figures(book.metrics)

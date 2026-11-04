@@ -155,6 +155,8 @@ X-API-Key: <READONLY_API_KEY>
 | 401 | `unauthorized` | 沒帶、帶錯，或服務沒掛 `READONLY_API_KEY` |
 | 429 | `rate limited` | 冷卻中且沒有可回的建議。標頭有 `Retry-After`（秒） |
 | 502 | `portfolio unavailable` 或 `ai advice unavailable` | 讀取或模型失敗 |
+
+讀取持倉失敗時，伺服器日誌（`api.main` WARNING）會記錄路由、例外型別、例外訊息與最後 5 層堆疊（上限 2,000 字）。寫入前會塗掉祕密：名稱像祕密的環境變數（`*_KEY`、`*_TOKEN`、`*SECRET*`、`*PASSWORD*`、`*CREDENTIALS*`…）的值、PEM 私鑰與 `private_key` 欄位、`api_key=`／`token:`／`Authorization` 之類的值、Bearer 權杖、常見金鑰格式（`AIza…`、`ghp_…`、`sk-…`、`ya29.…`、JWT），以及 32 字以上混合大小寫與數字的 base64 類字串。回應本體仍只有 `portfolio unavailable`，不含任何細節。
 | 503 | `ai advice is not configured` | 沒有 `GEMINI_API_KEY` |
 | 504 | `ai advice timed out` | 超過 `AI_ADVICE_TIMEOUT_SECONDS` |
 

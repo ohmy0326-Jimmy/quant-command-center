@@ -691,6 +691,9 @@ def _empty_metrics() -> dict:
         "futures_cash_flow": 0.0,
         "futures_cash_detail": "",
         "futures_cash_warning": "",
+        "futures_ledger_margin_total": None,
+        "futures_ledger_margin_per_lot": {},
+        "futures_ledger_margin_basis": {},
         "beta_fallbacks_used": [],
     }
 

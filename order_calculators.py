@@ -9,7 +9,7 @@ import math
 from datetime import date
 
 from order_assistant import Snapshot, apply_order, bs_price_greeks, implied_vol_bs
-from portfolio_risk import equity_ratio_pct, futures_initial_margin, futures_multiplier
+from portfolio_risk import equity_ratio_pct, futures_initial_margin, futures_multiplier, is_option_row
 
 def years_to_expiry(expiry: date, today: date) -> float:
     days = (expiry - today).days
@@ -152,6 +152,88 @@ def default_margin_per_lot(product: str, ledger_margin: float | None = None, led
     margin = futures_initial_margin(norm_prod)
     return float(margin) if margin is not None else 0.0
 
+MARGIN_SOURCE_LEDGER = "Futures_Ledger"
+MARGIN_SOURCE_DEFAULT = "預設值"
+
+# 試算器的商品代號 → Futures_Ledger 可能使用的代號（微台在持倉統計是 FMF，元大有時寫 TMF）。
+_LEDGER_KEYS = {"TX": ("TX",), "MTX": ("MTX",), "FMF": ("FMF", "TMF")}
+
+
+def ledger_margin_per_lot(product: str, metrics: dict | None) -> dict:
+    """每口原始保證金：先找 Futures_Ledger 推出的值，找不到就用系統預設。
+
+    回傳 {"value", "source"（Futures_Ledger／預設值）, "basis"（推算方式）}。
+    metrics 通常是 snapshot.metrics；鍵 futures_ledger_margin_per_lot 由 futures_ledger 寫入。
+    """
+    try:
+        norm_prod = normalize_futures_product(product)
+    except ValueError:
+        norm_prod = str(product or "").strip().upper()
+    per_lot = {}
+    basis = {}
+    if isinstance(metrics, dict):
+        raw = metrics.get("futures_ledger_margin_per_lot")
+        per_lot = raw if isinstance(raw, dict) else {}
+        raw_basis = metrics.get("futures_ledger_margin_basis")
+        basis = raw_basis if isinstance(raw_basis, dict) else {}
+    for key in _LEDGER_KEYS.get(norm_prod, (norm_prod,)):
+        value = per_lot.get(key)
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(number) and number > 0:
+            return {"value": number, "source": MARGIN_SOURCE_LEDGER, "basis": str(basis.get(key) or "")}
+    return {
+        "value": float(default_margin_per_lot(norm_prod)),
+        "source": MARGIN_SOURCE_DEFAULT,
+        "basis": "系統設定的原始保證金（TX 701,000／MTX 175,250／FMF 35,050）",
+    }
+
+
+def _margin_map(metrics: dict | None) -> dict[str, float]:
+    """把 Futures_Ledger 的每口保證金整理成試算器代號（TX／MTX／FMF）。"""
+    out: dict[str, float] = {}
+    for product in FUTURES_PRODUCTS:
+        info = ledger_margin_per_lot(product, metrics)
+        if info["source"] == MARGIN_SOURCE_LEDGER:
+            out[product] = float(info["value"])
+    return out
+
+
+def initial_margin_with_ledger(valued, per_lot: dict[str, float] | None, fallback: float = 0.0) -> float:
+    """元大期貨部位的原始保證金合計。有 Futures_Ledger／畫面上的每口值就用它，否則沿用估價表的預設占用。
+
+    valued 是 finalize_valuation 的持倉表（snapshot.valued）。沒有期貨列時回 fallback。
+    """
+    if valued is None or getattr(valued, "empty", True) or "種類" not in valued.columns:
+        return float(fallback or 0.0)
+    total = 0.0
+    saw = False
+    for _, row in valued.iterrows():
+        if "期" not in str(row.get("種類")) or is_option_row(row):
+            continue
+        saw = True
+        try:
+            qty = abs(float(row.get("持有數量") or 0.0))
+        except (TypeError, ValueError):
+            qty = 0.0
+        value = None
+        try:
+            prod = normalize_futures_product(str(row.get("標的") or ""))
+            value = (per_lot or {}).get(prod)
+        except ValueError:
+            prod = None
+        if value is not None and value > 0:
+            total += float(value) * qty
+        else:
+            try:
+                total += float(row.get("實質佔用本金(原幣)") or 0.0)
+            except (TypeError, ValueError):
+                pass
+    return total if saw else float(fallback or 0.0)
+
+
 def futures_trial(product, lots, price, stop_price=None, side="buy", margin_per_lot=None, max_loss=None) -> dict:
     res = {
         "ok": True,
@@ -236,6 +318,12 @@ def futures_trial(product, lots, price, stop_price=None, side="buy", margin_per_
     return res
 
 def futures_order_impact(snapshot: Snapshot, trial: dict, account: str | None = None) -> dict:
+    """下單前後的槓桿、Beta 與權益比率。
+
+    權益比率＝權益數 ÷ 原始保證金。權益數用 finalize_valuation 的元大期貨帳戶淨值
+    （本日餘額來自 Futures_Ledger 推算，加上未平倉損益與選擇權市值）；原始保證金用
+    Futures_Ledger 推出的每口保證金，本次試算商品用畫面上的每口值，其餘沿用預設。
+    """
     product = trial.get("product", "")
     side = trial.get("side", "buy")
     lots = trial.get("lots", 0)
@@ -258,17 +346,40 @@ def futures_order_impact(snapshot: Snapshot, trial: dict, account: str | None = 
     
     before = snapshot.metrics
     after = after_snapshot.metrics
+
+    per_lot = _margin_map(before)
+    trial_margin = trial.get("margin_per_lot")
+    try:
+        trial_margin = float(trial_margin) if trial_margin is not None else None
+    except (TypeError, ValueError):
+        trial_margin = None
+    if product in FUTURES_PRODUCTS and trial_margin is not None and trial_margin > 0:
+        per_lot[product] = trial_margin
+
+    initial_before = initial_margin_with_ledger(
+        getattr(snapshot, "valued", None), per_lot, fallback=float(before.get("futures_initial") or 0.0)
+    )
+    initial_after = initial_margin_with_ledger(
+        getattr(after_snapshot, "valued", None), per_lot, fallback=float(after.get("futures_initial") or 0.0)
+    )
+    equity_before = before.get("futures_equity")
+    equity_after = after.get("futures_equity")
+
+    eq_ratio_before = equity_ratio_pct(equity_before, initial_before)
+    eq_ratio_after = equity_ratio_pct(equity_after, initial_after)
     
-    eq_ratio_before = equity_ratio_pct(before.get("futures_equity"), before.get("futures_initial"))
-    eq_ratio_after = equity_ratio_pct(after.get("futures_equity"), after.get("futures_initial"))
-    
+    # 可動用保證金＝權益數 − 原始保證金；原始保證金改用上面的 Futures_Ledger 口徑。
     excess_margin_before = float(before.get("excess_margin") or 0.0)
+    excess_margin_before += float(before.get("futures_initial") or 0.0) - initial_before
     margin_needed = float(trial.get("margin_needed") or 0.0)
     
     opening = str(side).lower() in ("buy", "買進")
     # 賣出（平多單）會釋出保證金，不需要再檢查可動用保證金。
     margin_sufficient = bool(excess_margin_before >= margin_needed) if opening else True
     margin_shortfall = max(0.0, margin_needed - excess_margin_before) if opening else 0.0
+
+    cash_source = str(before.get("futures_cash_source") or "")
+    equity_source = "Futures_Ledger 本日餘額" if cash_source == "ledger" else ("Active_Positions 現金餘額（B7）" if cash_source == "b7" else "備援常數")
     
     return {
         "after": after_snapshot,
@@ -283,6 +394,11 @@ def futures_order_impact(snapshot: Snapshot, trial: dict, account: str | None = 
         "nav_after": float(after.get("nav") or 0.0),
         "exposure_before": float(before.get("exposure") or 0.0),
         "exposure_after": float(after.get("exposure") or 0.0),
+        "equity_before": float(equity_before or 0.0),
+        "equity_after": float(equity_after or 0.0),
+        "equity_source": equity_source,
+        "initial_margin_before": initial_before,
+        "initial_margin_after": initial_after,
         "equity_ratio_before": eq_ratio_before,
         "equity_ratio_after": eq_ratio_after,
         "excess_margin_before": excess_margin_before,
