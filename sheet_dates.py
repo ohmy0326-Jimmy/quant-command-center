@@ -180,3 +180,17 @@ def rewrite_daily_nav_dates(worksheet) -> int:
     if hasattr(worksheet, "format"):
         worksheet.format("A2:A5000", NAV_DATE_FORMAT)
     return changed
+
+
+def nav_flow_map(nav_data: pd.DataFrame | None) -> dict[str, float]:
+    """NAV_Snapshots 的「出入金」欄 → {yyyy-mm-dd: 台幣}。沒有這欄（舊 Daily_NAV）回空 dict。同一天留最後一筆。"""
+    out: dict[str, float] = {}
+    if nav_data is None or nav_data.empty or "日期" not in nav_data.columns or "出入金" not in nav_data.columns:
+        return out
+    values = pd.to_numeric(nav_data["出入金"].astype(str).str.replace(",", "", regex=False), errors="coerce")
+    for raw_day, flow in zip(nav_data["日期"], values):
+        day = parse_sheet_date(raw_day)
+        if day is None:
+            continue
+        out[day.isoformat()] = 0.0 if pd.isna(flow) else float(flow)
+    return out

@@ -316,6 +316,8 @@ class ApiHttpTests(unittest.TestCase):
             {
                 "schema_version",
                 "as_of",
+                "usdtwd_source",
+                "warnings",
                 "currency",
                 "usdtwd",
                 "net_value",

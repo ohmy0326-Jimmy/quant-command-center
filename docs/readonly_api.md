@@ -40,7 +40,7 @@ X-API-Key: <READONLY_API_KEY>
 
 每個 JSON 都有：
 
-- `schema_version`：目前 `1.3.0`（1.3.0 新增 `beta_leverage` 與部位層的 Beta／名目欄位，舊欄位全部保留）
+- `schema_version`：目前 `1.4.0`（1.4.0 在 `/v1/portfolio` 新增 `usdtwd_source` 與 `warnings`；1.3.0 新增 `beta_leverage` 與部位層的 Beta／名目欄位；舊欄位全部保留）
 - `as_of`：`Asia/Taipei` 的 ISO 8601，例如 `2026-10-29T22:00:00+08:00`
 
 機器可讀的 JSON Schema 在 [`readonly_api.schema.json`](readonly_api.schema.json)，由 `api/schemas.py` 的 Pydantic 模型產生。
@@ -51,13 +51,26 @@ X-API-Key: <READONLY_API_KEY>
 
 ```json
 {
-  "schema_version": "1.3.0",
+  "schema_version": "1.4.0",
   "as_of": "2026-10-29T22:00:00+08:00",
   "status": "ok"
 }
 ```
 
 ## GET /v1/portfolio
+
+### 匯率來源（1.4.0）
+
+`usdtwd_source` 說明這次用的美元／台幣從哪來，依序嘗試：
+
+| 值 | 意思 |
+| --- | --- |
+| `live` | Yahoo `USDTWD=X` 最近收盤（20～50 之間才算數） |
+| `cached` | 即時抓不到，用這個程序 3 天內最近一次成功的即時匯率 |
+| `last_known` | 用 `NAV_Snapshots` 最後一筆「匯率來源＝live」的 `USDTWD` |
+| `fallback` | 以上都沒有，用預設 32.5；美股市值與淨值可能失真 |
+
+不是 `live` 時 `warnings` 會有一句說明。第四頁也會顯示同一句黃色警告。
 
 成功時 **200**。數字與第四頁相同，幣別是台幣。`leverage` 是名目曝險 ÷ 淨值（畫面上會再四捨五入到小數兩位）。`cash_pct` 是現金 ÷ 淨值 × 100 的百分點（畫面上四捨五入到小數一位），`9.5` 表示 9.5%。`total_beta` 為總組合 Beta（(台股與台指期貨 Beta 曝險 + 美股 Beta 曝險) ÷ 總淨值），`beta` 欄位亦設為 `total_beta`。`tw_beta` 與 `us_beta` 分別為台股/台指期貨與美股分區 Beta（分區 Beta 曝險 ÷ 分區淨值）。`tw_nav` 與 `us_nav` 分別為台股/台指期貨與美股分區淨值。`tw_exposure` 與 `us_exposure` 分別為台股/台指期貨與美股的實質 Beta 曝險（臺指期貨曝險現為名目合約總值：口數 × 指數點 × 乘數）。
 
@@ -86,10 +99,12 @@ X-API-Key: <READONLY_API_KEY>
 
 ```json
 {
-  "schema_version": "1.3.0",
+  "schema_version": "1.4.0",
   "as_of": "2026-10-29T22:00:00+08:00",
   "currency": "TWD",
   "usdtwd": 30.0,
+  "usdtwd_source": "live",
+  "warnings": [],
   "net_value": 525808.0,
   "exposure": 4332500.0,
   "leverage": 8.2397,

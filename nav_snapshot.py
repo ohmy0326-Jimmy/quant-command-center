@@ -25,7 +25,9 @@ from sheet_dates import parse_sheet_date, taipei_today
 
 SNAPSHOT_SHEET = "NAV_Snapshots"
 CASH_FLOWS_SHEET = "Cash_Flows"
-SNAPSHOT_HEADER = ["日期", "總淨值", "台股淨值", "美股淨值", "名目曝險", "槓桿", "帳戶Beta", "出入金", "寫入時間"]
+LEGACY_SNAPSHOT_HEADER = ["日期", "總淨值", "台股淨值", "美股淨值", "名目曝險", "槓桿", "帳戶Beta", "出入金", "寫入時間"]
+# 2026-11 起多兩欄：寫入時用的美元／台幣匯率與來源（live／cached／last_known／fallback）。舊表頭會自動補上這兩欄。
+SNAPSHOT_HEADER = LEGACY_SNAPSHOT_HEADER + ["USDTWD", "匯率來源"]
 CASH_FLOWS_HEADER = ["日期", "帳戶", "金額", "幣別", "備註"]
 MIN_CAPTURE_DAYS = 60
 
@@ -84,7 +86,7 @@ def net_flow_on(day: date, *flow_lists) -> float:
 
 # ---------------------------------------------------------------- 寫入
 
-def snapshot_row(day: date, metrics: dict, flow: float, written_at: datetime) -> dict:
+def snapshot_row(day: date, metrics: dict, flow: float, written_at: datetime, usdtwd: float | None = None, fx_source: str = "live") -> dict:
     m = metrics or {}
     return {
         "日期": day.isoformat(),
@@ -96,10 +98,32 @@ def snapshot_row(day: date, metrics: dict, flow: float, written_at: datetime) ->
         "帳戶Beta": round(float(m.get("account_beta", 0.0) or 0.0), 4),
         "出入金": round(float(flow), 0),
         "寫入時間": written_at.strftime("%Y-%m-%d %H:%M:%S"),
+        "USDTWD": "" if usdtwd is None else round(float(usdtwd), 4),
+        "匯率來源": str(fx_source or ""),
     }
 
 
-def _ensure_worksheet(spreadsheet, title: str, header: list[str]):
+def last_known_usdtwd(nav_data: pd.DataFrame | None) -> tuple[float, str] | None:
+    """NAV_Snapshots 最後一筆「匯率來源＝live」的 USDTWD → (匯率, 日期)。舊列沒有這欄就回 None。"""
+    if nav_data is None or nav_data.empty or "USDTWD" not in nav_data.columns or "日期" not in nav_data.columns:
+        return None
+    best = None
+    for _, r in nav_data.iterrows():
+        source = str(r.get("匯率來源", "live") or "live").strip()
+        rate = _number(r.get("USDTWD"))
+        day = parse_sheet_date(r.get("日期"))
+        if source != "live" or rate is None or day is None or not 20.0 < rate < 50.0:
+            continue
+        if best is None or day >= best[1]:
+            best = (rate, day)
+    return None if best is None else (best[0], best[1].isoformat())
+
+
+def _ensure_worksheet(spreadsheet, title: str, header: list[str], legacy: list[str] | None = None):
+    """取得分頁；沒有就建立並寫表頭。舊表頭（legacy）是新表頭的前綴時，只在右邊補欄名（不動任何資料）。
+
+    回傳 (worksheet, created, migrated)。表頭對不上時丟例外，避免寫錯欄。
+    """
     try:
         from gspread.exceptions import WorksheetNotFound
     except ImportError:  # pragma: no cover
@@ -109,13 +133,30 @@ def _ensure_worksheet(spreadsheet, title: str, header: list[str]):
     except (WorksheetNotFound, KeyError):
         worksheet = spreadsheet.add_worksheet(title=title, rows=1000, cols=len(header))
         worksheet.update(range_name="A1", values=[header], value_input_option="USER_ENTERED")
-        return worksheet, True
-    first = worksheet.row_values(1)
-    if not any(str(v).strip() for v in first):
+        return worksheet, True, False
+    first = [str(v).strip() for v in worksheet.row_values(1)]
+    while first and not first[-1]:
+        first.pop()
+    if not first:
+        _ensure_cols(worksheet, len(header))
         worksheet.update(range_name="A1", values=[header], value_input_option="USER_ENTERED")
-    elif [str(v).strip() for v in first[: len(header)]] != header:
-        raise RuntimeError(f"{title} 表頭不是預期的 {header}，為避免寫錯欄位已停止。")
-    return worksheet, False
+        return worksheet, False, False
+    if first[: len(header)] == header:
+        return worksheet, False, False
+    if legacy and first == legacy and header[: len(legacy)] == legacy:
+        extra = header[len(legacy):]
+        _ensure_cols(worksheet, len(header))
+        start = _col_letter(len(legacy) + 1)
+        end = _col_letter(len(header))
+        worksheet.update(range_name=f"{start}1:{end}1", values=[extra], value_input_option="USER_ENTERED")
+        return worksheet, False, True
+    raise RuntimeError(f"{title} 表頭不是預期的 {header}，為避免寫錯欄位已停止。")
+
+
+def _ensure_cols(worksheet, needed: int) -> None:
+    count = getattr(worksheet, "col_count", None)
+    if isinstance(count, int) and count < needed:
+        worksheet.add_cols(needed - count)
 
 
 def _col_letter(n: int) -> str:
@@ -128,7 +169,7 @@ def _col_letter(n: int) -> str:
 
 def upsert_snapshot(spreadsheet, row: dict) -> dict:
     """依日期 upsert 一列。同一天重複呼叫只會覆蓋那一列（冪等）。"""
-    worksheet, created = _ensure_worksheet(spreadsheet, SNAPSHOT_SHEET, SNAPSHOT_HEADER)
+    worksheet, created, migrated = _ensure_worksheet(spreadsheet, SNAPSHOT_SHEET, SNAPSHOT_HEADER, LEGACY_SNAPSHOT_HEADER)
     values = [row[col] for col in SNAPSHOT_HEADER]
     day = parse_sheet_date(row["日期"])
     existing = worksheet.col_values(1)
@@ -144,7 +185,7 @@ def upsert_snapshot(spreadsheet, row: dict) -> dict:
     else:
         action = "updated"
     worksheet.update(range_name=f"A{target}:{last}{target}", values=[values], value_input_option="USER_ENTERED")
-    return {"action": action, "row_number": target, "sheet_created": created}
+    return {"action": action, "row_number": target, "sheet_created": created, "header_migrated": migrated}
 
 
 def _live_market(positions: pd.DataFrame):
@@ -162,11 +203,12 @@ def take_snapshot(now: datetime | None = None, spreadsheet=None, usdtwd: float |
     from futures_ledger import FUTURES_LEDGER_SHEET, ledger_cash_flows
     from portfolio_risk import (
         _optional_sheet,
-        fetch_usdtwd,
+        FxQuote,
         load_service_account_info,
         normalize_positions,
         open_quant_spreadsheet,
         read_quant_sheets,
+        resolve_usdtwd,
         value_positions_safely,
     )
     from portfolio_briefing import taipei_now
@@ -174,8 +216,14 @@ def take_snapshot(now: datetime | None = None, spreadsheet=None, usdtwd: float |
     moment = now or taipei_now()
     day = taipei_today(moment.date())
     book = spreadsheet if spreadsheet is not None else open_quant_spreadsheet(load_service_account_info())
-    accounts, _nav, quant = read_quant_sheets(book)
-    rate = float(usdtwd) if usdtwd is not None else float(fetch_usdtwd())
+    accounts, nav_history, quant = read_quant_sheets(book)
+    if usdtwd is None:
+        fx = resolve_usdtwd(last_known=last_known_usdtwd(nav_history))
+    elif isinstance(usdtwd, FxQuote):
+        fx = usdtwd
+    else:
+        fx = FxQuote(float(usdtwd))
+    rate = float(fx.rate)
     positions = normalize_positions(quant)
     prices, betas, sectors, extras = (market or _live_market)(positions)
     _valued, _accounts, metrics, row_warnings = value_positions_safely(
@@ -186,8 +234,14 @@ def take_snapshot(now: datetime | None = None, spreadsheet=None, usdtwd: float |
     ledger_flows = ledger_cash_flows(_optional_sheet(book, FUTURES_LEDGER_SHEET))
     tab_flows, flow_warnings = cash_flows_tab_flows(_optional_sheet(book, CASH_FLOWS_SHEET), rate)
     flow = net_flow_on(day, ledger_flows, tab_flows)
-    row = snapshot_row(day, metrics, flow, moment)
+    row = snapshot_row(day, metrics, flow, moment, usdtwd=rate, fx_source=fx.source)
     result = upsert_snapshot(book, row)
+    fx_warnings = []
+    if fx.is_fallback:
+        # 不默默寫：列上「匯率來源」標記退回值，回應也帶警告。同一天稍後重跑會覆蓋成即時匯率。
+        fx_warnings.append(f"{fx.warning()} 這一列已標記「匯率來源＝{fx.source}」，匯率恢復後同一天重跑會覆蓋。")
+    if result["header_migrated"]:
+        fx_warnings.append("NAV_Snapshots 舊表頭已在右邊補上 USDTWD、匯率來源兩欄（舊資料未變動）。")
     return {
         "date": row["日期"],
         "action": result["action"],
@@ -199,8 +253,10 @@ def take_snapshot(now: datetime | None = None, spreadsheet=None, usdtwd: float |
             "futures_ledger": round(net_flow_on(day, ledger_flows), 0),
             "cash_flows": round(net_flow_on(day, tab_flows), 0),
         },
+        "header_migrated": result["header_migrated"],
         "usdtwd": rate,
-        "warnings": [str(w) for w in list(row_warnings) + flow_warnings],
+        "usdtwd_source": fx.source,
+        "warnings": [str(w) for w in fx_warnings + list(row_warnings) + flow_warnings],
     }
 
 

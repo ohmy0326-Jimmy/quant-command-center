@@ -48,8 +48,14 @@ class FakeWorksheet:
         self.updates.append((range_name, value_input_option))
         start = range_name.split(":")[0]
         row = int("".join(c for c in start if c.isdigit()))
+        col = 0
+        for ch in (c for c in start if c.isalpha()):
+            col = col * 26 + (ord(ch) - 64)
         self._cell_rows(row)
-        self.rows[row - 1] = list(values[0])
+        current = list(self.rows[row - 1])
+        while len(current) < col - 1:
+            current.append("")
+        self.rows[row - 1] = current[: col - 1] + list(values[0]) + current[col - 1 + len(values[0]):]
 
 
 class FakeBook:
@@ -110,7 +116,7 @@ class UpsertTests(unittest.TestCase):
         self.assertEqual(row["槓桿"], 1.5)
         self.assertEqual(row["帳戶Beta"], 1.2346)
         first = ns.upsert_snapshot(book, row)
-        self.assertEqual(first, {"action": "inserted", "row_number": 2, "sheet_created": True})
+        self.assertEqual(first, {"action": "inserted", "row_number": 2, "sheet_created": True, "header_migrated": False})
         ws = book.tabs[ns.SNAPSHOT_SHEET]
         self.assertEqual(ws.rows[0], ns.SNAPSHOT_HEADER)
         again = dict(row, 總淨值=2_000_000)

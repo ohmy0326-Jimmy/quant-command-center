@@ -26,7 +26,7 @@ curl -fsS -X POST "${SERVICE_URL}/v1/nav-snapshot" \
 
 ```json
 {
-  "schema_version": "1.3.0",
+  "schema_version": "1.4.0",
   "as_of": "2026-11-04T14:30:05+08:00",
   "status": "written",
   "date": "2026-11-04",
@@ -43,15 +43,27 @@ curl -fsS -X POST "${SERVICE_URL}/v1/nav-snapshot" \
     "槓桿": 1.4581,
     "帳戶Beta": 1.2034,
     "出入金": 30000,
-    "寫入時間": "2026-11-04 14:30:05"
+    "寫入時間": "2026-11-04 14:30:05",
+    "USDTWD": 32.1,
+    "匯率來源": "live"
   },
   "flow_sources": {"futures_ledger": 0, "cash_flows": 30000},
+  "header_migrated": false,
   "usdtwd": 32.1,
+  "usdtwd_source": "live",
   "warnings": []
 }
 ```
 
-`action` 是 `inserted`（新增）或 `updated`（同一天已有，覆蓋）。`warnings` 包含估價時被排除的壞列與 Cash_Flows 看不懂的列。
+`action` 是 `inserted`（新增）或 `updated`（同一天已有，覆蓋）。`warnings` 包含匯率不是即時值、表頭補欄、估價時被排除的壞列與 Cash_Flows 看不懂的列。
+
+### 匯率退回值
+
+匯率依序取 即時 → 本程序 3 天內最近成功值 → `NAV_Snapshots` 最後一筆即時匯率 → 預設 32.5（來源定義見 [readonly_api.md](readonly_api.md) 的「匯率來源（1.4.0）」）。不是即時值時**仍會寫入**，但：
+
+- 該列 `匯率來源` 記下 `cached`／`last_known`／`fallback`，`USDTWD` 記實際用的數字；
+- 回應 `usdtwd_source` 同值，`warnings` 第一句說明；
+- 排程器看到 `usdtwd_source != "live"` 可以稍後重跑，同一天會覆蓋成即時匯率。
 
 ## NAV_Snapshots 欄位
 
@@ -67,6 +79,10 @@ curl -fsS -X POST "${SERVICE_URL}/v1/nav-snapshot" \
 | 帳戶Beta | Σ(名目曝險 × Beta) ÷ 淨值 |
 | 出入金 | 當天淨出入金，台幣，入金正、出金負 |
 | 寫入時間 | 台北時間 |
+| USDTWD | 這次估價用的美元／台幣 |
+| 匯率來源 | `live`／`cached`／`last_known`／`fallback` |
+
+**舊表頭升級**：已存在的 9 欄表頭（到「寫入時間」為止）第一次寫入時會自動在 J、K 欄補上 `USDTWD`、`匯率來源`，不動任何既有資料（舊列這兩格留空，視為沒有匯率紀錄）。分頁欄數不夠會先加欄。其他不認得的表頭仍然拒寫。
 
 ## 出入金
 
@@ -93,6 +109,7 @@ curl -fsS -X POST "${SERVICE_URL}/v1/nav-snapshot" \
 
 ## 第四頁「風險與績效」
 
+- 淨值曲線顯示原始淨值；**最大回撤與回撤煞車燈改用扣除出入金的淨值指數**：I₀＝NAV₀，Iₜ＝Iₜ₋₁ ×（NAVₜ − 出入金ₜ）÷ NAVₜ₋₁。入金不算上漲、出金不算回撤。今天的即時點只會扣掉已寫進快照的當天出入金。
 - 淨值曲線、最大回撤、回撤煞車讀 `NAV_Snapshots`；沒有才退回舊的 `Daily_NAV`（若還存在）；兩者都沒有時顯示「淨值歷史無法取得」。今天的點一律用即時淨值。
 - 上／下檔捕獲率：
   - 日報酬 ＝ (淨值 − 當天出入金) ÷ 前一筆淨值 − 1，按月連乘成月報酬。
