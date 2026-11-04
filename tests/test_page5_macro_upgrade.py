@@ -74,3 +74,21 @@ class ReleaseScheduleTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class QuadrantReadabilityTest(unittest.TestCase):
+    def test_text_is_dark_and_theme_disabled(self):
+        from unittest import mock
+
+        import macro_cycle_ui as ui
+        from macro_cycle import load_macro_cycle
+
+        captured = {}
+        with mock.patch.object(ui.st, "plotly_chart", lambda fig, **k: captured.update(fig=fig, k=k)), mock.patch.object(ui.st, "caption", lambda *a, **k: None):
+            ui._render_quadrant(load_macro_cycle()["industries"], {"ok": True, "positions": [{"ticker": "NVDA", "mv": 100}]})
+        fig = captured["fig"]
+        self.assertIsNone(captured["k"].get("theme"))
+        self.assertEqual({t.textfont.color for t in fig.data}, {"#111111"})
+        self.assertTrue(all(t.textfont.size >= 13 for t in fig.data))
+        self.assertEqual({a.font.color for a in fig.layout.annotations}, {"#111111"})
+        self.assertEqual(fig.layout.paper_bgcolor, "#FFFFFF")
