@@ -6,12 +6,14 @@ import yfinance as yf
 import gspread
 import requests
 import re
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from google import genai
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from oauth2client.service_account import ServiceAccountCredentials
+from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
 from app_secrets import read_secret
 from macro_cycle_ui import render_macro_cycle_page
 from order_assistant_ui import render_order_assistant
@@ -38,6 +40,7 @@ import taifex_quotes
 import taiex_vix
 import us_hedge
 import macro_risk
+import chart_history
 
 # ==========================================
 # 網頁基本設定與密碼驗證防護（支援環境變數與 Secret）
@@ -183,23 +186,26 @@ def load_market_for_page6(tickers: tuple):
     return usdtwd, bundle["twii"], bundle["prices"], bundle["betas"], bundle["sectors"], bundle.get("extras") or {}
 
 
+# K 線快取：成功的結果快取 5 分鐘；空資料／抓取失敗會丟例外，st.cache_data 不快取例外，
+# 所以失敗不會被記住，下次重整（或重新執行）就會重抓。
 @st.cache_data(ttl=300, show_spinner=False)
+def cached_history(ticker: str, period: str):
+    return chart_history.fetch_history_strict(ticker, period)
+
+
 def cached_history_map(pairs: tuple):
-    """多檔 K 線同時下載，之後 5 分鐘直接用記憶體。"""
+    """多檔 K 線同時下載。每檔各自快取；抓不到的回空表，不會被快取。"""
+    ctx = get_script_run_ctx()
 
-    def fetch(pair):
-        ticker, period = pair
-        try:
-            return pair, yf.Ticker(ticker).history(period=period)
-        except Exception:
-            return pair, pd.DataFrame()
+    def load(ticker, period):
+        if ctx is not None:
+            add_script_run_ctx(threading.current_thread(), ctx)
+        return cached_history(ticker, period)
 
-    workers = max(1, min(8, len(pairs)))
-    found = {}
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        for pair, frame in pool.map(fetch, pairs):
-            found[pair] = frame
-    return found
+    return chart_history.fetch_history_map(pairs, load)
+
+
+cached_history_map.clear = cached_history.clear
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
