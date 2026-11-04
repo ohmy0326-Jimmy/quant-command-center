@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.3.0",
+  "schema_version": "1.4.0",
   "header": "X-API-Key",
   "models": {
     "health": {
@@ -7,7 +7,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.3.0"
+            "1.4.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -373,7 +373,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.3.0"
+            "1.4.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -393,6 +393,26 @@
           "description": "這次估價用的美元兌台幣，與第四頁同一來源。",
           "title": "Usdtwd",
           "type": "number"
+        },
+        "usdtwd_source": {
+          "default": "live",
+          "description": "1.4.0 新增。live＝即時；cached＝本程序最近一次成功值（3 天內）；last_known＝NAV_Snapshots 最後一筆即時匯率；fallback＝預設 32.5（美股市值可能失真）。",
+          "enum": [
+            "live",
+            "cached",
+            "last_known",
+            "fallback"
+          ],
+          "title": "Usdtwd Source",
+          "type": "string"
+        },
+        "warnings": {
+          "description": "1.4.0 新增。估價警告，例如匯率不是即時值。",
+          "items": {
+            "type": "string"
+          },
+          "title": "Warnings",
+          "type": "array"
         },
         "net_value": {
           "description": "總帳戶淨值，台幣。第四頁 metrics.nav。",
@@ -498,7 +518,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.3.0"
+            "1.4.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -545,7 +565,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.3.0"
+            "1.4.0"
           ],
           "title": "Schema Version",
           "type": "string"

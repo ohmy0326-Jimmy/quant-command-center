@@ -9,7 +9,8 @@ from __future__ import annotations
 import math
 import os
 import re
-from datetime import date, datetime
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -197,11 +198,73 @@ def _optional_sheet(spreadsheet, title: str) -> pd.DataFrame | None:
         return None
 
 
-def fetch_usdtwd(default: float = 32.5) -> float:
+USDTWD_DEFAULT = 32.5
+USDTWD_SANE_RANGE = (20.0, 50.0)
+USDTWD_CACHE_MAX_AGE = timedelta(days=3)
+FX_LIVE, FX_CACHED, FX_LAST_KNOWN, FX_FALLBACK = "live", "cached", "last_known", "fallback"
+_last_good_usdtwd: dict = {}
+
+
+@dataclass(frozen=True)
+class FxQuote:
+    """美元／台幣匯率與來源。source：live 即時、cached 本程序最近一次成功值、last_known NAV_Snapshots 最後一筆即時匯率、fallback 寫死預設值。"""
+
+    rate: float
+    source: str = FX_LIVE
+    as_of: str = ""
+
+    @property
+    def is_fallback(self) -> bool:
+        return self.source != FX_LIVE
+
+    def warning(self) -> str | None:
+        if self.source == FX_LIVE:
+            return None
+        if self.source == FX_CACHED:
+            return f"美元／台幣即時匯率抓不到，改用本機最近一次成功的匯率 {self.rate:.4f}（{self.as_of}）。"
+        if self.source == FX_LAST_KNOWN:
+            return f"美元／台幣即時匯率抓不到，改用 NAV_Snapshots 最後一筆匯率 {self.rate:.4f}（{self.as_of}）。"
+        return f"美元／台幣即時匯率抓不到，暫用預設值 {self.rate:.2f}，美股市值與淨值可能失真。"
+
+
+def fetch_usdtwd_live() -> float:
+    """USDTWD=X 最近一筆收盤。抓不到或數字不合理就丟例外（呼叫端決定退回哪個值）。"""
+    frame = yf.Ticker("USDTWD=X").history(period="5d")
+    closes = pd.to_numeric(frame["Close"], errors="coerce").dropna()
+    if closes.empty:
+        raise RuntimeError("USDTWD=X 沒有收盤資料")
+    rate = float(closes.iloc[-1])
+    low, high = USDTWD_SANE_RANGE
+    if not low < rate < high:
+        raise RuntimeError(f"USDTWD=X 數字不合理：{rate}")
+    return rate
+
+
+def resolve_usdtwd(live=None, last_known: tuple[float, str] | None = None, now: datetime | None = None, default: float = USDTWD_DEFAULT) -> FxQuote:
+    """即時 → 本程序最近一次成功值（3 天內）→ NAV_Snapshots 最後一筆即時匯率 → 預設值。只有第一個算 live。"""
+    moment = now or datetime.now(timezone.utc)
     try:
-        return float(yf.Ticker("USDTWD=X").history(period="1d")["Close"].iloc[-1])
+        rate = float((live or fetch_usdtwd_live)())
+        low, high = USDTWD_SANE_RANGE
+        if not low < rate < high:
+            raise RuntimeError(f"USDTWD 數字不合理：{rate}")
+        _last_good_usdtwd["rate"] = rate
+        _last_good_usdtwd["at"] = moment
+        return FxQuote(rate, FX_LIVE, "")
     except Exception:
-        return float(default)
+        pass
+    cached_at = _last_good_usdtwd.get("at")
+    if cached_at is not None and moment - cached_at <= USDTWD_CACHE_MAX_AGE:
+        local = cached_at.astimezone(ZoneInfo("Asia/Taipei"))
+        return FxQuote(float(_last_good_usdtwd["rate"]), FX_CACHED, local.strftime("%Y-%m-%d %H:%M 台北"))
+    if last_known and last_known[0]:
+        return FxQuote(float(last_known[0]), FX_LAST_KNOWN, str(last_known[1]))
+    return FxQuote(float(default), FX_FALLBACK, "")
+
+
+def fetch_usdtwd(default: float = USDTWD_DEFAULT) -> float:
+    """舊介面：只回數字。需要知道是不是退回值時請用 resolve_usdtwd。"""
+    return resolve_usdtwd(default=default).rate
 
 
 def fetch_twii(default: float = 23000.0) -> float:

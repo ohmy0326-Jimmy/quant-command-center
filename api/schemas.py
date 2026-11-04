@@ -80,6 +80,8 @@ class PortfolioResponse(BaseModel):
     as_of: str = Field(description="Asia/Taipei，這次回應產生的時間。")
     currency: Literal["TWD"] = Field(description="淨值、曝險、市值、損益的幣別。")
     usdtwd: float = Field(description="這次估價用的美元兌台幣，與第四頁同一來源。")
+    usdtwd_source: Literal["live", "cached", "last_known", "fallback"] = Field(default="live", description="1.4.0 新增。live＝即時；cached＝本程序最近一次成功值（3 天內）；last_known＝NAV_Snapshots 最後一筆即時匯率；fallback＝預設 32.5（美股市值可能失真）。")
+    warnings: list[str] = Field(default_factory=list, description="1.4.0 新增。估價警告，例如匯率不是即時值。")
     net_value: float = Field(description="總帳戶淨值，台幣。第四頁 metrics.nav。")
     exposure: float = Field(description="總名目曝險，台幣。第四頁 metrics.exposure。＝beta_leverage.total.notional_exposure。")
     leverage: float = Field(description="名目曝險 ÷ 淨值。畫面上四捨五入到小數兩位。＝beta_leverage.total.leverage。")
@@ -129,9 +131,11 @@ class NavSnapshotResponse(BaseModel):
     sheet: str
     sheet_created: bool
     row_number: int
-    row: dict = Field(description="寫入的那一列，欄名與試算表相同：日期、總淨值、台股淨值、美股淨值、名目曝險、槓桿、帳戶Beta、出入金、寫入時間。")
+    row: dict = Field(description="寫入的那一列，欄名與試算表相同：日期、總淨值、台股淨值、美股淨值、名目曝險、槓桿、帳戶Beta、出入金、寫入時間、USDTWD、匯率來源。")
     flow_sources: dict = Field(description="出入金拆分：futures_ledger、cash_flows（台幣）。")
+    header_migrated: bool = Field(default=False, description="舊 9 欄表頭這次補上了 USDTWD、匯率來源。")
     usdtwd: float
+    usdtwd_source: Literal["live", "cached", "last_known", "fallback"] = Field(default="live", description="live＝即時；cached＝本程序最近一次成功值；last_known＝NAV_Snapshots 最後一筆即時匯率；fallback＝預設 32.5。非 live 時 warnings 會說明。")
     warnings: list[str]
 
 

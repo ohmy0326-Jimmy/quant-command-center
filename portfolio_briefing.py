@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-SCHEMA_VERSION = "1.3.0"
+SCHEMA_VERSION = "1.4.0"
 TAIPEI = ZoneInfo("Asia/Taipei")
 
 
@@ -137,13 +137,23 @@ def beta_leverage_block(metrics: dict) -> dict:
     }
 
 
-def portfolio_payload(positions: pd.DataFrame, metrics: dict, *, usdtwd: float, as_of: datetime) -> dict:
+def portfolio_payload(
+    positions: pd.DataFrame,
+    metrics: dict,
+    *,
+    usdtwd: float,
+    as_of: datetime,
+    usdtwd_source: str = "live",
+    warnings: list[str] | None = None,
+) -> dict:
     total_beta = float(metrics.get("total_beta", metrics.get("beta", 0.0)))
     return {
         "schema_version": SCHEMA_VERSION,
         "as_of": format_as_of(as_of),
         "currency": "TWD",
         "usdtwd": float(usdtwd),
+        "usdtwd_source": str(usdtwd_source),
+        "warnings": [str(w) for w in (warnings or [])],
         "net_value": float(metrics.get("nav", 0.0)),
         "exposure": float(metrics.get("exposure", 0.0)),
         "leverage": float(metrics.get("leverage", 0.0)),
@@ -168,17 +178,20 @@ def load_live_book(as_of: datetime | None = None) -> LiveBook:
         attach_quotes,
         fetch_quant_sheets,
         fetch_twii,
-        fetch_usdtwd,
         finalize_valuation,
         load_service_account_info,
         market_beta_and_sector,
         normalize_positions,
         populate_market_fields_parallel,
+        resolve_usdtwd,
     )
+    from nav_snapshot import last_known_usdtwd
 
     key_data = load_service_account_info()
-    accounts, _nav_history, quant_data = fetch_quant_sheets(key_data)
-    usdtwd = fetch_usdtwd()
+    accounts, nav_history, quant_data = fetch_quant_sheets(key_data)
+    fx = resolve_usdtwd(last_known=last_known_usdtwd(nav_history))
+    usdtwd = fx.rate
+    warnings = [fx.warning()] if fx.is_fallback else []
     positions = normalize_positions(quant_data)
     if not positions.empty:
         extras = {}
@@ -186,4 +199,5 @@ def load_live_book(as_of: datetime | None = None) -> LiveBook:
         positions = attach_quotes(positions, prices, betas, sectors, extras=extras)
     valued, _accounts, metrics = finalize_valuation(positions, accounts, usdtwd)
     moment = as_of or taipei_now()
-    return LiveBook(portfolio_payload(valued, metrics, usdtwd=usdtwd, as_of=moment), valued, metrics)
+    payload = portfolio_payload(valued, metrics, usdtwd=usdtwd, as_of=moment, usdtwd_source=fx.source, warnings=warnings)
+    return LiveBook(payload, valued, metrics)

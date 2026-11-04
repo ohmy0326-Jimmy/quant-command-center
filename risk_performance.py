@@ -47,6 +47,24 @@ def neutrality_label(beta: float) -> str:
     return "🟡 市場中性"
 
 
+def flow_adjusted_index(nav_series: pd.Series | None, flows: dict | None = None) -> pd.Series | None:
+    """把淨值序列串成「扣除出入金」的淨值指數：I_0＝NAV_0，I_t＝I_{t−1} × (NAV_t − 出入金_t) ÷ NAV_{t−1}。
+
+    入金不會被當成上漲、出金不會被當成回撤。flows 的鍵與 nav_series 的索引相同（yyyy-mm-dd）。沒有出入金時等於原序列。
+    """
+    if nav_series is None:
+        return None
+    values = pd.to_numeric(pd.Series(nav_series), errors="coerce").dropna()
+    values = values[values > 0]
+    if len(values) < 2 or not flows:
+        return values
+    out = [float(values.iloc[0])]
+    for prev, cur, key in zip(values.iloc[:-1], values.iloc[1:], values.index[1:]):
+        flow = float(flows.get(str(key), 0.0) or 0.0)
+        out.append(out[-1] * (float(cur) - flow) / float(prev))
+    return pd.Series(out, index=values.index)
+
+
 def drawdown_stats(nav_series: pd.Series | None) -> dict:
     """由舊到新的淨值序列 → 目前距高點、最大回撤（百分比，負數）。少於 2 點視為沒有歷史。"""
     out = {"available": False, "points": 0, "start": None, "current_dd_pct": None, "max_dd_pct": None, "peak_nav": None}
@@ -80,13 +98,15 @@ def brake_light(current_dd_pct: float | None) -> tuple[str, str]:
     return "🟢", f"正常（停新倉線 {BRAKE_PAUSE_PCT:.0f}%）"
 
 
-def risk_performance_summary(metrics: dict, nav_series: pd.Series | None = None) -> dict:
+def risk_performance_summary(metrics: dict, nav_series: pd.Series | None = None, flows: dict | None = None) -> dict:
+    """flows＝{yyyy-mm-dd: 出入金}。最大回撤與煞車燈用扣除出入金的淨值指數。"""
     m = metrics or {}
     nav = float(m.get("nav", 0.0) or 0.0)
     leverage = float(m.get("total_leverage", m.get("leverage", 0.0)) or 0.0)
     beta = float(m.get("account_beta", m.get("beta", 0.0)) or 0.0)
     cash_pct = float(m.get("cash_pct", 0.0) or 0.0) if nav > 0 else 0.0
-    dd = drawdown_stats(nav_series)
+    dd = drawdown_stats(flow_adjusted_index(nav_series, flows))
+    dd["flow_adjusted"] = bool(flows) and any(abs(float(v or 0.0)) > 0 for v in flows.values())
     light, light_text = brake_light(dd["current_dd_pct"])
     return {
         "nav": nav,
@@ -137,12 +157,14 @@ def capture_table(capture: dict | None) -> pd.DataFrame | None:
     )
 
 
-def render_risk_performance_card(st, metrics: dict, nav_series: pd.Series | None = None, capture: dict | None = None) -> dict:
+def render_risk_performance_card(
+    st, metrics: dict, nav_series: pd.Series | None = None, capture: dict | None = None, flows: dict | None = None
+) -> dict:
     """一張卡：Beta／槓桿三列表＋現金、借款、最大回撤、回撤煞車燈＋上／下檔捕獲率。每個數字只出現一次。"""
     from nav_snapshot import capture_status_text
     from beta_leverage_ui import render_beta_leverage_table
 
-    s = risk_performance_summary(metrics, nav_series)
+    s = risk_performance_summary(metrics, nav_series, flows)
     dd = s["drawdown"]
     with st.container(border=True):
         st.subheader("📊 風險與績效")
@@ -167,7 +189,11 @@ def render_risk_performance_card(st, metrics: dict, nav_series: pd.Series | None
         )
         if dd["available"]:
             st.line_chart(nav_series, height=150)
-            st.caption(f"淨值歷史自 {dd['start']} 起，共 {dd['points']} 點；今天的點用即時淨值。")
+            note = "已扣除出入金" if dd.get("flow_adjusted") else "期間沒有出入金"
+            st.caption(
+                f"淨值歷史自 {dd['start']} 起，共 {dd['points']} 點；今天的點用即時淨值。"
+                f"曲線為原始淨值；最大回撤與煞車燈用扣除出入金的淨值指數（{note}）。"
+            )
         else:
             st.caption(HISTORY_UNAVAILABLE)
 

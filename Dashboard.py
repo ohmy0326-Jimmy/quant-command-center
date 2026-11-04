@@ -25,7 +25,8 @@ from portfolio_risk import (
     equity_ratio_pct,
     fetch_quant_sheets,
     fetch_twii,
-    fetch_usdtwd,
+    fetch_usdtwd_live,
+    resolve_usdtwd,
     finalize_valuation,
     load_service_account_info,
     market_beta_and_sector,
@@ -35,8 +36,8 @@ from portfolio_risk import (
     ticker_kind_pairs,
     value_positions_safely,
 )
-from sheet_dates import nav_growth_series
-from nav_snapshot import capture_summary, fetch_benchmark_closes
+from sheet_dates import nav_flow_map, nav_growth_series
+from nav_snapshot import capture_summary, fetch_benchmark_closes, last_known_usdtwd
 import taifex_quotes
 import taiex_vix
 import us_hedge
@@ -125,9 +126,22 @@ def load_quant_database():
     return fetch_quant_sheets(key_data)
 
 
+# 即時匯率快取 3 分鐘；抓不到會丟例外，st.cache_data 不快取例外，下次重整再抓。
 @st.cache_data(ttl=180, show_spinner=False)
+def cached_usdtwd_live():
+    return fetch_usdtwd_live()
+
+
+def usdtwd_quote(nav_data=None):
+    """即時 → 本程序最近成功值 → NAV_Snapshots 最後一筆即時匯率 → 32.5。回傳 FxQuote（含來源）。"""
+    return resolve_usdtwd(live=cached_usdtwd_live, last_known=last_known_usdtwd(nav_data))
+
+
 def cached_usdtwd():
-    return fetch_usdtwd()
+    return usdtwd_quote().rate
+
+
+cached_usdtwd.clear = cached_usdtwd_live.clear
 
 
 @st.cache_data(ttl=180, show_spinner=False)
@@ -763,7 +777,10 @@ elif page == "第四頁：部位監控與量化風控":
     with st.spinner('📡 正在穿透雲端，即時連線抓取各個持股報價與計算動態風險...'):
         try:
             account_data, nav_data, quant_data = load_quant_database()
-            usdtwd_rate = cached_usdtwd()
+            fx_quote = usdtwd_quote(nav_data)
+            usdtwd_rate = fx_quote.rate
+            if fx_quote.is_fallback:
+                st.warning(f"⚠️ {fx_quote.warning()}")
             df = normalize_positions(quant_data)
             bundle = {}
             if not df.empty and "標的" in df.columns:
@@ -780,6 +797,8 @@ elif page == "第四頁：部位監控與量化風控":
             # 淨值歷史：讀 NAV_Snapshots（API 每日寫入），沒有才退回舊的 Daily_NAV；都沒有時只有今天一點。
             nav_series = nav_growth_series(nav_data, total_net_liq)
             capture = page4_capture(nav_data)
+            # 回撤用扣除出入金的淨值指數；今天若已寫快照，當天出入金也一併扣掉。
+            nav_flows = nav_flow_map(nav_data)
 
             if not df.empty:
                 alarms = df[(df['最大虧損比例'] > -100) & (df['報酬率 (%)'] <= df['最大虧損比例'])]
@@ -794,7 +813,7 @@ elif page == "第四頁：部位監控與量化風控":
                     st.markdown("---")
 
             # 風險與績效：Beta／槓桿三列表、現金、借款、最大回撤、回撤煞車燈合併成一張卡
-            render_risk_performance_card(st, metrics, nav_series, capture)
+            render_risk_performance_card(st, metrics, nav_series, capture, nav_flows)
             if not df.empty:
                 total_exposure_sum = df['實質曝險(台幣)'].sum()
                 if metrics.get("expired_removed"):
