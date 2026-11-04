@@ -217,7 +217,7 @@ def txo_expiry(tenor_days: int, today_iso: str) -> tuple[str | None, str | None]
 
 
 def render_hedge_strategy_sim(snapshot, macro_view: dict | None = None) -> None:
-    """在第六頁策略模擬器中渲染「避險策略模擬」面板。"""
+    """在第六頁「選擇權避險」分頁渲染「避險策略模擬」面板。"""
     st.warning("歷史回測示意，非預測。這裡只給避險建議，不會下單。")
     with st.expander("模擬假設與限制", expanded=False):
         st.markdown("**核心假設：**")
@@ -378,18 +378,8 @@ def render_hedge_strategy_sim(snapshot, macro_view: dict | None = None) -> None:
     metrics_dict = getattr(snapshot, "metrics", {}) or {}
     nav_actual = float(metrics_dict.get("nav", 0.0) or 0.0)
 
-    scope_choice = st.radio(
-        "避險範圍",
-        options=["合計（帳戶 β）", "只算台股"],
-        index=0,
-        horizontal=True,
-        key="hss_scope",
-    )
-    st.caption("合計用帳戶 β（台股＋美股 Beta 曝險，同第四頁）；台指工具對美股部位只是交叉避險，美股另見「選擇權避險」分頁的 SPY／XSP。")
-    if scope_choice == "只算台股":
-        beta_exposure = float(metrics_dict.get("tw_beta_exposure", 0.0) or 0.0)
-    else:
-        beta_exposure = float(metrics_dict.get("beta_exposure", 0.0) or 0.0)
+    st.caption("台指期／TXO 只避台股 Beta 曝險；美股避險見上方「美股選擇權避險」（SPY／XSP／SPX）。")
+    beta_exposure = float(metrics_dict.get("tw_beta_exposure", 0.0) or 0.0)
 
     if nav_actual <= 0:
         st.info("目前淨值為 0 或讀不到，暫時無法計算實際避險建議。")
@@ -499,7 +489,7 @@ def render_hedge_strategy_sim(snapshot, macro_view: dict | None = None) -> None:
 
         if rec:
             col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-            col_m1.metric("帳戶 β", f"{rec['account_beta']:.2f}")
+            col_m1.metric("台股 β", f"{rec['account_beta']:.2f}")
             col_m2.metric("建議覆蓋率", f"{rec['coverage']:.0%}")
             col_m3.metric("避險名目", f"NT$ {rec['hedge_notional']:,.0f}")
 

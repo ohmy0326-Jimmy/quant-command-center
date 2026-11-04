@@ -40,25 +40,11 @@ def _brake_release(pause: float, cut: float) -> float:
     return cut / 2.0
 
 
-SIM_TOOL_NAV = "淨值情境模擬（蒙地卡羅）"
-SIM_TOOL_HEDGE = "避險策略模擬（歷史回測）"
-SIM_TOOLS = (SIM_TOOL_NAV, SIM_TOOL_HEDGE)
-
-
 @st.fragment
-def render_nav_scenario_simulator(snapshot, default_target: float, macro_view: dict | None = None):
-    """接在下單輔助頁面最下方。頁面載入只顯示部位，不跑蒙地卡羅。
-
-    同一區塊用「模擬工具」切換：淨值情境模擬，或避險策略模擬（hedge_sim_ui）。
-    """
+def render_nav_scenario_simulator(snapshot, default_target: float):
+    """接在下單輔助頁面最下方。頁面載入只顯示部位，不跑蒙地卡羅。"""
     st.markdown("---")
     st.subheader("淨值情境模擬（策略模擬器）")
-    tool = st.radio("模擬工具", SIM_TOOLS, horizontal=True, key="nss_tool")
-    if tool == SIM_TOOL_HEDGE:
-        from hedge_sim_ui import render_hedge_strategy_sim
-
-        render_hedge_strategy_sim(snapshot, macro_view)
-        return
     st.warning("示意模型，非預測。路徑是假設的台指／費半情境，不是對未來的預測。")
     st.caption(
         "三個情境共用固定亂數種子，同一情境裡的策略走同一組路徑。"

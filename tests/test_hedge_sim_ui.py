@@ -161,15 +161,23 @@ with mock.patch.object(hedge_sim_ui, "load_taiex_history", return_value=fake_px)
     assert len(at.dataframe) >= 1
 
 
-def test_hedge_sim_lives_inside_strategy_simulator_section():
+def test_hedge_sim_lives_in_option_hedge_tab_not_strategy_simulator():
     ui = (ROOT / "nav_scenario_sim_ui.py").read_text(encoding="utf-8")
-    assert "SIM_TOOL_HEDGE" in ui and "render_hedge_strategy_sim" in ui
+    assert "模擬工具" not in ui and "render_hedge_strategy_sim" not in ui
     page = (ROOT / "order_assistant_ui.py").read_text(encoding="utf-8")
-    assert "render_nav_scenario_simulator(snapshot, float(rules.target_leverage), macro_view=view)" in page
-    assert "render_hedge_strategy_sim" not in page
+    assert "render_nav_scenario_simulator(snapshot, float(rules.target_leverage))" in page
+    tab = page[page.index("with tab_hedge:"):page.index("with tab_stress:")]
+    assert "render_hedge_strategy_sim(snapshot, view)" in tab
 
 
-def test_strategy_simulator_switches_to_hedge_tool_and_shows_no_quote():
+def test_futures_hedge_uses_tw_beta_exposure_only():
+    src = (ROOT / "hedge_sim_ui.py").read_text(encoding="utf-8")
+    assert 'metrics_dict.get("tw_beta_exposure"' in src
+    assert 'metrics_dict.get("beta_exposure"' not in src
+    assert "hss_scope" not in src
+
+
+def test_hedge_tool_shows_no_quote():
     script = f"""
 import sys
 sys.path.insert(0, {repr(str(ROOT))})
@@ -178,7 +186,6 @@ import numpy as np
 import pandas as pd
 from types import SimpleNamespace
 import hedge_sim_ui
-import nav_scenario_sim_ui
 
 dates = pd.date_range("2021-01-04", periods=700, freq="B")
 fake_px = pd.Series(np.linspace(14000.0, 23000.0, len(dates)), index=dates, name="^TWII")
@@ -186,10 +193,9 @@ snapshot = SimpleNamespace(metrics={{"nav": 3.45e6, "beta_exposure": 6.9e6, "tw_
 with mock.patch.object(hedge_sim_ui, "load_taiex_history", return_value=fake_px), \\
      mock.patch.object(hedge_sim_ui, "txo_expiry", return_value=("202612", "2026-12-16")), \\
      mock.patch.object(hedge_sim_ui, "txo_put_quote", return_value=None):
-    nav_scenario_sim_ui.render_nav_scenario_simulator(snapshot, 1.5, macro_view=None)
+    hedge_sim_ui.render_hedge_strategy_sim(snapshot, None)
 """
     at = AppTest.from_string(script)
-    at.session_state["nss_tool"] = "避險策略模擬（歷史回測）"
     at.session_state["hss_rec_tool"] = "月滾賣權"
     at.run(timeout=60)
     assert not at.exception
