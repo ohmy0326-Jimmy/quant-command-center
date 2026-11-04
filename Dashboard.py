@@ -38,6 +38,7 @@ from sheet_dates import nav_growth_series
 import taifex_quotes
 import taiex_vix
 import us_hedge
+import macro_risk
 
 # ==========================================
 # 網頁基本設定與密碼驗證防護（支援環境變數與 Secret）
@@ -235,6 +236,34 @@ def cached_top_holdings_map(tickers: tuple):
     return found
 
 
+# 第一頁風險計分板的資料。抓不到時 fetch 會丟例外，st.cache_data 不快取例外，下次重整會重抓。
+@st.cache_data(ttl=300, show_spinner=False)
+def cached_macro_history(ticker, period):
+    return macro_risk.fetch_history(ticker, period)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def cached_foreign_flows(today_iso):
+    return macro_risk.fetch_foreign_flows(datetime.fromisoformat(today_iso).date())
+
+
+def clear_macro_risk_caches():
+    cached_macro_history.clear()
+    cached_foreign_flows.clear()
+
+
+def load_macro_risk():
+    today_tpe = datetime.now(macro_risk.TPE).date().isoformat()
+    loaders = {
+        "vix": lambda: cached_macro_history("^VIX", "1mo"),
+        "tnx": lambda: cached_macro_history("^TNX", "1mo"),
+        "foreign": lambda: cached_foreign_flows(today_tpe),
+        "usdtwd": lambda: cached_macro_history("USDTWD=X", "3mo"),
+        "taiex": lambda: cached_macro_history("^TWII", "3mo"),
+    }
+    return macro_risk.evaluate(loaders)
+
+
 def clear_market_caches():
     load_quant_database.clear()
     cached_usdtwd.clear()
@@ -242,6 +271,7 @@ def clear_market_caches():
     cached_quote_bundle.clear()
     cached_history_map.clear()
     cached_top_holdings_map.clear()
+    clear_macro_risk_caches()
     get_market_beta_and_sector.clear()
     get_market_beta_info.clear()
     taifex_quotes.clear_cache()
@@ -291,6 +321,7 @@ if page == "第一頁：總經與風險鬧鐘":
         st.write("")
         if st.button("🔄 重新整理", key="refresh_p1", use_container_width=True):
             cached_history_map.clear()
+            clear_macro_risk_caches()
             st.rerun()
     st.markdown("---")
     
@@ -305,43 +336,38 @@ if page == "第一頁：總經與風險鬧鐘":
         try:
             history_pairs = tuple(sorted({(ticker, "5d") for ticker in indicators.values()} | {(ticker, "1y") for ticker in indicators.values()}))
             hist = cached_history_map(history_pairs)
-            vix_df = hist.get(("^VIX", "5d"), pd.DataFrame())
-            vix_val = float(vix_df['Close'].iloc[-1]) if vix_df is not None and not vix_df.empty else 15.0
-            
-            tnx_df = hist.get(("^TNX", "5d"), pd.DataFrame())
-            tnx_val = float(tnx_df['Close'].iloc[-1]) / 10.0 if tnx_df is not None and not tnx_df.empty else 4.0
-            
-            risk_score = 0
-            risk_labels = []
-            
-            if vix_val > 25:
-                risk_score += 4
-                risk_labels.append(f"🚨 VIX 市場極度恐慌 ({vix_val:.2f} > 25)")
-            elif vix_val > 20:
-                risk_score += 2
-                risk_labels.append(f"⚠️ VIX 恐慌指數偏高 ({vix_val:.2f} > 20)")
-                
-            if tnx_val > 4.5:
-                risk_score += 2
-                risk_labels.append(f"⚠️ 10年債殖利率處於高檔 ({tnx_val:.2f}% > 4.5%)")
-                
+            risk_items, risk_summary = load_macro_risk()
+
             st.markdown("### 🛡️ 宏觀市場風險計分板 (標準化評估)")
             rc1, rc2, rc3 = st.columns([1.5, 2, 4.5])
             with rc1:
-                if risk_score <= 1:
-                    st.success("🟢 市場氣氛：【風險偏好 (Risk-On)】")
-                elif risk_score <= 3:
-                    st.warning("🟡 市場氣氛：【中性觀望 / 局部震盪】")
+                level = risk_summary["level"]
+                if level == "green":
+                    st.success(risk_summary["label"])
+                elif level == "yellow":
+                    st.warning(risk_summary["label"])
+                elif level == "red":
+                    st.error(risk_summary["label"])
                 else:
-                    st.error("🔴 市場氣氛：【高風險警戒 (Risk-Off)】")
+                    st.info(risk_summary["label"])
             with rc2:
-                st.metric("當前綜合風險評分", f"{risk_score} / 6 分", f"VIX: {vix_val:.2f} | 債息: {tnx_val:.2f}%")
+                st.metric("當前綜合風險評分", risk_summary["score_text"], f"滿分 {risk_summary['max_score']} 分", delta_color="off")
             with rc3:
-                if risk_labels:
-                    st.error(" | ".join(risk_labels))
+                if risk_summary["triggered"]:
+                    st.error(" | ".join(risk_summary["triggered"]))
+                elif risk_summary["missing_count"]:
+                    st.info("目前可用的指標都沒有觸發，但部分資料缺漏，不能據此判斷為 Risk-On。")
                 else:
                     st.info("✅ 目前無重大宏觀警訊，市場流動性與波動率維持健康 (Risk-On)。")
-                    
+                if risk_summary["missing_count"]:
+                    st.warning("資料缺漏：" + "、".join(risk_summary["missing_names"]) + "。這些項目不計分，也不算「沒觸發」。")
+            st.dataframe(pd.DataFrame(macro_risk.table_rows(risk_items)), use_container_width=True, hide_index=True)
+            st.caption(
+                f"燈號：0–{macro_risk.GREEN_MAX} 分 🟢、{macro_risk.GREEN_MAX + 1}–{macro_risk.YELLOW_MAX} 分 🟡、"
+                f"{macro_risk.YELLOW_MAX + 1} 分以上 🔴（滿分 {macro_risk.MAX_SCORE}）。核心指標缺漏且分數落在綠燈區時顯示 ⚪ 資料不足。"
+                f"資料超過 {macro_risk.STALE_BUSINESS_DAYS} 個工作日未更新視為過期、不計分。"
+            )
+
             st.markdown("---")
             
             with st.expander("🤖 點擊展開：AI 避險基金經理人今日總經晨報與操盤提醒", expanded=True):
@@ -350,7 +376,10 @@ if page == "第一頁：總經與風險鬧鐘":
                         try:
                             gemini_key = os.environ.get("GEMINI_API_KEY") or read_secret("", "GEMINI_API_KEY")
                             client = genai.Client(api_key=gemini_key)
-                            snapshot_str = f"- VIX恐慌指數: {vix_val:.2f}\n- 10年公債殖利率: {tnx_val:.2f}%\n"
+                            snapshot_str = f"- 宏觀風險計分：{risk_summary['score_text']}（{risk_summary['label']}）\n"
+                            for risk_item in risk_items:
+                                status = macro_risk.STATUS_LABELS[risk_item["status"]]
+                                snapshot_str += f"- {risk_item['name']}: {risk_item['value_text']}（{risk_item['date'] or '無日期'}，{status}）\n"
                             
                             for k, t in indicators.items():
                                 try:
