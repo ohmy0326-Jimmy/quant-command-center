@@ -19,6 +19,7 @@ import yfinance as yf
 
 import taifex_quotes
 from beta_rules import beta_source_label, effective_beta, fetch_underlying_beta
+from stock_futures import resolve_stock_future
 
 # 元大期貨備援本日餘額（未含未平倉損益之現金帳頁面），最後確認日期 2026-11-02（來自元大 App）。
 YUANTA_FUTURES_BASE_EQUITY = 168308.0
@@ -102,6 +103,9 @@ DETAILED_SECTOR_MAP = {
 
 
 def futures_multiplier(ticker: str) -> float:
+    sf = resolve_stock_future(ticker)
+    if sf is not None and str(ticker).upper() not in FUTURES_MULTIPLIER:
+        return float(sf.multiplier)
     return float(FUTURES_MULTIPLIER.get(str(ticker).upper(), DEFAULT_FUTURES_MULTIPLIER))
 
 
@@ -416,6 +420,25 @@ def _quote_one_ex(ticker: str, twii_price: float, beta_fn, kind: str = ""):
             sector = DETAILED_SECTOR_MAP.get(t_upper, "臺指期貨")
             extras["Beta來源"] = beta_source_label(kind_str, True, definition=True)
             return ticker, price, 1.0, sector, extras
+
+        sf = resolve_stock_future(ticker) if (("期" in kind_str) and not is_opt) else None
+        if sf is not None:
+            # 個股期：以現股價對標，Beta 用現股一年回歸（對加權指數）。
+            und = sf.yahoo_ticker
+            if getattr(beta_fn, "info", None):
+                b_val, s_val, ok = beta_fn.info(und, True)
+            else:
+                b_val, s_val = beta_fn(und, True)
+                ok = True
+            px = _fetch_yahoo_price(und, True)
+            extras["報價來源"] = f"現股 {sf.code} 對標" if pd.notna(px) else "無報價，暫用成本價"
+            extras["合約乘數"] = sf.multiplier
+            extras["Beta來源"] = f"{sf.code} " + beta_source_label(kind_str, ok)
+            extras["標的代號"] = und
+            if ok:
+                extras["標的Beta"] = b_val
+                extras["標的Beta來源"] = extras["Beta來源"]
+            return ticker, px, b_val, s_val, extras
 
         if ("期" in kind_str) and not is_opt:
             fut_q = taifex_quotes.get_futures_quote(ticker)
@@ -897,6 +920,11 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
                     df.at[idx, "Beta來源"] = eb["source"]
                     df.at[idx, "標的代號"] = eb["underlying"]
                     df.at[idx, "採用標的Beta"] = eb["underlying_beta"] if eb["underlying_beta"] is not None else np.nan
+                    sf_row = resolve_stock_future(ticker_str)
+                    if sf_row is not None:
+                        df.at[idx, "標的代號"] = sf_row.yahoo_ticker
+                        if "預設值" not in str(eb["source"]):
+                            df.at[idx, "採用標的Beta"] = sens
                     sign = 1.0 if qty > 0 else (-1.0 if qty < 0 else 0.0)
                     df.at[idx, "Beta曝險(台幣)"] = mkt_val_twd * sens * sign
 

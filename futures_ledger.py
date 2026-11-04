@@ -26,6 +26,7 @@ from datetime import date
 import pandas as pd
 
 from sheet_dates import parse_sheet_date, taipei_today
+from stock_futures import resolve_stock_future
 
 FUTURES_LEDGER_SHEET = "Futures_Ledger"
 TRADE_LOG_SHEET = "Trade_Log"
@@ -236,6 +237,10 @@ def symbol_root(symbol: str) -> str:
     raw = str(symbol or "").strip()
     if raw in _NAME_ALIASES:
         return _NAME_ALIASES[raw]
+    sf = resolve_stock_future(raw)
+    if sf is not None:
+        # 同一檔個股期的各種寫法（小國巨期／S2327）併成同一個庫存鍵。
+        return ("S" if sf.small else "") + sf.code + ("" if sf.small else "F")
     for prefix, root in _ROOTS:
         if text == prefix or text.startswith(prefix):
             return root
@@ -253,6 +258,9 @@ def contract_multiplier(symbol: str) -> float:
     root = symbol_root(symbol)
     if root in INDEX_MULTIPLIER:
         return INDEX_MULTIPLIER[root]
+    sf = resolve_stock_future(symbol)
+    if sf is not None:
+        return float(sf.multiplier)
     text = str(symbol or "").strip().upper().replace(" ", "")
     if len(text) >= 2 and text[0] == "S" and text[1:].isdigit():
         return SMALL_STOCK_FUTURES_MULTIPLIER
