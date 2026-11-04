@@ -290,17 +290,17 @@ def _render_quadrant(industries: list[dict], book: dict | None = None):
     points = industry_quadrant_points(industries)
     fig = go.Figure()
     quads = [
-        (-2.45, 0, 0, 2.45, "rgba(66, 165, 245, 0.14)"),
-        (0, 2.45, 0, 2.45, "rgba(102, 187, 106, 0.14)"),
-        (0, 2.45, -2.45, 0, "rgba(255, 167, 38, 0.14)"),
-        (-2.45, 0, -2.45, 0, "rgba(239, 83, 80, 0.12)"),
+        (-2.45, 0, 0, 2.45, "rgba(66, 165, 245, 0.22)"),
+        (0, 2.45, 0, 2.45, "rgba(102, 187, 106, 0.22)"),
+        (0, 2.45, -2.45, 0, "rgba(255, 167, 38, 0.22)"),
+        (-2.45, 0, -2.45, 0, "rgba(239, 83, 80, 0.20)"),
     ]
     for x0, x1, y0, y1, color in quads:
         fig.add_shape(type="rect", x0=x0, x1=x1, y0=y0, y1=y1, fillcolor=color, line_width=0, layer="below")
-    fig.add_hline(y=0, line_color="#90A4AE", line_width=1)
-    fig.add_vline(x=0, line_color="#90A4AE", line_width=1)
+    fig.add_hline(y=0, line_color="#455A64", line_width=1)
+    fig.add_vline(x=0, line_color="#455A64", line_width=1)
     for x, y, label in ((-1.2, 2.2, "復甦"), (1.2, 2.2, "成長"), (1.2, -2.2, "趨緩"), (-1.2, -2.2, "衰退")):
-        fig.add_annotation(x=x, y=y, text=label, showarrow=False, font=dict(size=16, color="#ECEFF1"))
+        fig.add_annotation(x=x, y=y, text=label, showarrow=False, font=dict(size=18, color="#111111"), bgcolor="rgba(255,255,255,0.85)", borderpad=3)
 
     colors = {"加碼": "#66BB6A", "中性": "#FFD54F", "減碼": "#EF5350"}
     for stance in ("加碼", "中性", "減碼"):
@@ -315,7 +315,7 @@ def _render_quadrant(industries: list[dict], book: dict | None = None):
                 mode="markers+text",
                 text=[point["name"] for point in subset],
                 textposition="top center",
-                textfont=dict(size=11, color="#ECEFF1"),
+                textfont=dict(size=13, color="#111111"),
                 name=stance,
                 marker=dict(
                     size=[marker_size(exposure.get(point["name"], {}).get("mv", 0.0), exposure) for point in subset],
@@ -329,14 +329,17 @@ def _render_quadrant(industries: list[dict], book: dict | None = None):
         )
     fig.update_layout(
         title="產業四象限",
-        template="plotly_dark",
+        template="plotly_white",
+        paper_bgcolor="#FFFFFF",
+        plot_bgcolor="#FFFFFF",
+        font=dict(color="#111111", size=13),
         height=680,
         margin=dict(l=10, r=10, t=50, b=10),
         legend=dict(orientation="h", y=1.02),
         xaxis=dict(visible=False, range=[-2.55, 2.55]),
         yaxis=dict(visible=False, range=[-2.55, 2.55], scaleanchor="x", scaleratio=1),
     )
-    st.plotly_chart(fig, width="stretch")
+    st.plotly_chart(fig, width="stretch", theme=None)
 
 
 def _render_risk_table(current: str):
