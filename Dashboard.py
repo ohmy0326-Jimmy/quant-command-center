@@ -12,12 +12,11 @@ from google import genai
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from oauth2client.service_account import ServiceAccountCredentials
-from ai_advice import generate_risk_manager_advice
 from app_secrets import read_secret
 from macro_cycle_ui import render_macro_cycle_page
 from order_assistant_ui import render_order_assistant
 from beta_rules import BETA_FALLBACK_STATE_KEY
-from beta_leverage_ui import render_beta_leverage_table
+from risk_performance import render_risk_performance_card
 from portfolio_risk import (
     attach_quotes,
     coerce_ticker_kind_pairs,
@@ -753,24 +752,9 @@ elif page == "第四頁：部位監控與量化風控":
             for row_warning in row_warnings:
                 st.warning(f"⚠️ {row_warning}")
             total_net_liq = metrics["nav"]
-            portfolio_beta = metrics["beta"]
-            total_exposure = metrics["exposure"]
-            total_cash = metrics["cash"]
-            total_debt = metrics["debt"]
-            global_leverage = round(metrics["leverage"], 2) if total_net_liq > 0 else 0.0
-            global_cash_pct = round(metrics["cash_pct"], 1) if total_net_liq > 0 else 0.0
 
-            st.subheader("📈 歷史資金成長曲線與最大回撤 (MDD) [以台幣計價]")
+            # 淨值歷史：Daily_NAV 分頁可能已移除（nav_data 為空），此時只有今天一點，卡片會標示「淨值歷史無法取得」。
             nav_series = nav_growth_series(nav_data, total_net_liq)
-            if not nav_series.empty:
-                current_nav, max_nav = nav_series.iloc[-1], nav_series.max()
-                current_dd_pct = ((current_nav - max_nav) / max_nav) * 100 if max_nav else 0.0
-                st.metric("最新總淨值 (TWD)", f"NT$ {current_nav:,.0f}", f"距離歷史最高點: {current_dd_pct:.2f}%")
-                st.line_chart(nav_series, height=150)
-            else:
-                st.metric("最新總淨值 (TWD)", f"NT$ {total_net_liq:,.0f}", "即時市價計算")
-            
-            st.markdown("---")
 
             if not df.empty:
                 alarms = df[(df['最大虧損比例'] > -100) & (df['報酬率 (%)'] <= df['最大虧損比例'])]
@@ -784,28 +768,10 @@ elif page == "第四頁：部位監控與量化風控":
                         send_to_telegram("量化戰情室風控警報", "偵測到部位觸及最大虧損限制，請立即前往戰情室檢查！")
                     st.markdown("---")
 
-            # 投資組合加權 Beta 與市場中性化判斷
+            # 風險與績效：Beta／槓桿三列表、現金、借款、最大回撤、回撤煞車燈合併成一張卡
+            render_risk_performance_card(st, metrics, nav_series)
             if not df.empty:
                 total_exposure_sum = df['實質曝險(台幣)'].sum()
-                portfolio_beta = metrics["beta"]
-
-                if portfolio_beta > 0.5:
-                    neutrality_status = "🟢 高度偏多 (Aggressive Long)"
-                elif portfolio_beta > 0.2:
-                    neutrality_status = "🟢 溫和偏多 (Mild Long)"
-                elif portfolio_beta < -0.2:
-                    neutrality_status = "🔴 偏空避險 (Short/Hedging)"
-                else:
-                    neutrality_status = "🟡 市場中性 (Market-Neutral)"
-
-                st.subheader("⚖️ 投資組合 Beta 係數與中性化戰情計分板")
-                b_col1, b_col2, b_col3 = st.columns(3)
-                b_col1.metric("台股 Beta", f"{metrics['tw_beta']:.2f}", f"TW 淨值: NT$ {metrics['tw_nav']:,.0f}")
-                b_col2.metric("美股 Beta", f"{metrics['us_beta']:.2f}", f"US 淨值: NT$ {metrics['us_nav']:,.0f}")
-                b_col3.metric("總 Beta", f"{metrics['total_beta']:.2f}", neutrality_status)
-                # 槓桿＝名目曝險÷淨值；部位平均 Beta＝Σ(曝險×Beta)÷曝險；帳戶 Beta＝Σ(曝險×Beta)÷淨值
-                render_beta_leverage_table(st, metrics)
-
                 if metrics.get("expired_removed"):
                     st.info(f"ℹ️ 已自動過期排除之選擇權標的：{', '.join(metrics['expired_removed'])}")
                 if metrics.get("options_missing_delta"):
@@ -830,13 +796,6 @@ elif page == "第四頁：部位監控與量化風控":
             st.markdown("---")
             st.subheader("🏦 各帳戶動態風險與全局槓桿 (即時市價結算)")
             if not account_data.empty:
-                c1, c2, c3, c4, c5 = st.columns(5)
-                c1.metric("總帳戶淨值/權益數", f"NT$ {total_net_liq:,.0f}", "")
-                c2.metric("總實質曝險 (TWD)", f"NT$ {total_exposure:,.0f}", "")
-                c3.metric("總借款負債 (TWD)", f"NT$ {total_debt:,.0f}", "")
-                c4.metric("🌍 合併總槓桿率", f"{global_leverage}x", "警戒線: 1.5x")
-                c5.metric("💰 總現金水位", f"{global_cash_pct}%", "健康區間: >40%")
-
                 if metrics.get("futures_initial", 0) > 0:
                     fc1, fc2, fc3, fc4, fc5 = st.columns(5)
                     fc1.metric("元大權益數", f"NT$ {metrics.get('futures_equity', 0):,.0f}", f"本日餘額 NT$ {metrics.get('futures_cash_ledger', 0):,.0f}")
@@ -911,32 +870,7 @@ elif page == "第四頁：部位監控與量化風控":
                 st.caption("Beta值＝這檔自己的一年 Beta；有效Beta＝套在市值上的 Beta（槓桿 ETF＝槓桿 × 標的一年 Beta，對 S&P 500 或加權指數）；曝險Beta＝套在名目曝險上的 Beta（槓桿 ETF＝標的一年 Beta）。Beta曝險＝名目曝險 × 曝險Beta＝市值 × 有效Beta，槓桿只乘一次。期貨的即時市值是名目市值（報價 × 乘數 × 口數），不是未實現損益。")
 
             st.markdown("---")
-            st.subheader("🤖 AI 避險基金經理人即時壓力測試與風控審查")
-            
-            if st.button("🧠 啟動 AI 經理人風控與壓力測試", use_container_width=True):
-                with st.spinner("AI 經理人正在分析中..."):
-                    try:
-                        gemini_key = os.environ.get("GEMINI_API_KEY") or read_secret("", "GEMINI_API_KEY")
-                        st.session_state.ai_memo_p4["text"] = generate_risk_manager_advice(
-                            df,
-                            total_net_liq,
-                            global_leverage,
-                            portfolio_beta,
-                            global_cash_pct,
-                            api_key=gemini_key,
-                        )
-                        st.session_state.ai_memo_p4["time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    except Exception as e:
-                        st.error(f"AI 呼叫失敗: {e}")
-            
-            if st.session_state.ai_memo_p4["text"]:
-                st.markdown("---")
-                st.info(f"📌 **最新風控審查 (生成時間：{st.session_state.ai_memo_p4['time']})**")
-                st.markdown(st.session_state.ai_memo_p4["text"])
-                
-                # 補上第四頁 AI 風控報告的 Telegram 手動推播按鈕
-                if st.button("📤 推播此風控審查報告到 Telegram", key="btn_tg_p4", type="primary"):
-                    send_to_telegram("AI 避險基金經理人風控審查報告", st.session_state.ai_memo_p4["text"])
+            st.info("🤖 AI 壓力測試已移到第六頁「下單輔助系統」→「壓力測試」分頁，壓力測試集中在同一處。")
 
         except Exception as e:
             st.error(f"連線發生錯誤。系統訊息: {e}")

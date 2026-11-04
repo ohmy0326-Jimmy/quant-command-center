@@ -597,7 +597,9 @@ class Page6MarginAndNotionalTests(unittest.TestCase):
         self.assertIn("equity_ratio_pct", page6)
         self.assertIn("equity_ratio_pct", page4)
         self.assertIn("權益比率（權益數 ÷ 原始保證金）", page6)
-        self.assertIn("距追繳", page6)
+        # 第六頁現況健檢只留一行摘要；距追繳等完整數字在第四頁
+        self.assertIn("page6_health_line", page6)
+        self.assertIn("距追繳", page4)
         self.assertNotIn("期貨保證金比率（權益 ÷ 維持保證金）", page6)
 
     def test_fmf_industry_table_uses_notional_not_pnl(self):
