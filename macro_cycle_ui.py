@@ -9,7 +9,14 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from macro_cycle import industry_quadrant_points, load_macro_cycle, quadrant_shift, regime_rows, regime_scale_text
+from macro_cycle import (
+    industry_quadrant_points,
+    load_macro_cycle,
+    manual_indicator_schedule,
+    quadrant_change_text,
+    regime_rows,
+    regime_scale_text,
+)
 from macro_cycle_live import (
     clear_live_view,
     fetch_auto_results,
@@ -49,10 +56,12 @@ def render_macro_cycle_page(load_book=None, clear_caches=None):
         return
     _render_summary(view, book)
     _render_indicators(view["indicators"])
-    _render_quadrant(view["industries"])
     _render_industries(view["industries"], book)
     _render_framework(view["industries"], book)
-    _render_history(view)
+    with st.expander("四象限", expanded=False):
+        _render_quadrant(view["industries"], book)
+    with st.expander("總分歷史", expanded=False):
+        _render_history(view)
     with st.expander("制度對照"):
         st.caption(regime_scale_text())
         _render_risk_table(view["regime"])
@@ -180,6 +189,10 @@ def _render_indicators(indicators: list[dict]):
         ]
     )
     st.dataframe(frame, width="stretch", hide_index=True)
+    schedule = manual_indicator_schedule(indicators)
+    if schedule:
+        st.caption("手動指標的最近更新與下次公布。下次公布依固定時程推算，不含假日；沒有固定時程寫「未知」。")
+        st.dataframe(pd.DataFrame(schedule), width="stretch", hide_index=True)
 
 
 def _render_industries(industries: list[dict], book: dict):
@@ -192,7 +205,6 @@ def _render_industries(industries: list[dict], book: dict):
         if choice != "全部" and item.get("stance") != choice:
             continue
         held = exposure.get(item["name"], {})
-        shift = quadrant_shift(item)
         rows.append(
             {
                 "產業": item["name"],
@@ -200,7 +212,7 @@ def _render_industries(industries: list[dict], book: dict):
                 "方向": item["direction"],
                 "立場": item["stance"],
                 "一句話": item.get("rationale") or "—",
-                "換象限": shift or "—",
+                "換象限": quadrant_change_text(item),
                 "你的持股": held.get("mv", 0.0),
                 "佔比": held.get("pct", 0.0),
                 "代表股": "、".join(item.get("tickers") or []),
@@ -252,7 +264,6 @@ def _render_framework(industries: list[dict], book: dict):
 
 
 def _render_history(view: dict):
-    st.subheader("總分歷史")
     history = list(view.get("history") or [])
     if not history:
         st.caption("尚無週分數歷史。")
@@ -270,8 +281,11 @@ def _render_history(view: dict):
     st.plotly_chart(fig, width="stretch")
 
 
-def _render_quadrant(industries: list[dict]):
-    st.subheader("四象限")
+def _render_quadrant(industries: list[dict], book: dict | None = None):
+    book = book or {}
+    positions = (book.get("positions") or []) if book.get("ok") else []
+    exposure, _grand = exposure_by_industry(positions, industries)
+    st.caption("點的大小代表你在該產業的持股市值，沒持股是最小點。")
     st.caption("左上是復甦、右上是成長、右下是趨緩、左下是衰退。同一象限裡，上行往下一階段（順時針）靠，下行往回靠，持平留在中間。實心點的立場是目前配置，空心點整列是示例。")
     points = industry_quadrant_points(industries)
     fig = go.Figure()
@@ -304,12 +318,12 @@ def _render_quadrant(industries: list[dict]):
                 textfont=dict(size=11, color="#ECEFF1"),
                 name=stance,
                 marker=dict(
-                    size=16,
+                    size=[marker_size(exposure.get(point["name"], {}).get("mv", 0.0), exposure) for point in subset],
                     color=color,
                     symbol=["circle-open" if point["example"] else "circle" for point in subset],
                     line=dict(width=2, color=color),
                 ),
-                hovertext=[_hover(point) for point in subset],
+                hovertext=[_hover(point, exposure.get(point["name"], {}).get("mv", 0.0)) for point in subset],
                 hoverinfo="text",
             )
         )
@@ -343,10 +357,19 @@ def _render_risk_table(current: str):
     st.dataframe(styler, width="stretch", hide_index=True)
 
 
-def _hover(point: dict) -> str:
+def marker_size(mv: float, exposure: dict, smallest: float = 12.0, largest: float = 46.0) -> float:
+    """市值越大點越大（面積約與市值成正比）。沒持股用最小點。"""
+    top = max((float(v.get("mv") or 0) for v in exposure.values()), default=0.0)
+    mv = float(mv or 0)
+    if top <= 0 or mv <= 0:
+        return smallest
+    return smallest + (largest - smallest) * (mv / top) ** 0.5
+
+
+def _hover(point: dict, mv: float = 0.0) -> str:
     mark = "（示例）" if point["example"] else ""
     tickers = "、".join(point["tickers"])
-    return f"{point['name']}{mark}<br>立場：{point['stance']}<br>週期：{point['cycle']}　方向：{point['direction']}<br>代表股：{tickers}"
+    return f"{point['name']}{mark}<br>立場：{point['stance']}<br>週期：{point['cycle']}　方向：{point['direction']}<br>代表股：{tickers}<br>持股市值：NT$ {mv:,.0f}"
 
 
 def _score_color(score: int) -> str:

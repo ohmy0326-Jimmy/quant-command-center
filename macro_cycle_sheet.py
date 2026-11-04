@@ -202,6 +202,7 @@ def exposure_by_industry(positions: list[dict], industries: list[dict]) -> tuple
     for item in industries:
         for ticker in item.get("tickers") or []:
             index[canonical_ticker(ticker)] = item["name"]
+    names = {item["name"] for item in industries}
     totals: dict[str, float] = {}
     grand = 0.0
     for pos in positions or []:
@@ -209,7 +210,7 @@ def exposure_by_industry(positions: list[dict], industries: list[dict]) -> tuple
         if mv <= 0:
             continue
         grand += mv
-        name = index.get(canonical_ticker(pos.get("ticker")))
+        name = index.get(canonical_ticker(pos.get("ticker"))) or _shared_industry(pos.get("ticker"), names)
         if not name:
             continue
         totals[name] = totals.get(name, 0.0) + mv
@@ -217,6 +218,14 @@ def exposure_by_industry(positions: list[dict], industries: list[dict]) -> tuple
     for name, mv in totals.items():
         out[name] = {"mv": mv, "pct": (mv / grand * 100.0) if grand else 0.0}
     return out, grand
+
+
+def _shared_industry(ticker, names: set) -> str | None:
+    """代表股對不到時，用第四頁同一張表（sector_map）歸類，例如 SOXL、MUU。"""
+    from sector_map import industry_for_ticker
+
+    name = industry_for_ticker(ticker)
+    return name if name in names else None
 
 
 def underweight_warnings(industries: list[dict], exposure: dict[str, dict], heavy: float = HEAVY_UNDERWEIGHT_PCT) -> list[str]:

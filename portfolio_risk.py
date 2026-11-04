@@ -76,29 +76,7 @@ STOCK_TAX_RATE = 0.003
 
 TAIEX_FUTURES = ("TX", "MTX", "FMF", "TMF")
 
-DETAILED_SECTOR_MAP = {
-    "MUU": "記憶體",
-    "SNXX": "記憶體",
-    "AMUU": "AI晶片",
-    "KORU": "韓國指數",
-    "金居": "銅箔材料",
-    "2330": "晶圓代工",
-    "TSM": "晶圓代工",
-    "NVDA": "AI晶片",
-    "AMD": "AI晶片",
-    "AVGO": "網通與半導體",
-    "MSFT": "軟體與雲端",
-    "AAPL": "消費電子",
-    "GOOGL": "數位廣告與雲端",
-    "META": "社群與AI",
-    "SOXL": "半導體槓桿ETF",
-    "00631L": "台股槓桿ETF",
-    "LITX": "光通產業",
-    "TX": "臺指期貨",
-    "MTX": "小型臺指",
-    "FMF": "微型臺指期",
-    "TMF": "微型臺指期",
-}
+from sector_map import DETAILED_SECTOR_MAP  # noqa: E402  第四、五頁共用
 
 
 def futures_multiplier(ticker: str) -> float:
