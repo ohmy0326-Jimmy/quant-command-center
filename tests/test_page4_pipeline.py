@@ -98,10 +98,10 @@ class SafeValuationTests(unittest.TestCase):
     def test_one_bad_row_is_dropped_and_named(self):
         real = portfolio_risk._futures_margin_row
 
-        def boom(ticker, qty_abs, notional_abs):
+        def boom(ticker, qty_abs, notional_abs, *args):
             if ticker == "FMF":
                 raise ValueError("too many values to unpack (expected 2)")
-            return real(ticker, qty_abs, notional_abs)
+            return real(ticker, qty_abs, notional_abs, *args)
 
         with patch.object(portfolio_risk, "_futures_margin_row", side_effect=boom):
             valued, _accounts, metrics, warnings = value_positions_safely(_positions(), SHEET_ACCOUNTS, 32.6, PRICES, {}, {})

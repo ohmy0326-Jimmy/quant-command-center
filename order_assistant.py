@@ -1129,7 +1129,7 @@ def _price_after_taiex(item: dict, move: float) -> float:
 
 def _row_pnl_and_mv(item: dict, price: float) -> tuple[float, float]:
     if item["is_fut"]:
-        occupied, _maint = _futures_margin_row(item["ticker"], abs(item["qty"]), abs(item["notional"]))
+        occupied, _maint, _src = _futures_margin_row(item["ticker"], abs(item["qty"]), abs(item["notional"]))
         pnl = (price - item["cost"]) * item["qty"] * futures_multiplier(item["ticker"])
         display_mv = occupied + pnl
     else:
@@ -1149,7 +1149,7 @@ def taiex_shock_state(snapshot: Snapshot, move: float, book=None) -> dict:
         pnl, mv_twd = _row_pnl_and_mv(item, _price_after_taiex(item, move))
         _occupied, maint = (0.0, 0.0)
         if item["is_fut"]:
-            _occupied, maint = _futures_margin_row(item["ticker"], abs(item["qty"]), abs(item["notional"]))
+            _occupied, maint, _src = _futures_margin_row(item["ticker"], abs(item["qty"]), abs(item["notional"]))
         grouped.setdefault(item["account"], []).append((pnl, mv_twd, item["fx"], maint))
     nav = 0.0
     futures_equity = 0.0
