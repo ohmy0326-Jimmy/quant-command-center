@@ -1,4 +1,4 @@
-"""唯讀 FastAPI。只有 GET，不寫試算表、不推播。"""
+"""FastAPI。GET 全部唯讀；唯一的寫入是 POST /v1/nav-snapshot（另一把金鑰，只寫 NAV_Snapshots 分頁）。不推播。"""
 
 from __future__ import annotations
 
@@ -13,8 +13,8 @@ from fastapi.security import APIKeyHeader
 
 from ai_advice import RISK_MANAGER_MODEL, build_risk_manager_prompt, complete_risk_manager_prompt, page4_advice_figures
 from api.advice_cache import AdviceCache, AdviceTimeout, RateLimited, call_with_timeout
-from api.auth import api_key_matches, expected_api_key, install_redact_filter, redact_secrets
-from api.schemas import AdviceResponse, ErrorResponse, HealthResponse, PortfolioResponse
+from api.auth import api_key_matches, expected_api_key, expected_snapshot_key, install_redact_filter, redact_secrets
+from api.schemas import AdviceResponse, ErrorResponse, HealthResponse, NavSnapshotResponse, PortfolioResponse
 from portfolio_briefing import SCHEMA_VERSION, format_as_of, load_live_book, taipei_now
 
 logger = logging.getLogger(__name__)
@@ -27,11 +27,18 @@ if not any(getattr(handler, "quant_api", False) for handler in logger.handlers):
     logger.setLevel(logging.INFO)
 
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+_snapshot_key_header = APIKeyHeader(name="X-Snapshot-Key", auto_error=False, scheme_name="SnapshotKey")
 _cache: AdviceCache | None = None
 
 
 def get_book_loader():
     return load_live_book
+
+
+def get_snapshot_writer():
+    from nav_snapshot import take_snapshot
+
+    return take_snapshot
 
 
 def get_prompt_runner():
@@ -85,6 +92,15 @@ app = FastAPI(
 
 def require_api_key(x_api_key: str | None = Security(_api_key_header)) -> None:
     if not api_key_matches(x_api_key, expected_api_key()):
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+
+def require_snapshot_key(x_snapshot_key: str | None = Security(_snapshot_key_header)) -> None:
+    """寫入金鑰（QCC_SNAPSHOT_KEY）。沒設定 → 503 停用；不對 → 401。唯讀金鑰不能拿來寫。"""
+    expected = expected_snapshot_key()
+    if not expected:
+        raise HTTPException(status_code=503, detail="nav snapshot disabled")
+    if not api_key_matches(x_snapshot_key, expected):
         raise HTTPException(status_code=401, detail="unauthorized")
 
 
@@ -200,3 +216,16 @@ def _advice_response(text: str, generated_at, cached: bool):
         generated_at=format_as_of(generated_at),
     )
     return _no_store(AdviceResponse, body.model_dump())
+
+
+@app.post("/v1/nav-snapshot", response_model=NavSnapshotResponse)
+def nav_snapshot(_: None = Depends(require_snapshot_key), writer=Depends(get_snapshot_writer)):
+    """用第四頁同一套估價算出今天（台北）的淨值，upsert 到 NAV_Snapshots。同一天重複呼叫只覆蓋那一列。"""
+    try:
+        result = writer()
+    except Exception as exc:
+        _log_load_failure("/v1/nav-snapshot", exc)
+        raise HTTPException(status_code=502, detail="snapshot failed") from exc
+    payload = dict(result)
+    payload.update(schema_version=SCHEMA_VERSION, as_of=format_as_of(taipei_now()), status="written")
+    return _no_store(NavSnapshotResponse, payload)

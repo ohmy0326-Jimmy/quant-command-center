@@ -136,22 +136,43 @@ def load_service_account_info(secrets_fallback=None) -> dict:
     return json.loads(raw_val)
 
 
-def fetch_quant_sheets(key_data: dict):
-    """讀取 Quant_Database。回傳順序與第四頁相同：(帳戶, 淨值歷史, 持倉)。"""
+QUANT_SPREADSHEET = "Quant_Database"
+# 讀寫共用的 OAuth 範圍。spreadsheets 可讀寫試算表內容；drive.readonly 只用來以名稱找到 Quant_Database。
+# 能不能寫入取決於服務帳戶在試算表上的共用權限（要「編輯者」），不是這裡的範圍。
+SHEETS_SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive.readonly"]
+
+
+def open_quant_spreadsheet(key_data: dict):
     import gspread
     from oauth2client.service_account import ServiceAccountCredentials
 
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(key_data, scope)
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(key_data, SHEETS_SCOPES)
     client = gspread.authorize(creds)
-    spreadsheet = client.open("Quant_Database")
-    from futures_ledger import FUTURES_LEDGER_SHEET, TRADE_LOG_SHEET, apply_yuanta_ledger
+    return client.open(QUANT_SPREADSHEET)
+
+
+def nav_history_frame(spreadsheet) -> pd.DataFrame:
+    """淨值歷史：優先讀 NAV_Snapshots（API 每日寫入），沒有或空白才退回舊的 Daily_NAV。都沒有回空表。"""
     from sheet_dates import normalize_nav_frame
 
+    for title in ("NAV_Snapshots", "Daily_NAV"):
+        raw = _optional_sheet(spreadsheet, title)
+        if raw is not None and not raw.empty and "日期" in raw.columns and "總淨值" in raw.columns:
+            out = normalize_nav_frame(raw)
+            out.attrs["source"] = title
+            return out
+    empty = pd.DataFrame(columns=["日期", "總淨值"])
+    empty.attrs["source"] = ""
+    return empty
+
+
+def read_quant_sheets(spreadsheet):
+    """讀取已開啟的 Quant_Database。回傳順序與第四頁相同：(帳戶, 淨值歷史, 持倉)。"""
+    from futures_ledger import FUTURES_LEDGER_SHEET, TRADE_LOG_SHEET, apply_yuanta_ledger
+
     accounts = pd.DataFrame(spreadsheet.worksheet("Active_Positions").get_all_records())
-    # Daily_NAV 分頁可以不存在（已改成 App 即時算淨值）。沒有就回空表，淨值歷史相關功能顯示「無法取得」。
-    nav_raw = _optional_sheet(spreadsheet, "Daily_NAV")
-    nav = normalize_nav_frame(nav_raw if nav_raw is not None else pd.DataFrame(columns=["日期", "總淨值"]))
+    # Daily_NAV 分頁可以不存在（已改成 App 即時算淨值）。淨值歷史改讀 NAV_Snapshots。
+    nav = nav_history_frame(spreadsheet)
     positions = pd.DataFrame(spreadsheet.worksheet("持倉統計").get_all_records())
     accounts = apply_yuanta_ledger(
         accounts,
@@ -160,6 +181,11 @@ def fetch_quant_sheets(key_data: dict):
         positions,
     )
     return accounts, nav, positions
+
+
+def fetch_quant_sheets(key_data: dict):
+    """讀取 Quant_Database。回傳順序與第四頁相同：(帳戶, 淨值歷史, 持倉)。"""
+    return read_quant_sheets(open_quant_spreadsheet(key_data))
 
 
 def _optional_sheet(spreadsheet, title: str) -> pd.DataFrame | None:

@@ -1,6 +1,6 @@
 # 唯讀 API
 
-給另一個助理做每日簡報用。不經過戰情室的密碼頁，也不提供任何寫入。
+給另一個助理做每日簡報用。不經過戰情室的密碼頁。GET 全部唯讀；唯一的寫入是每日淨值快照 `POST /v1/nav-snapshot`，用另一把金鑰，見 [nav_snapshot.md](nav_snapshot.md)。
 
 計算仍走 `portfolio_risk.py` 的 `finalize_valuation`（淨值、實質曝險、槓桿、現金水位、Beta、元大期貨權益與維持保證金）。AI 文字仍走 `ai_advice.py`，提示詞與第四頁「AI 避險基金經理人」按鈕相同，模型是 `gemini-3.8-flash`。
 
@@ -14,15 +14,17 @@
 GET {SERVICE_URL}/v1/health
 GET {SERVICE_URL}/v1/portfolio
 GET {SERVICE_URL}/v1/ai-advice
+POST {SERVICE_URL}/v1/nav-snapshot   # 寫入，另一把金鑰
 ```
 
-沒有其他路徑。沒有 POST、PUT、PATCH、DELETE。金鑰放在標頭，不要放在網址（存取日誌會記下 query string）。
+沒有其他路徑。除了 `POST /v1/nav-snapshot` 之外沒有 POST、PUT、PATCH、DELETE。金鑰放在標頭，不要放在網址（存取日誌會記下 query string）。
 
 | 路徑 | 金鑰 | 做什麼 |
 | --- | --- | --- |
 | `/v1/health` | 不要 | 活著就回 `status: ok` |
 | `/v1/portfolio` | 要 | 第四頁同一套部位數字 |
 | `/v1/ai-advice` | 要 | 呼叫第四頁同一套 Gemini 風控建議 |
+| `POST /v1/nav-snapshot` | `X-Snapshot-Key`（`QCC_SNAPSHOT_KEY`） | 寫入當天淨值到 `NAV_Snapshots`，見 [nav_snapshot.md](nav_snapshot.md) |
 
 OpenAPI（不含部位資料）：`{SERVICE_URL}/openapi.json` 與 `{SERVICE_URL}/docs`。
 
@@ -169,8 +171,9 @@ X-API-Key: <READONLY_API_KEY>
 | `AI_ADVICE_TIMEOUT_SECONDS` | 選填，預設 25 | 模型硬逾時 |
 | `AI_ADVICE_CACHE_TTL_SECONDS` | 選填，預設 1800 | 建議快取 |
 | `AI_ADVICE_MIN_INTERVAL_SECONDS` | 選填，預設 60 | 兩次模型呼叫的最短間隔 |
+| `QCC_SNAPSHOT_KEY` | 選填，Secret Manager（例 `qcc-snapshot-key`） | 只給 `POST /v1/nav-snapshot`；沒設定時該端點回 503 |
 
-Google 試算表仍用正式服務那把服務帳戶去讀 Secret Manager 的 `google-service-key`，程式路徑與第四頁相同（`load_service_account_info` → `fetch_quant_sheets`）。這支 API 只呼叫讀取。
+Google 試算表仍用正式服務那把服務帳戶去讀 Secret Manager 的 `google-service-key`，程式路徑與第四頁相同（`load_service_account_info` → `fetch_quant_sheets`）。GET 只讀；`POST /v1/nav-snapshot` 會寫 `NAV_Snapshots` 分頁，服務帳戶需要 `Quant_Database` 的編輯者權限（見 [nav_snapshot.md](nav_snapshot.md)）。
 
 ## 部署
 

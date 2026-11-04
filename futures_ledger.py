@@ -823,6 +823,28 @@ def _reduce_qty_only(book: _Book, side: int, qty: float, price: float) -> None:
         book.avg = None
 
 
+def ledger_cash_flows(ledger: pd.DataFrame | None) -> list[dict]:
+    """Futures_Ledger 的出入金列 → [{"date", "amount"}]（新台幣，入金正、出金負）。規則與本日餘額推算相同。"""
+    frame = _prepare(ledger)
+    if frame is None or frame.empty or "類型" not in frame.columns:
+        return []
+    flows = []
+    for _, row in frame.iterrows():
+        kind = _kind(row.get("類型"))
+        if kind not in {"出入金", "入金", "出金"}:
+            continue
+        day = parse_sheet_date(row.get("日期"))
+        amount = _optional_number(row.get("金額"))
+        if day is None or amount is None:
+            continue
+        if kind == "出金" and amount > 0:
+            amount = -amount
+        elif kind == "入金" and amount < 0:
+            amount = -amount
+        flows.append({"date": day, "amount": float(amount)})
+    return flows
+
+
 def _prepare(frame: pd.DataFrame | None) -> pd.DataFrame | None:
     if frame is None:
         return None

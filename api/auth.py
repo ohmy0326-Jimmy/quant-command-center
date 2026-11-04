@@ -16,6 +16,14 @@ def expected_api_key() -> str:
     return os.environ.get("READONLY_API_KEY", "").strip()
 
 
+SNAPSHOT_KEY_ENV = "QCC_SNAPSHOT_KEY"
+
+
+def expected_snapshot_key() -> str:
+    """寫入用金鑰，與唯讀金鑰分開。沒設定時快照端點停用（503）。"""
+    return os.environ.get(SNAPSHOT_KEY_ENV, "").strip()
+
+
 def api_key_matches(provided: str | None, expected: str | None) -> bool:
     """以 SHA-256 摘要做常數時間比較。空的設定一律拒絕。"""
     provided_digest = hashlib.sha256((provided or "").strip().encode("utf-8")).digest()
@@ -55,7 +63,7 @@ _SECRET_ENV_NAME = re.compile(
     r"PRIVATE|AUTH|SERVICE_ACCOUNT|SA_JSON|COOKIE|DSN|WEBHOOK)(?:_|$)",
     re.IGNORECASE,
 )
-_ALWAYS_SECRET_ENV = ("READONLY_API_KEY", "GEMINI_API_KEY")
+_ALWAYS_SECRET_ENV = ("READONLY_API_KEY", "GEMINI_API_KEY", "QCC_SNAPSHOT_KEY")
 _PEM_BLOCK = re.compile(
     r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)",
     re.DOTALL,
