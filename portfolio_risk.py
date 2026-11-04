@@ -20,6 +20,7 @@ import yfinance as yf
 import taifex_quotes
 from beta_rules import beta_source_label, effective_beta, fetch_underlying_beta
 from stock_futures import resolve_stock_future
+from stock_futures_margin import stock_future_margin
 
 # 元大期貨備援本日餘額（未含未平倉損益之現金帳頁面），最後確認日期 2026-11-02（來自元大 App）。
 YUANTA_FUTURES_BASE_EQUITY = 168308.0
@@ -643,11 +644,38 @@ def attach_quotes(df: pd.DataFrame, prices: dict, betas: dict, sectors: dict, ex
     return out
 
 
-def _futures_margin_row(ticker: str, qty_abs: float, notional_abs: float) -> tuple[float, float]:
+def _futures_margin_row(ticker: str, qty_abs: float, notional_abs: float, overrides: dict | None = None) -> tuple[float, float, str]:
+    """回傳 (原始保證金, 維持保證金, 來源)。個股期走期交所保證金一覽表（可被設定列覆寫）。"""
     spec = FUTURES_MARGIN.get(str(ticker).upper())
     if spec is not None:
-        return spec[0] * qty_abs, spec[1] * qty_abs
-    return notional_abs * 0.135, notional_abs * 0.11
+        return spec[0] * qty_abs, spec[1] * qty_abs, "固定每口保證金"
+    sf = resolve_stock_future(ticker)
+    if sf is not None:
+        override = None
+        if overrides:
+            key = ("S" if sf.small else "") + sf.code + ("" if sf.small else "F")
+            override = overrides.get(key)
+        if isinstance(override, tuple):
+            value, basis = override
+            ini, mnt, src = stock_future_margin(sf.code, notional_abs, qty_abs, value)
+            return ini, mnt, f"Futures_Ledger {basis or '設定列每口原始保證金'}：每口 {value:,.0f}"
+        return stock_future_margin(sf.code, notional_abs, qty_abs, override)
+    return notional_abs * 0.135, notional_abs * 0.11, "預設比例 13.5%"
+
+
+def _ledger_margin_overrides(accounts: pd.DataFrame) -> dict:
+    if accounts is None or accounts.empty or "_yuanta_margin_per_lot" not in accounts.columns:
+        return {}
+    from futures_ledger import _decode_margin
+    out: dict = {}
+    for text in accounts["_yuanta_margin_per_lot"].tolist():
+        try:
+            per_lot, basis = _decode_margin(text)
+        except Exception:
+            continue
+        for key, val in (per_lot or {}).items():
+            out[key] = (val, basis.get(key, ""))
+    return out
 
 
 def _empty_metrics() -> dict:
@@ -732,11 +760,14 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
         df["換算匯率"] = np.where(df["種類"].astype(str).str.contains("美"), usdtwd, 1.0).astype(float)
         df["實質佔用本金(原幣)"] = df["名目合約總值(原幣)"].abs().astype(float)
         df["維持保證金(原幣)"] = 0.0
+        df["保證金來源"] = ""
+        margin_overrides = _ledger_margin_overrides(account_data)
 
         for idx, row in df.iterrows():
             if "期" in str(row["種類"]) and not is_option_row(row):
                 # 賣方選擇權保證金未計入（TODO）
-                occupied, maint = _futures_margin_row(str(row["標的"]), abs(float(row["持有數量"])), abs(float(row["名目合約總值(原幣)"])))
+                occupied, maint, m_src = _futures_margin_row(str(row["標的"]), abs(float(row["持有數量"])), abs(float(row["名目合約總值(原幣)"])), margin_overrides)
+                df.at[idx, "保證金來源"] = m_src
                 df.at[idx, "實質佔用本金(原幣)"] = occupied
                 df.at[idx, "維持保證金(原幣)"] = maint
 
