@@ -139,8 +139,14 @@ class AdvicePromptTests(unittest.TestCase):
             dashboard = handle.read()
         with open(os.path.join(ROOT, "ai_advice.py"), encoding="utf-8") as handle:
             advice = handle.read()
-        self.assertIn("generate_risk_manager_advice", dashboard)
+        with open(os.path.join(ROOT, "order_assistant_ui.py"), encoding="utf-8") as handle:
+            page6 = handle.read()
+        # AI 壓力測試已從第四頁移到第六頁「壓力測試」分頁，仍走同一個共用函式
+        self.assertNotIn("generate_risk_manager_advice", dashboard)
+        self.assertIn("generate_risk_manager_advice", page6)
+        self.assertIn("page4_advice_figures(snapshot.metrics)", page6)
         self.assertNotIn("請給予 3 點風控建議。", dashboard)
+        self.assertNotIn("請給予 3 點風控建議。", page6)
         self.assertIn("請給予 3 點風控建議。", advice)
         self.assertEqual(dashboard.count("gemini-3.8-flash"), 3)
         self.assertNotIn("HttpOptions", advice)

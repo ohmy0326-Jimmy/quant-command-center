@@ -149,7 +149,9 @@ def fetch_quant_sheets(key_data: dict):
     from sheet_dates import normalize_nav_frame
 
     accounts = pd.DataFrame(spreadsheet.worksheet("Active_Positions").get_all_records())
-    nav = normalize_nav_frame(pd.DataFrame(spreadsheet.worksheet("Daily_NAV").get_all_records()))
+    # Daily_NAV 分頁可以不存在（已改成 App 即時算淨值）。沒有就回空表，淨值歷史相關功能顯示「無法取得」。
+    nav_raw = _optional_sheet(spreadsheet, "Daily_NAV")
+    nav = normalize_nav_frame(nav_raw if nav_raw is not None else pd.DataFrame(columns=["日期", "總淨值"]))
     positions = pd.DataFrame(spreadsheet.worksheet("持倉統計").get_all_records())
     accounts = apply_yuanta_ledger(
         accounts,

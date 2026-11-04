@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 import os
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -67,6 +67,7 @@ from order_insights import (
 )
 from refresh_controls import render_refresh_bar
 from beta_leverage_ui import render_beta_leverage_table
+from risk_performance import page6_health_line
 from beta_rules import BETA_FALLBACK_STATE_KEY, fallback_table_rows, overrides_from_rows
 from macro_cycle import format_holding_tag, holding_tag
 from macro_cycle_ui import cached_macro_cycle_view
@@ -1536,6 +1537,32 @@ def _render_futures_calc(snapshot, rules: Rules):
     return None
 
 
+AI_STRESS_STATE_KEY = "ai_memo_p4"
+
+
+def _render_ai_stress(snapshot, send_to_telegram) -> None:
+    """AI 避險基金經理人壓力測試（原第四頁），與第四頁同一套數字與提示詞。按鈕按下才呼叫 AI。"""
+    from ai_advice import generate_risk_manager_advice, page4_advice_figures
+    from app_secrets import read_secret
+
+    st.subheader("🤖 AI 避險基金經理人壓力測試與風控審查")
+    memo = st.session_state.setdefault(AI_STRESS_STATE_KEY, {"text": "", "time": ""})
+    if st.button("🧠 啟動 AI 經理人風控與壓力測試", key="oa_ai_stress", width="stretch"):
+        with st.spinner("AI 經理人正在分析中..."):
+            try:
+                nav, leverage, beta, cash_pct = page4_advice_figures(snapshot.metrics)
+                gemini_key = os.environ.get("GEMINI_API_KEY") or read_secret("", "GEMINI_API_KEY")
+                memo["text"] = generate_risk_manager_advice(snapshot.valued, nav, leverage, beta, cash_pct, api_key=gemini_key)
+                memo["time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            except Exception as exc:
+                st.error(f"AI 呼叫失敗：{_public_error(exc)}")
+    if memo.get("text"):
+        st.info(f"📌 **最新風控審查（生成時間：{memo['time']}）**")
+        st.markdown(memo["text"])
+        if st.button("📤 推播此風控審查報告到 Telegram", key="btn_tg_p4", type="primary"):
+            send_to_telegram("AI 避險基金經理人風控審查報告", memo["text"])
+
+
 def render_order_assistant(send_to_telegram, load_sheets, beta_fn, load_market=None, clear_caches=None):
     view = cached_macro_cycle_view()
     if st.session_state.get("oa_apply_regime_defaults"):
@@ -1624,24 +1651,10 @@ def render_order_assistant(send_to_telegram, load_sheets, beta_fn, load_market=N
     )
 
     with tab_health:
+        # 淨值／槓桿／Beta／權益比率的完整數字只放第四頁「風險與績效」，這裡留一行摘要。
+        st.info(page6_health_line(snapshot.metrics, rules.target_leverage))
         st.subheader("處置優先順序")
         _priority_table(priority_list(snapshot, rules))
-        metrics = snapshot.metrics
-        h1, h2, h3, h4, h5 = st.columns(5)
-        h1.metric("淨值", f"NT$ {metrics['nav']:,.0f}")
-        h2.metric("實質曝險", f"NT$ {metrics['exposure']:,.0f}")
-        h3.metric("合併槓桿", f"{metrics['leverage']:.2f}x", f"上限 {rules.target_leverage:.2f}x", delta_color="off")
-        h4.metric("現金水位", f"{metrics['cash_pct']:.1f}%", f"下限 {rules.min_cash_pct:.0f}%", delta_color="off")
-        h5.metric("總 Beta", f"{metrics['total_beta']:.2f}", f"台股 {metrics['tw_beta']:.2f}／美股 {metrics['us_beta']:.2f}｜目標 {rules.beta_low:.1f}–{rules.beta_high:.1f}", delta_color="off")
-        render_beta_leverage_table(st, metrics)
-        ratio = equity_ratio_pct(metrics.get("futures_equity"), metrics.get("futures_initial"))
-        if ratio is not None:
-            st.metric(
-                "權益比率（權益數 ÷ 原始保證金）",
-                f"{ratio:.2f}%",
-                f"距追繳 NT$ {metrics.get('margin_call_distance', 0):,.0f}",
-                delta_color="off",
-            )
         st.caption(
             f"經濟槓桿 {economic_leverage(snapshot):.2f}x：股票沿用第四頁曝險，臺指期改以指數 × 乘數 × 口數。"
             "合併槓桿則與第四頁完全相同。"
@@ -1735,6 +1748,8 @@ def render_order_assistant(send_to_telegram, load_sheets, beta_fn, load_market=N
             st.error("這些情境的期貨權益會低於維持保證金：" + "、".join(called))
         else:
             st.success("這四個情境都還沒碰到維持保證金。")
+        st.divider()
+        _render_ai_stress(snapshot, send_to_telegram)
 
     with tab_export:
         st.subheader("檢查清單與 Telegram")
