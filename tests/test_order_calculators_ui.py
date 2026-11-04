@@ -58,3 +58,6 @@ render_order_assistant(dummy_send, DummyCallable(), DummyCallable())
             self.assertIn("名目曝險", labels)
             self.assertIn("合併槓桿", labels)
             self.assertIn("停損上限可下口數", labels)
+            margin_captions = [c.value for c in at.caption if "保證金來源" in str(c.value)]
+            self.assertTrue(margin_captions)
+            self.assertTrue(any(("Futures_Ledger" in c) or ("預設值" in c) for c in margin_captions))
