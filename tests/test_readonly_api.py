@@ -379,10 +379,13 @@ class ApiHttpTests(unittest.TestCase):
     def test_post_is_rejected_and_routes_are_read_only(self):
         response = self.client.post("/v1/portfolio", headers={"X-API-Key": API_KEY})
         self.assertEqual(response.status_code, 405)
-        methods = set()
+        writes = set()
         for route in app.routes:
-            methods.update(getattr(route, "methods", None) or set())
-        self.assertTrue(methods <= {"GET", "HEAD"})
+            methods = getattr(route, "methods", None) or set()
+            if methods - {"GET", "HEAD"}:
+                writes.add((route.path, frozenset(methods)))
+        # 唯一的寫入端點是每日淨值快照，用另一把金鑰。
+        self.assertEqual(writes, {("/v1/nav-snapshot", frozenset({"POST"}))})
 
     def test_loader_error_hides_detail(self):
         def explode():

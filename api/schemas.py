@@ -116,6 +116,25 @@ class ErrorResponse(BaseModel):
     detail: str
 
 
+class NavSnapshotResponse(BaseModel):
+    """POST /v1/nav-snapshot。寫入（或覆蓋）NAV_Snapshots 當天那一列。"""
+
+    model_config = _MODEL
+
+    schema_version: str = Field(examples=[SCHEMA_VERSION])
+    as_of: str
+    status: Literal["written"]
+    date: str = Field(description="快照的台北日期 yyyy-mm-dd。")
+    action: Literal["inserted", "updated"] = Field(description="inserted＝新增一列；updated＝同一天已有，覆蓋。")
+    sheet: str
+    sheet_created: bool
+    row_number: int
+    row: dict = Field(description="寫入的那一列，欄名與試算表相同：日期、總淨值、台股淨值、美股淨值、名目曝險、槓桿、帳戶Beta、出入金、寫入時間。")
+    flow_sources: dict = Field(description="出入金拆分：futures_ledger、cash_flows（台幣）。")
+    usdtwd: float
+    warnings: list[str]
+
+
 def export_json_schema() -> dict:
     return {
         "schema_version": SCHEMA_VERSION,

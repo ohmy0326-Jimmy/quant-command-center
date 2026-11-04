@@ -216,7 +216,7 @@ class DashboardWiringTests(unittest.TestCase):
         self.page4 = text.split('elif page == "第四頁：部位監控與量化風控":', 1)[1].split('elif page == "第五頁', 1)[0]
 
     def test_page4_has_single_card_and_no_duplicates(self):
-        self.assertEqual(self.page4.count("render_risk_performance_card(st, metrics, nav_series)"), 1)
+        self.assertEqual(self.page4.count("render_risk_performance_card(st, metrics, nav_series, capture)"), 1)
         for gone in ("投資組合 Beta 係數與中性化戰情計分板", "合併總槓桿率", "總現金水位", "歷史資金成長曲線", "render_beta_leverage_table", "啟動 AI 經理人風控與壓力測試"):
             self.assertNotIn(gone, self.page4)
         self.assertIn("AI 壓力測試已移到第六頁", self.page4)

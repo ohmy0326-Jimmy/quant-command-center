@@ -34,7 +34,7 @@ def _strategy_default(name: str) -> float:
 BRAKE_PAUSE_PCT = _strategy_default("brake_pause") * 100.0
 BRAKE_CUT_PCT = _strategy_default("brake_cut") * 100.0
 
-HISTORY_UNAVAILABLE = "淨值歷史無法取得（Daily_NAV 分頁已移除或沒有歷史資料），最大回撤與回撤煞車燈暫不判斷。"
+HISTORY_UNAVAILABLE = "淨值歷史無法取得（NAV_Snapshots 還沒有資料，舊的 Daily_NAV 分頁也不存在），最大回撤與回撤煞車燈暫不判斷。"
 
 
 def neutrality_label(beta: float) -> str:
@@ -116,8 +116,30 @@ def page6_health_line(metrics: dict, target_leverage: float | None = None) -> st
     return "｜".join(parts) + "　→ 詳見第四頁「風險與績效」"
 
 
-def render_risk_performance_card(st, metrics: dict, nav_series: pd.Series | None = None) -> dict:
-    """一張卡：Beta／槓桿三列表＋現金、借款、最大回撤、回撤煞車燈。每個數字只出現一次。"""
+def capture_table(capture: dict | None) -> pd.DataFrame | None:
+    """捕獲率結果 → 顯示用表格（百分比字串）。樣本不足回 None。"""
+    if not capture or not capture.get("ok") or not capture.get("rows"):
+        return None
+
+    def pct(value):
+        return "—" if value is None else f"{value:.0f}%"
+
+    return pd.DataFrame(
+        [
+            {
+                "基準": r["基準"],
+                "上檔捕獲": pct(r["上檔捕獲"]),
+                "下檔捕獲": pct(r["下檔捕獲"]),
+                "月數（漲／跌）": f"{r['月數']}（{r['上漲月']}／{r['下跌月']}）",
+            }
+            for r in capture["rows"]
+        ]
+    )
+
+
+def render_risk_performance_card(st, metrics: dict, nav_series: pd.Series | None = None, capture: dict | None = None) -> dict:
+    """一張卡：Beta／槓桿三列表＋現金、借款、最大回撤、回撤煞車燈＋上／下檔捕獲率。每個數字只出現一次。"""
+    from nav_snapshot import capture_status_text
     from beta_leverage_ui import render_beta_leverage_table
 
     s = risk_performance_summary(metrics, nav_series)
@@ -148,4 +170,12 @@ def render_risk_performance_card(st, metrics: dict, nav_series: pd.Series | None
             st.caption(f"淨值歷史自 {dd['start']} 起，共 {dd['points']} 點；今天的點用即時淨值。")
         else:
             st.caption(HISTORY_UNAVAILABLE)
+
+        table = capture_table(capture)
+        if table is None:
+            st.caption(f"📐 {capture_status_text(capture)}")
+        else:
+            st.markdown("**📐 上／下檔捕獲率**")
+            st.dataframe(table, hide_index=True, width="stretch")
+            st.caption(capture_status_text(capture) + " 上檔 >100%＝漲時比基準多；下檔 <100%＝跌時比基準少。")
     return s

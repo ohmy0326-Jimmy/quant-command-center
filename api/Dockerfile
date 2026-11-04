@@ -12,7 +12,7 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt
 # portfolio_risk 會在讀取部位時再匯入這些本地模組；漏複製會讓 /v1/portfolio 回 502。
 # 新增本地模組時要一併加進來（tests/test_api_dockerfile.py 會檢查）。
 COPY portfolio_risk.py sector_map.py ai_advice.py portfolio_briefing.py \
-     taifex_quotes.py beta_rules.py futures_ledger.py sheet_dates.py stock_futures.py stock_futures_margin.py ./
+     taifex_quotes.py beta_rules.py futures_ledger.py sheet_dates.py stock_futures.py stock_futures_margin.py nav_snapshot.py ./
 COPY api ./api
 
 EXPOSE 8080

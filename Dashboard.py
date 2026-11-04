@@ -34,6 +34,7 @@ from portfolio_risk import (
     value_positions_safely,
 )
 from sheet_dates import nav_growth_series
+from nav_snapshot import capture_summary, fetch_benchmark_closes
 import taifex_quotes
 import taiex_vix
 import us_hedge
@@ -200,6 +201,23 @@ def cached_history_map(pairs: tuple):
         for pair, frame in pool.map(fetch, pairs):
             found[pair] = frame
     return found
+
+
+# 捕獲率的基準收盤。抓不到會丟例外，st.cache_data 不快取例外。
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_benchmark_closes(start_iso):
+    return fetch_benchmark_closes(start_iso)
+
+
+def page4_capture(nav_data):
+    """NAV_Snapshots → 上／下檔捕獲率。不到 60 個交易日不抓基準。"""
+    capture = capture_summary(nav_data)
+    if capture["days"] >= capture["need"] and capture.get("start"):
+        try:
+            capture = capture_summary(nav_data, cached_benchmark_closes(capture["start"]))
+        except Exception:
+            capture["error"] = "基準指數（^TWII／^GSPC）歷史暫時抓不到，稍後重整再試。"
+    return capture
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -753,8 +771,9 @@ elif page == "第四頁：部位監控與量化風控":
                 st.warning(f"⚠️ {row_warning}")
             total_net_liq = metrics["nav"]
 
-            # 淨值歷史：Daily_NAV 分頁可能已移除（nav_data 為空），此時只有今天一點，卡片會標示「淨值歷史無法取得」。
+            # 淨值歷史：讀 NAV_Snapshots（API 每日寫入），沒有才退回舊的 Daily_NAV；都沒有時只有今天一點。
             nav_series = nav_growth_series(nav_data, total_net_liq)
+            capture = page4_capture(nav_data)
 
             if not df.empty:
                 alarms = df[(df['最大虧損比例'] > -100) & (df['報酬率 (%)'] <= df['最大虧損比例'])]
@@ -769,7 +788,7 @@ elif page == "第四頁：部位監控與量化風控":
                     st.markdown("---")
 
             # 風險與績效：Beta／槓桿三列表、現金、借款、最大回撤、回撤煞車燈合併成一張卡
-            render_risk_performance_card(st, metrics, nav_series)
+            render_risk_performance_card(st, metrics, nav_series, capture)
             if not df.empty:
                 total_exposure_sum = df['實質曝險(台幣)'].sum()
                 if metrics.get("expired_removed"):
