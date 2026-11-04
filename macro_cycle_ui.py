@@ -302,6 +302,7 @@ def _render_quadrant(industries: list[dict], book: dict | None = None):
     for x, y, label in ((-1.2, 2.2, "復甦"), (1.2, 2.2, "成長"), (1.2, -2.2, "趨緩"), (-1.2, -2.2, "衰退")):
         fig.add_annotation(x=x, y=y, text=label, showarrow=False, font=dict(size=18, color="#111111"), bgcolor="rgba(255,255,255,0.85)", borderpad=3)
 
+    label_pos = label_positions(points)
     colors = {"加碼": "#66BB6A", "中性": "#FFD54F", "減碼": "#EF5350"}
     for stance in ("加碼", "中性", "減碼"):
         subset = [point for point in points if point["stance"] == stance]
@@ -314,7 +315,7 @@ def _render_quadrant(industries: list[dict], book: dict | None = None):
                 y=[point["y"] for point in subset],
                 mode="markers+text",
                 text=[point["name"] for point in subset],
-                textposition="top center",
+                textposition=[label_pos[point["name"]] for point in subset],
                 textfont=dict(size=13, color="#111111"),
                 name=stance,
                 marker=dict(
@@ -358,6 +359,36 @@ def _render_risk_table(current: str):
     else:
         styler = styler.applymap(paint, subset=["狀態"])
     st.dataframe(styler, width="stretch", hide_index=True)
+
+
+def label_positions(points: list[dict], char_w: float = 0.075, text_h: float = 0.14, gap: float = 0.1) -> dict[str, str]:
+    """依序放字，先試上方，撞到已放好的字或點就改下方、右邊、左邊。座標單位是圖上的資料座標。"""
+    placed: list[tuple[float, float, float, float]] = []
+    dots = [(p["x"] - 0.04, p["y"] - 0.04, p["x"] + 0.04, p["y"] + 0.04) for p in points]
+
+    def box(point, where):
+        width = len(str(point["name"])) * char_w
+        x, y = point["x"], point["y"]
+        if where == "top center":
+            return (x - width / 2, y + gap, x + width / 2, y + gap + text_h)
+        if where == "bottom center":
+            return (x - width / 2, y - gap - text_h, x + width / 2, y - gap)
+        if where == "middle right":
+            return (x + gap, y - text_h / 2, x + gap + width, y + text_h / 2)
+        return (x - gap - width, y - text_h / 2, x - gap, y + text_h / 2)
+
+    def hits(r, others):
+        return any(r[0] < o[2] and o[0] < r[2] and r[1] < o[3] and o[1] < r[3] for o in others)
+
+    out = {}
+    for point in sorted(points, key=lambda p: (-p["y"], p["x"])):
+        options = ("top center", "bottom center", "middle right", "middle left")
+        choice = next((w for w in options if not hits(box(point, w), placed + dots)), None)
+        if choice is None:
+            choice = next((w for w in options if not hits(box(point, w), placed)), "top center")
+        out[point["name"]] = choice
+        placed.append(box(point, choice))
+    return out
 
 
 def marker_size(mv: float, exposure: dict, smallest: float = 12.0, largest: float = 46.0) -> float:
