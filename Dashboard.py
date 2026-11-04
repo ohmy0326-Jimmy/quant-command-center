@@ -87,8 +87,9 @@ def send_to_telegram(title, text_content):
         chat_id = os.environ.get("TELEGRAM_CHAT_ID") or read_secret("", "telegram", "chat_id") or read_secret("", "TELEGRAM_CHAT_ID")
         
         if bot_token and chat_id:
-            tg_msg = f"🤖 **【{title}】**\n\n{text_content}"
-            res = requests.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", json={"chat_id": chat_id, "text": tg_msg}, timeout=5)
+            from telegram_html import send_message, titled_message
+
+            res = send_message(bot_token, chat_id, titled_message(title, text_content), post=requests.post, timeout=5)
             if res.status_code == 200:
                 st.success("✅ 成功推播至 Telegram！")
             else:

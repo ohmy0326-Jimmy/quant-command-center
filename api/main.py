@@ -1,4 +1,5 @@
-"""FastAPI。GET 全部唯讀；唯一的寫入是 POST /v1/nav-snapshot（另一把金鑰，只寫 NAV_Snapshots 分頁）。不推播。"""
+"""FastAPI。GET 全部唯讀；寫入只有 POST /v1/nav-snapshot（只寫 NAV_Snapshots）與
+POST /v1/alert-check（只寫 Alert_State 並推播 Telegram 即時警報），各用自己的金鑰。"""
 
 from __future__ import annotations
 
@@ -13,7 +14,7 @@ from fastapi.security import APIKeyHeader
 
 from ai_advice import RISK_MANAGER_MODEL, build_risk_manager_prompt, complete_risk_manager_prompt, page4_advice_figures
 from api.advice_cache import AdviceCache, AdviceTimeout, RateLimited, call_with_timeout
-from api.auth import api_key_matches, expected_api_key, expected_snapshot_key, install_redact_filter, redact_secrets
+from api.auth import api_key_matches, expected_api_key, expected_push_key, expected_snapshot_key, install_redact_filter, redact_secrets
 from api.schemas import AdviceResponse, ErrorResponse, HealthResponse, NavSnapshotResponse, PortfolioResponse
 from portfolio_briefing import SCHEMA_VERSION, format_as_of, load_live_book, taipei_now
 
@@ -28,6 +29,7 @@ if not any(getattr(handler, "quant_api", False) for handler in logger.handlers):
 
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 _snapshot_key_header = APIKeyHeader(name="X-Snapshot-Key", auto_error=False, scheme_name="SnapshotKey")
+_push_key_header = APIKeyHeader(name="X-Push-Key", auto_error=False, scheme_name="PushKey")
 _cache: AdviceCache | None = None
 
 
@@ -39,6 +41,12 @@ def get_snapshot_writer():
     from nav_snapshot import take_snapshot
 
     return take_snapshot
+
+
+def get_alert_runner():
+    from alert_inputs import run_alert_check
+
+    return run_alert_check
 
 
 def get_prompt_runner():
@@ -101,6 +109,15 @@ def require_snapshot_key(x_snapshot_key: str | None = Security(_snapshot_key_hea
     if not expected:
         raise HTTPException(status_code=503, detail="nav snapshot disabled")
     if not api_key_matches(x_snapshot_key, expected):
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+
+def require_push_key(x_push_key: str | None = Security(_push_key_header)) -> None:
+    """推播金鑰（QCC_PUSH_KEY）。沒設定 → 503；不對 → 401。其他金鑰都不能用。"""
+    expected = expected_push_key()
+    if not expected:
+        raise HTTPException(status_code=503, detail="alert check disabled")
+    if not api_key_matches(x_push_key, expected):
         raise HTTPException(status_code=401, detail="unauthorized")
 
 
@@ -229,3 +246,20 @@ def nav_snapshot(_: None = Depends(require_snapshot_key), writer=Depends(get_sna
     payload = dict(result)
     payload.update(schema_version=SCHEMA_VERSION, as_of=format_as_of(taipei_now()), status="written")
     return _no_store(NavSnapshotResponse, payload)
+
+
+@app.post("/v1/alert-check")
+def alert_check(_: None = Depends(require_push_key), runner=Depends(get_alert_runner)):
+    """Cloud Scheduler 每 15 分鐘呼叫：只在狀態改變時推播 Telegram，狀態存 Alert_State。"""
+    from alert_inputs import TelegramNotConfigured
+
+    try:
+        summary = runner()
+    except TelegramNotConfigured as exc:
+        raise HTTPException(status_code=503, detail="telegram not configured") from exc
+    except Exception as exc:
+        _log_load_failure("/v1/alert-check", exc)
+        raise HTTPException(status_code=502, detail="alert check failed") from exc
+    body = dict(summary)
+    body.update(schema_version=SCHEMA_VERSION, as_of=format_as_of(taipei_now()), status="checked")
+    return JSONResponse(status_code=200, content=body, headers={"Cache-Control": "no-store"})
