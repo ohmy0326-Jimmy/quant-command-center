@@ -844,9 +844,9 @@ def _sector_of(snapshot: Snapshot, ticker: str, hints: dict | None = None) -> st
         return hints[ticker]
     if ticker in extra:
         return extra[ticker]
-    from portfolio_risk import DETAILED_SECTOR_MAP
+    from sector_map import sector_for_ticker
 
-    return DETAILED_SECTOR_MAP.get(ticker, "其他")
+    return sector_for_ticker(ticker, "其他")
 
 
 def propose_rebalance(
