@@ -1698,6 +1698,11 @@ def render_order_assistant(send_to_telegram, load_sheets, beta_fn, load_market=N
         us_hedge_note = _render_us_hedge(snapshot, rules, beta_fn=beta_fn)
         if us_hedge_note:
             hedge_note = "\n".join(n for n in (hedge_note, us_hedge_note) if n)
+        st.divider()
+        st.subheader("避險預算與效果模擬（台指期／TXO，只避台股）")
+        from hedge_sim_ui import render_hedge_strategy_sim
+
+        render_hedge_strategy_sim(snapshot, view)
 
     with tab_stress:
         st.subheader("壓力測試")

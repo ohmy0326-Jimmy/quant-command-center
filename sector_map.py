@@ -24,6 +24,8 @@ STOCK_INDUSTRY_MAP: dict[str, str] = {
     "MSFT": "軟體雲端",
     "AAPL": "消費電子",
     "金居": "PCB/載板",
+    "2327": "被動元件",  # 國巨
+    "國巨": "被動元件",
 }
 
 # 不屬於二十個產業的部位：第四頁沿用原本標籤，第五頁不歸類。
@@ -54,6 +56,17 @@ def _key(ticker) -> str:
     for suffix in _SUFFIXES:
         if text.endswith(suffix):
             return text[: -len(suffix)]
+    if text in DETAILED_SECTOR_MAP:
+        return text
+    # 個股期（國巨期、小國巨期、2327F、S2327…）沿用標的現股的產業。
+    try:
+        from stock_futures import resolve_stock_future
+
+        sf = resolve_stock_future(ticker)
+    except Exception:
+        sf = None
+    if sf is not None:
+        return sf.code
     return text
 
 
