@@ -98,8 +98,8 @@ class LabelPositionTest(unittest.TestCase):
     def test_alternates_within_row(self):
         from macro_cycle_ui import label_positions
 
-        pts = [{"name": n, "x": x, "y": 1.0} for n, x in (("a", 0.1), ("b", 0.2), ("c", 0.3))] + [{"name": "d", "x": 0.3, "y": -1.0}]
-        out = label_positions(pts)
+        pts = [{"name": n * 5, "x": x, "y": 1.0} for n, x in (("a", 0.1), ("b", 0.2), ("c", 0.3))] + [{"name": "d" * 5, "x": 0.3, "y": -1.0}]
+        out = {k[0]: v for k, v in label_positions(pts).items()}
         self.assertEqual(out["a"], "top center")
         self.assertNotEqual(out["b"], "top center")
         self.assertEqual(out["d"], "top center")
