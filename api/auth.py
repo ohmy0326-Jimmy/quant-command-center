@@ -24,6 +24,14 @@ def expected_snapshot_key() -> str:
     return os.environ.get(SNAPSHOT_KEY_ENV, "").strip()
 
 
+PUSH_KEY_ENV = "QCC_PUSH_KEY"
+
+
+def expected_push_key() -> str:
+    """/v1/alert-check 用（Cloud Scheduler 帶 X-Push-Key）。沒設定時端點停用（503）。"""
+    return os.environ.get(PUSH_KEY_ENV, "").strip()
+
+
 def api_key_matches(provided: str | None, expected: str | None) -> bool:
     """以 SHA-256 摘要做常數時間比較。空的設定一律拒絕。"""
     provided_digest = hashlib.sha256((provided or "").strip().encode("utf-8")).digest()
