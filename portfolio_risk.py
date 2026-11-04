@@ -78,29 +78,7 @@ STOCK_TAX_RATE = 0.003
 
 TAIEX_FUTURES = ("TX", "MTX", "FMF", "TMF")
 
-DETAILED_SECTOR_MAP = {
-    "MUU": "記憶體",
-    "SNXX": "記憶體",
-    "AMUU": "AI晶片",
-    "KORU": "韓國指數",
-    "金居": "銅箔材料",
-    "2330": "晶圓代工",
-    "TSM": "晶圓代工",
-    "NVDA": "AI晶片",
-    "AMD": "AI晶片",
-    "AVGO": "網通與半導體",
-    "MSFT": "軟體與雲端",
-    "AAPL": "消費電子",
-    "GOOGL": "數位廣告與雲端",
-    "META": "社群與AI",
-    "SOXL": "半導體槓桿ETF",
-    "00631L": "台股槓桿ETF",
-    "LITX": "光通產業",
-    "TX": "臺指期貨",
-    "MTX": "小型臺指",
-    "FMF": "微型臺指期",
-    "TMF": "微型臺指期",
-}
+from sector_map import DETAILED_SECTOR_MAP, sector_for_ticker  # noqa: E402  第四、五頁共用
 
 
 def futures_multiplier(ticker: str) -> float:
@@ -208,8 +186,9 @@ def fetch_twii(default: float = 23000.0) -> float:
 def market_beta_info(ticker, is_tw: bool) -> tuple[float, str, bool]:
     """一年期回歸 Beta。共變異數與變異數的 ddof 與第四頁相同，不另做修正。"""
     t_upper = str(ticker).upper()
-    if t_upper in DETAILED_SECTOR_MAP:
-        refined_sector = DETAILED_SECTOR_MAP[t_upper]
+    mapped_sector = sector_for_ticker(ticker)
+    if mapped_sector is not None:
+        refined_sector = mapped_sector
     else:
         try:
             info = yf.Ticker(ticker).info
@@ -431,6 +410,7 @@ def _quote_one_ex(ticker: str, twii_price: float, beta_fn, kind: str = ""):
             else:
                 b_val, s_val = beta_fn(und, True)
                 ok = True
+            s_val = sector_for_ticker(sf.code, s_val)  # 個股期沿用標的現股產業
             px = _fetch_yahoo_price(und, True)
             extras["報價來源"] = f"現股 {sf.code} 對標" if pd.notna(px) else "無報價，暫用成本價"
             extras["合約乘數"] = sf.multiplier

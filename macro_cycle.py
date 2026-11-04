@@ -294,6 +294,66 @@ def quadrant_shift(item: dict) -> str:
     return f"{previous}→{current}"
 
 
+def quadrant_change_text(item: dict) -> str:
+    """「上期→本期」。沒有上期資料回傳「—」。"""
+    previous = str(item.get("prev_cycle") or "").strip()
+    current = str(item.get("cycle") or "").strip()
+    if not previous:
+        return "—"
+    return f"{previous}→{current}"
+
+
+# 手動指標的公布時程。只寫有固定規則的；沒有固定時程就是「未知」。
+MANUAL_RELEASE_SCHEDULE: dict[str, dict] = {
+    "pmi": {"rule": "first_business_day", "label": "ISM 製造業 PMI：每月第一個工作日"},
+    "tw_activity": {"rule": "day_of_month", "day": 27, "label": "國發會景氣對策信號：約每月 27 日"},
+}
+
+
+def next_release_date(indicator_id: str, today=None) -> str:
+    """依公布時程推下一次公布日（ISO）。沒有時程回傳「未知」。不考慮國定假日，所以是預估。"""
+    from datetime import date, timedelta
+
+    spec = MANUAL_RELEASE_SCHEDULE.get(str(indicator_id or ""))
+    if not spec:
+        return "未知"
+    today = today or date.today()
+
+    def candidate(year: int, month: int) -> date:
+        if spec["rule"] == "first_business_day":
+            day = date(year, month, 1)
+            while day.weekday() >= 5:
+                day += timedelta(days=1)
+            return day
+        return date(year, month, int(spec["day"]))
+
+    year, month = today.year, today.month
+    for _ in range(3):
+        day = candidate(year, month)
+        if day > today:
+            return day.isoformat()
+        month += 1
+        if month > 12:
+            year, month = year + 1, 1
+    return "未知"
+
+
+def manual_indicator_schedule(indicators: list[dict], today=None) -> list[dict]:
+    """手動指標的最近更新日與下次公布日。更新日讀不到就寫「未知」。"""
+    rows = []
+    for item in indicators:
+        if item.get("source") == "auto":
+            continue
+        rows.append(
+            {
+                "指標": item.get("name") or "",
+                "最近更新": str(item.get("updated_at") or "").strip() or "未知",
+                "下次公布（預估）": next_release_date(item.get("id"), today),
+            }
+        )
+    return rows
+
+
 def decorate_indicator(item: dict, updated_default: str, origin: str) -> dict:
     source = str(item.get("source") or "manual").strip().lower()
     if source not in {"auto", "manual"}:
