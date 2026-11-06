@@ -1,0 +1,215 @@
+{
+  "version": 1,
+  "updated": "2026-11-06",
+  "hard_rules": {
+    "max_leverage_bullish": 1.8,
+    "min_cash_pct": 12,
+    "drawdown_brakes": [
+      -8,
+      -12,
+      -16,
+      -20
+    ]
+  },
+  "ui": {
+    "panel_title": "策略卡／劇情雷達",
+    "compact_toggle": "只顯示燈號",
+    "s0_block": "先處理 {card_id}",
+    "hard_rule_banner": "硬規則（不可覆蓋）：偏多槓桿 ≤ {max_leverage_bullish}x、現金 ≥ {min_cash_pct}%、回撤煞車 {brakes}%。",
+    "brake_sep": "／",
+    "panic_urge_label": "盤中想慌著亂做",
+    "settlement_warmup_days": 7,
+    "light_marks": {
+      "red": "🔴",
+      "yellow": "🟡",
+      "green": "🟢",
+      "off": "⚪"
+    },
+    "light_choices": [
+      {
+        "id": "off",
+        "label": "未標記"
+      },
+      {
+        "id": "green",
+        "label": "綠"
+      },
+      {
+        "id": "yellow",
+        "label": "黃"
+      },
+      {
+        "id": "red",
+        "label": "紅"
+      }
+    ],
+    "fields": {
+      "trigger": "觸發",
+      "actions": "動作",
+      "max_loss_rule": "虧損上限",
+      "data_sources": "資料",
+      "notes": "備註",
+      "notes_url": "筆記",
+      "status": "狀態",
+      "category": "分類"
+    }
+  },
+  "cards": [
+    {
+      "card_id": "S0",
+      "title": "先活下來",
+      "category": "defense",
+      "priority": 1,
+      "status": "live",
+      "trigger_rules": "lev>regime_cap OR cash<12% OR panic_urge",
+      "trigger_zh": "槓桿超過偏多上限，或現金<12%，或盤中想慌著亂做",
+      "actions": "減高beta/3x；拉現金；今日不開冒險單",
+      "max_loss_rule": "先降到偏多上限內再談其他卡",
+      "data_sources": "portfolio API",
+      "notes": "硬前置，覆蓋其他卡"
+    },
+    {
+      "card_id": "S1",
+      "title": "結算地板Put價差",
+      "category": "settlement",
+      "priority": 3,
+      "status": "live",
+      "trigger_rules": "option_settlement_day AND near_limit_down AND bid_below_floor",
+      "trigger_zh": "當日週/月選結算＋接近全面跌停＋地板下put仍有買價；地板=昨收×0.902",
+      "actions": "賣地板下第一檔、買再低一檔；連續IOC；不裸賣",
+      "max_loss_rule": "口數=可接受最大虧損/(價差寬度點數×50−已收權利金)",
+      "data_sources": "昨收；選擇權報價",
+      "notes": "僅當日結算"
+    },
+    {
+      "card_id": "S2",
+      "title": "選擇權押反彈",
+      "category": "rebound",
+      "priority": 5,
+      "status": "draft",
+      "trigger_rules": "S4==open AND (settlement_day OR near_expiry_weekly)",
+      "trigger_zh": "S4判定會打開，且為結算日或快到期週選",
+      "actions": "賣價內put做價差，或小買價外call；進場前寫死出場",
+      "max_loss_rule": "價差最大損失，或買call則全數權利金",
+      "data_sources": "選擇權鏈",
+      "notes": "風險高於S1"
+    },
+    {
+      "card_id": "S3",
+      "title": "抄跌停指數型",
+      "category": "rebound",
+      "priority": 2,
+      "status": "live",
+      "trigger_rules": "TX/TSMC/0050_limit_down AND S4==open",
+      "trigger_zh": "台指/台積/0050試搓或開盤跌停，且S4=會打開",
+      "actions": "優先小型台積期/小型0050期→0050期或現股→權證；掛跌停附近分批；先定出場",
+      "max_loss_rule": "名目曝險計入總lev；單筆風險依帳戶1%規則",
+      "data_sources": "期貨/現貨報價",
+      "notes": "使用者主武器"
+    },
+    {
+      "card_id": "S4",
+      "title": "打開vs鎖死",
+      "category": "event",
+      "priority": 2,
+      "status": "live",
+      "trigger_rules": "premarket_overseas_vs_TW_auction",
+      "trigger_zh": "打開：SOXS/費半已回落、台跌深於韓、賣壓=追繳/贖回。鎖死：美期日韓續崩、政策擴大、權值+金融+中華電全鎖",
+      "actions": "只判決：打開→可開S2/S3；鎖死→僅S0",
+      "max_loss_rule": "不下單",
+      "data_sources": "SOXS/費半/美期/韓股/試搓",
+      "notes": "判決卡"
+    },
+    {
+      "card_id": "S5",
+      "title": "個股打開/期貨價差",
+      "category": "rebound",
+      "priority": 6,
+      "status": "draft",
+      "trigger_rules": "limit_down_queue_unlocking OR MTX_TX_time_gap",
+      "trigger_zh": "整排跌停開始打開，或大/小/微台鎖跌時間差",
+      "actions": "大公司/趨勢股分批；拉上就走；價差買已跌多賣未跌夠",
+      "max_loss_rule": "當沖，禁止變長抱",
+      "data_sources": "盤中",
+      "notes": ""
+    },
+    {
+      "card_id": "S6",
+      "title": "CB面額/低本益比",
+      "category": "swing",
+      "priority": 7,
+      "status": "draft",
+      "trigger_rules": "CB_near_par OR watchlist_gap_down",
+      "trigger_zh": "信用好CB跌到約100以下，或清單內穩定股開低",
+      "actions": "小倉接；接受流動性差、時間換空間",
+      "max_loss_rule": "單一CB部位上限自定",
+      "data_sources": "CB報價；觀察清單",
+      "notes": ""
+    },
+    {
+      "card_id": "S7",
+      "title": "VIX高檔回落抄底",
+      "category": "rebound",
+      "priority": 4,
+      "status": "live",
+      "trigger_rules": "VIX_peak>35 AND drawdown_from_peak>=15%",
+      "trigger_zh": "近10日VIX收盤最高>35，且今日從該高點回落≥15%（美或台）",
+      "actions": "收盤確認後小倉指數beta；約持有10個交易日再檢視",
+      "max_loss_rule": "歷史持有期MDD可到雙位數；必須小倉",
+      "data_sources": "VIX序列",
+      "notes": "短反彈非大底"
+    },
+    {
+      "card_id": "S8",
+      "title": "斷頭第一天試單",
+      "category": "event",
+      "priority": 4,
+      "status": "live",
+      "trigger_rules": "VIX_high AND first_liquidation_day",
+      "trigger_zh": "恐慌指數偏高＋斷頭潮第一天（規則強制認輸）",
+      "actions": "小週期收腳/連紅或不破低→試單；突破或拉回止跌再加；預寫停損",
+      "max_loss_rule": "試單≤總權益1–2%",
+      "data_sources": "融資維持率；新聞",
+      "notes": "勿假設一定沒第二隻腳"
+    },
+    {
+      "card_id": "S9",
+      "title": "國安基金進場",
+      "category": "event",
+      "priority": 3,
+      "status": "live",
+      "trigger_rules": "national_security_fund_announced",
+      "trigger_zh": "國安基金正式宣布護盤/進場（手動標記）",
+      "actions": "先跑S4；海外止穩才小開S3；等S7再加；反彈後降3x/期貨換現股",
+      "max_loss_rule": "宣布當日禁止全倉",
+      "data_sources": "新聞手動標記",
+      "notes": ""
+    },
+    {
+      "card_id": "S10",
+      "title": "死亡螺旋/現金趴著",
+      "category": "event",
+      "priority": 2,
+      "status": "live",
+      "trigger_rules": "hedges_not_rising AND redemption_cascade AND slow_margin_wipe",
+      "trigger_zh": "權值極端跌＋傳統避險沒漲＋機構/主動ETF贖回連鎖＋融資殺很慢",
+      "actions": "執行S0；清盤完成前不加碼；清完再接S7/S8",
+      "max_loss_rule": "同S0",
+      "data_sources": "盤感+融資+避險價格",
+      "notes": "語音劇情卡"
+    },
+    {
+      "card_id": "S11",
+      "title": "波段配置",
+      "category": "swing",
+      "priority": 8,
+      "status": "live",
+      "trigger_rules": "non_extreme_rebalance",
+      "trigger_zh": "非極端日的波段調倉",
+      "actions": "AI硬體波段陸續減→醫療/環保；選股看現金流成長",
+      "max_loss_rule": "依波段部位規則",
+      "data_sources": "持倉產業",
+      "notes": "盯2027Q2信用利差/Capex"
+    }
+  ]
+}
