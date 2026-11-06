@@ -3,6 +3,7 @@
 import io
 import logging
 import os
+import tempfile
 import unittest
 
 from fastapi.testclient import TestClient
@@ -42,6 +43,30 @@ class RedactSecretsTests(unittest.TestCase):
         os.environ["PWD"] = "/workspace/qcc"
         text = redact_secrets("open Quant_Database in /workspace/qcc")
         self.assertEqual(text, "open Quant_Database in /workspace/qcc")
+
+    def test_telegram_config_fields_are_redacted(self):
+        token = "123456:ABCdefTOKEN"
+        chat = "-1001234567890"
+        blob = f'bot_token = "{token}"\nchat_id = "{chat}"\n'
+        os.environ["TELEGRAM_CONFIG"] = blob
+        text = redact_secrets(f"https://api.telegram.org/bot{token}/sendMessage {chat}\n{blob}")
+        self.assertNotIn(token, text)
+        self.assertNotIn(chat, text)
+        self.assertIn(REDACTED, text)
+
+        file_token = "999000:ZYXwvutsrq"
+        file_chat = "-1009876543210"
+        handle = tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False)
+        handle.write(f"bot_token = {file_token}\nchat_id = {file_chat}\n")
+        handle.close()
+        os.environ.pop("TELEGRAM_CONFIG", None)
+        os.environ["TELEGRAM_CONFIG_FILE"] = handle.name
+        try:
+            filed = redact_secrets(f"bot {file_token} chat {file_chat}")
+        finally:
+            os.remove(handle.name)
+        self.assertNotIn(file_token, filed)
+        self.assertNotIn(file_chat, filed)
 
     def test_short_env_values_are_ignored(self):
         os.environ["TINY_TOKEN"] = "abc"

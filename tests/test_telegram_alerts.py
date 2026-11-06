@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import unittest
 from datetime import datetime, timedelta
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 
 import alert_engine as ae
 from alert_engine import CRITICAL, DAILY_KEY, MemoryAlertStore, Record, run_check
+from alert_inputs import TelegramNotConfigured, parse_telegram_config, run_alert_check, telegram_config
 from api.main import app, get_alert_runner
 from telegram_html import markdown_to_html, send_message, titled_message
 
@@ -208,6 +210,14 @@ class TelegramHtmlTests(unittest.TestCase):
         self.assertIn("<b>【AI &lt;晨報&gt;】</b>", msg)
         self.assertNotIn("**", msg)
 
+    def test_dashboard_send_still_uses_html_helper(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "Dashboard.py"), encoding="utf-8") as handle:
+            dashboard = handle.read()
+        self.assertIn("def send_to_telegram(title, text_content):", dashboard)
+        self.assertIn("from telegram_html import send_message, titled_message", dashboard)
+        self.assertIn("send_message(bot_token, chat_id, titled_message(title, text_content)", dashboard)
+
     def test_send_uses_html_parse_mode(self):
         post = MagicMock()
         send_message("TOKEN", "1", "<b>x</b>", disable_notification=True, post=post)
@@ -219,6 +229,101 @@ class TelegramHtmlTests(unittest.TestCase):
         html = ae.Alert("x", ae.NORMAL, "a<b", "c&d").html(DAY)
         self.assertIn("a&lt;b", html)
         self.assertIn("c&amp;d", html)
+
+
+_TELEGRAM_ENV = ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "TELEGRAM_CONFIG", "TELEGRAM_CONFIG_FILE")
+
+
+class TelegramConfigTests(unittest.TestCase):
+    def setUp(self):
+        self._saved = {key: os.environ.get(key) for key in _TELEGRAM_ENV}
+        for key in _TELEGRAM_ENV:
+            os.environ.pop(key, None)
+        self._files = []
+
+    def tearDown(self):
+        for key, value in self._saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        for path in self._files:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+    def _write_config(self, text: str) -> str:
+        handle = tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False)
+        self._files.append(handle.name)
+        with handle:
+            handle.write(text)
+        return handle.name
+
+    def test_quoted_unquoted_and_whitespace(self):
+        quoted = '\n  bot_token   =   "123456:ABC-DEF"  \n\n\tchat_id\t=\t"-100987"\t\n'
+        self.assertEqual(parse_telegram_config(quoted), {"bot_token": "123456:ABC-DEF", "chat_id": "-100987"})
+        single = "bot_token = '123456:abc'\nchat_id='42'\n"
+        self.assertEqual(parse_telegram_config(single), {"bot_token": "123456:abc", "chat_id": "42"})
+        bare = "  bot_token=123456:ABC-DEF\r\nchat_id = -100987  \n"
+        self.assertEqual(parse_telegram_config(bare), {"bot_token": "123456:ABC-DEF", "chat_id": "-100987"})
+        padded = 'bot_token = "  123456:ABC  "\nchat_id = "  -100987  "\n'
+        self.assertEqual(parse_telegram_config(padded), {"bot_token": "123456:ABC", "chat_id": "-100987"})
+
+    def test_ignores_comments_blank_lines_and_unknown_keys(self):
+        text = "# header\n\nnote = hello\nbot_token = tok # inline\nchat_id = 99\nno equals\n"
+        self.assertEqual(parse_telegram_config(text), {"bot_token": "tok", "chat_id": "99"})
+        self.assertEqual(parse_telegram_config(""), {})
+        self.assertEqual(parse_telegram_config('bot_token = "abc" # trailing'), {"bot_token": "abc"})
+
+    def test_explicit_env_wins_over_config(self):
+        os.environ["TELEGRAM_BOT_TOKEN"] = " env-token "
+        os.environ["TELEGRAM_CHAT_ID"] = " env-chat "
+        os.environ["TELEGRAM_CONFIG"] = 'bot_token = "file-token"\nchat_id = "file-chat"\n'
+        self.assertEqual(telegram_config(), ("env-token", "env-chat"))
+
+    def test_partial_env_fills_the_other_field_from_config(self):
+        os.environ["TELEGRAM_BOT_TOKEN"] = "env-token"
+        os.environ["TELEGRAM_CONFIG"] = 'bot_token = "file-token"\nchat_id = "file-chat"\n'
+        self.assertEqual(telegram_config(), ("env-token", "file-chat"))
+
+    def test_config_file_used_when_env_text_empty(self):
+        path = self._write_config('bot_token = "from-file"\nchat_id = 77\n')
+        os.environ["TELEGRAM_CONFIG"] = "   \n"
+        os.environ["TELEGRAM_CONFIG_FILE"] = path
+        self.assertEqual(telegram_config(), ("from-file", "77"))
+
+    def test_config_text_beats_file(self):
+        path = self._write_config('bot_token = "from-file"\nchat_id = "77"\n')
+        os.environ["TELEGRAM_CONFIG_FILE"] = path
+        os.environ["TELEGRAM_CONFIG"] = 'bot_token = "from-env"\nchat_id = "1"\n'
+        self.assertEqual(telegram_config(), ("from-env", "1"))
+
+    def test_missing_file_is_unconfigured(self):
+        os.environ["TELEGRAM_CONFIG_FILE"] = "/no/such/telegram-config"
+        self.assertEqual(telegram_config(), ("", ""))
+        with self.assertRaises(TelegramNotConfigured):
+            run_alert_check()
+
+    def test_alert_check_sends_html_with_config_credentials(self):
+        os.environ["TELEGRAM_CONFIG"] = 'bot_token = "123456:ABC-DEF"\nchat_id = "-100123456"\n'
+        store = MagicMock()
+        store.load.return_value = {}
+        response = MagicMock(status_code=200)
+        with patch("portfolio_risk.load_service_account_info", return_value={}), patch(
+            "portfolio_risk.open_quant_spreadsheet", return_value=object()
+        ), patch("alert_engine.SheetAlertStore", return_value=store), patch(
+            "alert_inputs.gather_readings", return_value={"leverage": {"value": 2.0}}
+        ), patch("requests.post", return_value=response) as post:
+            summary = run_alert_check(DAY)
+        post.assert_called_once()
+        self.assertIn("/bot123456:ABC-DEF/sendMessage", post.call_args.args[0])
+        payload = post.call_args.kwargs["json"]
+        self.assertEqual(payload["chat_id"], "-100123456")
+        self.assertEqual(payload["parse_mode"], "HTML")
+        self.assertIn("<b>", payload["text"])
+        self.assertNotIn("**", payload["text"])
+        self.assertEqual(summary["sent"], ["leverage"])
 
 
 class AlertEndpointTests(unittest.TestCase):

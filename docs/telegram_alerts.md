@@ -41,7 +41,54 @@ printf '%s' "$QCC_PUSH_KEY" | gcloud secrets create qcc-push-key \
 unset QCC_PUSH_KEY
 ```
 
-### 2. Telegram Bot Token 與 Chat ID 也放進 Secret Manager（已有就跳過）
+### 2. Telegram 憑證
+
+`TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID` 有設的那個優先。缺的欄位改解析 `TELEGRAM_CONFIG` 的整段文字；
+這段是空的，再讀 `TELEGRAM_CONFIG_FILE` 指向的檔案。
+格式（引號可加可不加，等號兩邊空白沒有關係；`#` 開頭是註解）：
+
+```
+bot_token = "123456:ABC..."
+chat_id = "-1001234567890"
+```
+
+推播仍走 `send_message` 的 `parse_mode=HTML`。用 `--update-secrets` 掛 secret，不要用 `--set-secrets`（會拿掉既有金鑰）。
+
+#### 做法 B：一個 secret `telegram-config`（不必另建 `telegram-bot-token`、`telegram-chat-id`）
+
+```bash
+read -rs BOT    # Bot Token，貼上後按 Enter，不會顯示
+read -rs CHAT   # Chat ID
+printf 'bot_token = %s\nchat_id = %s\n' "$BOT" "$CHAT" | gcloud secrets create telegram-config \
+  --project "$PROJECT" --replication-policy automatic --data-file=-
+unset BOT CHAT
+
+for s in qcc-push-key telegram-config; do
+  gcloud secrets add-iam-policy-binding "$s" --project "$PROJECT" \
+    --member "serviceAccount:${SA}" --role roles/secretmanager.secretAccessor
+done
+
+gcloud run services update "$SERVICE" --project "$PROJECT" --region "$REGION" \
+  --update-secrets "QCC_PUSH_KEY=qcc-push-key:latest,TELEGRAM_CONFIG=telegram-config:latest"
+```
+
+做法 B 只多掛一個 Telegram secret：`TELEGRAM_CONFIG=telegram-config`，連同推播金鑰 `QCC_PUSH_KEY=qcc-push-key`。
+不要建立 `telegram-bot-token`、`telegram-chat-id`。
+`telegram-config` 已經存在時不要重跑 `secrets create`，改：
+
+```bash
+read -rs BOT
+read -rs CHAT
+printf 'bot_token = %s\nchat_id = %s\n' "$BOT" "$CHAT" | gcloud secrets versions add telegram-config \
+  --project "$PROJECT" --data-file=-
+unset BOT CHAT
+```
+
+服務上若還留著 `TELEGRAM_BOT_TOKEN` 或 `TELEGRAM_CHAT_ID`，有值的那個會蓋過設定檔。
+要完全改走這個 secret，先拿掉這兩個：`--remove-secrets=TELEGRAM_BOT_TOKEN,TELEGRAM_CHAT_ID`。
+若 secret 是掛成檔案而不是環境變數，把路徑放在 `TELEGRAM_CONFIG_FILE`；`TELEGRAM_CONFIG` 有內容時不會再讀檔。
+
+#### 做法 A：分開的 `TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID`
 
 ```bash
 read -rs TELEGRAM_BOT_TOKEN   # 貼上後按 Enter，不會顯示
@@ -52,27 +99,19 @@ read -rs TELEGRAM_CHAT_ID
 printf '%s' "$TELEGRAM_CHAT_ID" | gcloud secrets create telegram-chat-id \
   --project "$PROJECT" --replication-policy automatic --data-file=-
 unset TELEGRAM_CHAT_ID
-```
 
-### 3. 讓 API 服務帳戶可以讀這三個 secret
-
-```bash
 for s in qcc-push-key telegram-bot-token telegram-chat-id; do
   gcloud secrets add-iam-policy-binding "$s" --project "$PROJECT" \
     --member "serviceAccount:${SA}" --role roles/secretmanager.secretAccessor
 done
-```
 
-### 4. 掛到 Cloud Run（用 `--update-secrets`，不要用 `--set-secrets`，否則會拿掉既有的金鑰）
-
-```bash
 gcloud run services update "$SERVICE" --project "$PROJECT" --region "$REGION" \
   --update-secrets "QCC_PUSH_KEY=qcc-push-key:latest,TELEGRAM_BOT_TOKEN=telegram-bot-token:latest,TELEGRAM_CHAT_ID=telegram-chat-id:latest"
 ```
 
 沒掛 `QCC_PUSH_KEY` 時端點回 503；金鑰不對回 401；Telegram 沒設定回 503。
 
-### 5. Cloud Scheduler：每 15 分鐘（Asia/Taipei）
+### 3. Cloud Scheduler：每 15 分鐘（Asia/Taipei）
 
 ```bash
 gcloud services enable cloudscheduler.googleapis.com --project "$PROJECT"
@@ -88,7 +127,7 @@ gcloud scheduler jobs create http qcc-alert-check \
 換金鑰後要用 `gcloud scheduler jobs update http qcc-alert-check ... --update-headers "X-Push-Key=..."` 同步更新。
 手動測一次：`gcloud scheduler jobs run qcc-alert-check --project "$PROJECT" --location "$REGION"`。
 
-### 6. 試算表權限（Alert_State 需要寫入）
+### 4. 試算表權限（Alert_State 需要寫入）
 
 `Alert_State` 由 `google-service-key` 那把服務帳戶金鑰（JSON 的 `client_email`）寫入。
 請把 `Quant_Database` 共用給這個 `client_email`，權限設 **編輯者**；只有檢視者時端點回 502。
