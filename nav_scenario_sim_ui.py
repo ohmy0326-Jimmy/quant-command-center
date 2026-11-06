@@ -216,9 +216,30 @@ def _one_strategy(idx: int, target0: float) -> Strategy | None:
         short_k = h2.number_input("賣出更低履約", min_value=0.3, max_value=1.1, value=0.85, step=0.01, key=f"nss_s{idx}_k2", disabled=hold or not hedge)
         brake = st.checkbox("回撤煞車", value=True, key=f"nss_s{idx}_brake", disabled=hold)
         b1, b2 = st.columns(2)
-        pause = b1.number_input("停新倉回撤 %", min_value=1.0, max_value=40.0, value=12.0, step=1.0, key=f"nss_s{idx}_pause", disabled=hold or not brake)
-        cut = b2.number_input("降到 1x 的回撤 %", min_value=2.0, max_value=50.0, value=16.0, step=1.0, key=f"nss_s{idx}_cut", disabled=hold or not brake)
-        st.caption("硬煞車預設在回撤回到 -8% 以內後解除（與原型相同）。若「降到 1x」設得比 8% 淺，解除線會改放在該門檻的一半。每批停損用的是該批自己的損益。")
+        pause = b1.number_input(
+            "停新倉回撤 %",
+            min_value=1.0,
+            max_value=40.0,
+            value=-float(Strategy.brake_pause) * 100.0,
+            step=1.0,
+            key=f"nss_s{idx}_pause",
+            disabled=hold or not brake,
+        )
+        cut = b2.number_input(
+            "降到 1x 的回撤 %",
+            min_value=2.0,
+            max_value=50.0,
+            value=-float(Strategy.brake_cut) * 100.0,
+            step=1.0,
+            key=f"nss_s{idx}_cut",
+            disabled=hold or not brake,
+        )
+        st.caption(
+            f"停新倉預設 {Strategy.brake_pause:.0%}（黃燈）、降到 1x 預設 {Strategy.brake_cut:.0%}（紅燈），與第四頁回撤煞車燈相同。"
+            f"硬煞車在回撤回到 {Strategy.brake_release:.0%} 以內後解除。"
+            f"若「降到 1x」設得比 {-Strategy.brake_release:.0%} 淺，解除線會改放在該門檻的一半。"
+            "每批停損用的是該批自己的損益。"
+        )
 
     if hold:
         try:

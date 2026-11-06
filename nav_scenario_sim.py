@@ -161,8 +161,8 @@ class Strategy:
     hedge_long_strike: float = 0.95
     hedge_short_strike: float = 0.85
     brake_enabled: bool = True
-    brake_pause: float = -0.12
-    brake_cut: float = -0.16
+    brake_pause: float = -0.08
+    brake_cut: float = -0.12
     brake_release: float = -0.08
 
     def __post_init__(self):

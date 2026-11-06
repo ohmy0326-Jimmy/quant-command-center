@@ -39,13 +39,17 @@ class DrawdownTests(unittest.TestCase):
         self.assertEqual(stats["start"], "2026-10-01")
 
     def test_brake_thresholds_follow_nav_scenario_defaults(self):
+        self.assertAlmostEqual(rp.BRAKE_PAUSE_PCT, -8.0)
+        self.assertAlmostEqual(rp.BRAKE_CUT_PCT, -12.0)
         self.assertAlmostEqual(rp.BRAKE_PAUSE_PCT, Strategy.brake_pause * 100)
         self.assertAlmostEqual(rp.BRAKE_CUT_PCT, Strategy.brake_cut * 100)
-        self.assertEqual(rp.brake_light(-5.0)[0], "🟢")
-        self.assertEqual(rp.brake_light(-12.0)[0], "🟡")
-        self.assertEqual(rp.brake_light(-14.0)[0], "🟡")
-        self.assertEqual(rp.brake_light(-16.0)[0], "🔴")
-        self.assertEqual(rp.brake_light(-30.0)[0], "🔴")
+        self.assertEqual(rp.brake_light(None), ("⚪", "無淨值歷史"))
+        self.assertEqual(rp.brake_light(-5.0), ("🟢", "正常（停新倉線 -8%）"))
+        self.assertEqual(rp.brake_light(-7.9), ("🟢", "正常（停新倉線 -8%）"))
+        self.assertEqual(rp.brake_light(-8.0), ("🟡", "停新倉（回撤 ≤ -8%）"))
+        self.assertEqual(rp.brake_light(-11.9), ("🟡", "停新倉（回撤 ≤ -8%）"))
+        self.assertEqual(rp.brake_light(-12.0), ("🔴", "降到 1x（回撤 ≤ -12%）"))
+        self.assertEqual(rp.brake_light(-30.0), ("🔴", "降到 1x（回撤 ≤ -12%）"))
 
     def test_nav_growth_without_daily_nav_sheet_has_only_today(self):
         empty = pd.DataFrame(columns=["日期", "總淨值"])
@@ -122,6 +126,8 @@ def test_card_renders_with_history():
     values = {m.label: m.value for m in at.metric}
     assert values["最大回撤"] == "-20.00%"
     assert values["回撤煞車"] == "🔴"
+    brake = next(m for m in at.metric if m.label == "回撤煞車")
+    assert "回撤 ≤ -12%" in str(brake.delta)
 
 
 def test_page6_health_and_ai_stress_tab():

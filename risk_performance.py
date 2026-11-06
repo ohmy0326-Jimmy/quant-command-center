@@ -30,7 +30,7 @@ def _strategy_default(name: str) -> float:
     raise KeyError(name)
 
 
-# 與第六頁 NAV 情境模擬的煞車預設相同（停新倉 -12%、降到 1x -16%）。
+# 與第六頁 NAV 情境模擬的煞車預設相同（停新倉 -8%、降到 1x -12%）。
 BRAKE_PAUSE_PCT = _strategy_default("brake_pause") * 100.0
 BRAKE_CUT_PCT = _strategy_default("brake_cut") * 100.0
 
