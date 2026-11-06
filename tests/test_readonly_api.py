@@ -342,6 +342,7 @@ class ApiHttpTests(unittest.TestCase):
                 "symbol", "name", "qty", "price", "market_value", "pnl",
                 "equity_value", "leverage", "notional_exposure", "underlying", "underlying_beta",
                 "beta", "effective_beta", "beta_exposure", "beta_source",
+                "product", "delta", "delta_source", "conversion_value", "conversion_value_points", "parity_premium_pct",
             },
         )
         self.assertEqual(set(body["beta_leverage"]), {"tw", "us", "total"})
