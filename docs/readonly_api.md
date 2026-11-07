@@ -40,7 +40,7 @@ X-API-Key: <READONLY_API_KEY>
 
 每個 JSON 都有：
 
-- `schema_version`：目前 `1.5.0`（1.5.0 在部位新增可轉債／CBAS 的 `product`、`delta`、`conversion_value`；1.4.0 新增 `usdtwd_source` 與 `warnings`；1.3.0 新增 `beta_leverage` 與部位層的 Beta／名目欄位；舊欄位全部保留）
+- `schema_version`：目前 `1.6.0`（1.6.0 新增 `exposure_complete`、`exposure_scope`、`unknown_delta_symbols`，部位新增 `exposure_known`、`delta_status`。缺 Delta 時該筆 `notional_exposure` 是 null，合計數字只含已知部位。1.5.0 的可轉債欄位與更早的欄位都保留）
 - `as_of`：`Asia/Taipei` 的 ISO 8601，例如 `2026-10-29T22:00:00+08:00`
 
 機器可讀的 JSON Schema 在 [`readonly_api.schema.json`](readonly_api.schema.json)，由 `api/schemas.py` 的 Pydantic 模型產生。
@@ -51,7 +51,7 @@ X-API-Key: <READONLY_API_KEY>
 
 ```json
 {
-  "schema_version": "1.5.0",
+  "schema_version": "1.6.0",
   "as_of": "2026-10-29T22:00:00+08:00",
   "status": "ok"
 }
@@ -91,7 +91,9 @@ X-API-Key: <READONLY_API_KEY>
 
 部位層新增：`equity_value`（計入淨值的價值；期貨＝保證金＋未實現損益）、`leverage`、`notional_exposure`、`underlying`、`underlying_beta`、`beta`（套在名目上）、`effective_beta`（套在市值上＝槓桿 × 標的 Beta）、`beta_exposure`、`beta_source`。
 
-1.5.0 再加可轉債／CBAS（`product` 為 `cb` 或 `cbas`，其他部位是空字串）：`delta`、`delta_source`、`conversion_value`（整筆轉換價值，台幣）、`conversion_value_points`（百元報價，不乘張數）、`parity_premium_pct`（只有可轉債；CBAS 為 null）。市值進淨值，名目曝險是 Delta × 轉換價值，不加標的槓桿，也不把 CB 與 CBAS 互抵。欄位怎麼填見 [cb_holdings.md](cb_holdings.md)。沒有轉換價格或標的股價時，轉換價值與 Delta 相關欄位是 null，這筆名目曝險是 0，市值仍在淨值裡。
+1.5.0 再加可轉債／CBAS（`product` 為 `cb` 或 `cbas`，其他部位是空字串）：`delta`、`delta_source`、`conversion_value`（整筆轉換價值，台幣）、`conversion_value_points`（百元報價，不乘張數）、`parity_premium_pct`（只有可轉債；CBAS 為 null）。市值進淨值，名目曝險是 Delta × 轉換價值，不加標的槓桿，也不把 CB 與 CBAS 互抵。欄位怎麼填見 [cb_holdings.md](cb_holdings.md)。
+
+1.6.0：選擇權、可轉債、CBAS 沒有 Delta 時，`delta_status` 是 `missing`，`exposure_known` 是 false，`notional_exposure` 與 `beta_exposure` 是 null。Delta 剛好是 0 時 `delta_status` 是 `known`，名目曝險是 0。現股、ETF、期貨的 `delta_status` 是 `not_applicable`。`exposure`、`leverage`、`beta`、`beta_leverage` 只加總已知部位。`exposure_complete` 為 false、`exposure_scope` 為 `partial` 時，這些合計不完整，`warnings` 會寫明，不能把缺的部位當成沒有曝險。舊客戶仍讀得到同一個數字欄位。
 
 `price` 是原幣報價（臺指期是指數點，美股是美元）。`market_value` 與 `pnl` 是台幣：分別對應第四頁的「即時市值(台幣)」與「淨未實現損益(原幣) × 換算匯率」。股票損益已含 0.3% 證交稅估算，不會再從淨值扣一次。1.3.0 起期貨 `market_value` 是名目市值（報價 × 乘數 × 口數），舊的「保證金加未實現損益」改放 `equity_value`。
 
@@ -101,7 +103,7 @@ X-API-Key: <READONLY_API_KEY>
 
 ```json
 {
-  "schema_version": "1.5.0",
+  "schema_version": "1.6.0",
   "as_of": "2026-10-29T22:00:00+08:00",
   "currency": "TWD",
   "usdtwd": 30.0,

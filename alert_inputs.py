@@ -118,7 +118,11 @@ def gather_readings(spreadsheet, now: datetime) -> dict:
         readings["stop_loss"] = _safe("stop_loss", lambda: stop_loss_reading(snapshot))
         readings["drawdown"] = _safe("drawdown", lambda: drawdown_reading(metrics, nav_data))
         if float(metrics.get("nav", 0.0) or 0.0) > 0:
-            readings["leverage"] = {"value": float(metrics.get("total_leverage", metrics.get("leverage", 0.0)) or 0.0)}
+            readings["leverage"] = {
+                "value": float(metrics.get("total_leverage", metrics.get("leverage", 0.0)) or 0.0),
+                "exposure_complete": bool(metrics.get("exposure_complete", True)),
+                "unknown_delta_symbols": list(metrics.get("unknown_delta_symbols") or []),
+            }
             readings["cash"] = {"value": float(metrics.get("cash_pct", 0.0) or 0.0)}
     readings["macro"] = _safe("macro", lambda: macro_reading(now))
     view = _safe("macro_cycle", lambda: macro_cycle_view(spreadsheet))

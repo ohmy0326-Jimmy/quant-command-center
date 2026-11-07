@@ -728,7 +728,7 @@ def triggered_stop_losses(snapshot: Snapshot) -> list[dict]:
     positions = positions_as_dicts(getattr(snapshot, "valued", None))
     for pos in positions:
         m_loss = pos["max_loss_pct"]
-        if -100.0 < m_loss < 0.0 and pos["roi"] <= m_loss:
+        if -100.0 < m_loss <= 0.0 and pos["roi"] <= m_loss:
             triggered.append(
                 {
                     "ticker": pos["ticker"],
@@ -738,13 +738,14 @@ def triggered_stop_losses(snapshot: Snapshot) -> list[dict]:
                     "max_loss_pct": m_loss,
                     "mv_twd": pos["mv_twd"],
                     "pnl_twd": pos["pnl_twd"],
+                    "stop_source": pos.get("stop_source") or "",
                 }
             )
     return triggered
 
 
 def priority_list(
-    snapshot: Snapshot, rules: Rules, after: Snapshot | None = None
+    snapshot: Snapshot, rules: Rules, after: Snapshot | None = None, stop_dates: dict | None = None, today=None
 ) -> list[dict]:
     """生成投組風控處置的優先順序清單 (0: 追繳風險, 1: 觸發停損, 2: 超過虧損上限)。"""
     items: list[dict] = []
@@ -807,8 +808,20 @@ def priority_list(
     # 優先級 1: 觸發停損
     stop_rows = triggered_stop_losses(snapshot)
     cat1_tickers = {r["ticker"] for r in stop_rows}
+    from datetime import date as _date
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from stop_rules import breach_age_label
+
+    observed_on = today or datetime.now(ZoneInfo("Asia/Taipei")).date()
+    if not isinstance(observed_on, _date):
+        observed_on = datetime.now(ZoneInfo("Asia/Taipei")).date()
     for r in stop_rows:
-        det = f"報酬率 {r['roi']:.1f}% 已低於停損門檻 {r['max_loss_pct']:.1f}%"
+        source = r.get("stop_source") or ""
+        src = f"（{source}）" if source else ""
+        age = breach_age_label((stop_dates or {}).get(f"{r['account']}|{r['ticker']}"), observed_on)
+        det = f"報酬率 {r['roi']:.1f}% 已低於停損門檻 {r['max_loss_pct']:.1f}%{src}。{age}"
         items.append(
             {
                 "priority": 1,

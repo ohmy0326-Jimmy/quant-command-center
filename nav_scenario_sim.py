@@ -540,6 +540,24 @@ def cash_basis_text(book: Book) -> str:
     return "\n\n".join(lines)
 
 
+def _exposure_known(row) -> bool:
+    """沒有這個欄位的舊表視為已知，避免把一般現股當成缺 Delta。"""
+    try:
+        if "曝險已知" not in row.index:
+            return True
+    except Exception:
+        return True
+    flag = row.get("曝險已知")
+    try:
+        if pd.isna(flag):
+            return True
+    except TypeError:
+        pass
+    if isinstance(flag, str):
+        return flag.strip().lower() not in {"false", "0", "no"}
+    return bool(flag)
+
+
 def _row_float(row, col: str, default: float = 0.0) -> float:
     if col not in row or pd.isna(row[col]):
         return default
@@ -622,6 +640,11 @@ def build_book(valued: pd.DataFrame, metrics: dict) -> Book:
                 us = "美" in kind
                 mv = abs(display_mv)
                 asset_mv += mv
+                if not _exposure_known(row):
+                    notes.append(f"{ticker} 缺少 Delta，可轉債／CBAS 名目曝險未計入（不是 0）。")
+                    if yuanta:
+                        yuanta_cb_mv += mv
+                    continue
                 gross_exp = abs(_row_float(row, "實質曝險(台幣)"))
                 if beta_exp < 0 or (beta_exp == 0 and qty < 0):
                     equity_signed = -gross_exp
@@ -647,14 +670,15 @@ def build_book(valued: pd.DataFrame, metrics: dict) -> Book:
                 else:
                     contrib = display_mv
                 asset_mv += contrib
+                if not _exposure_known(row):
+                    notes.append(f"{ticker} 缺少 Delta，選擇權名目曝險未計入（不是 0）。")
+                    continue
                 if "美" in kind:
                     opt_us_mv += contrib
                     opt_us_delta += beta_exp
                 else:
                     opt_tw_mv += contrib
                     opt_tw_delta += beta_exp
-                if abs(beta_exp) < 1 and abs(qty) > 0:
-                    notes.append(f"{ticker} 沒有可用的 Delta，這筆選擇權曝險以 0 計。")
                 continue
 
             if fut:

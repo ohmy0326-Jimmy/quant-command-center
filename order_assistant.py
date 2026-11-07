@@ -347,6 +347,28 @@ def holding_display_values(pos: dict) -> dict:
     return {"amount": float(pos.get("mv_twd") or 0.0), "basis": "市值", "pnl": pnl}
 
 
+def _optional_exposure(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    return number
+
+
+def _position_exposure_known(row) -> bool:
+    if "曝險已知" not in row.index:
+        return True
+    flag = row.get("曝險已知")
+    try:
+        if pd.isna(flag):
+            return True
+    except TypeError:
+        pass
+    return bool(flag)
+
+
 def positions_as_dicts(valued: pd.DataFrame) -> list[dict]:
     if valued is None or valued.empty:
         return []
@@ -367,12 +389,14 @@ def positions_as_dicts(valued: pd.DataFrame) -> list[dict]:
                 "beta": float(row["Beta值"]),
                 "sector": str(row.get("產業別", "其他")),
                 "mv_twd": float(row["即時市值(台幣)"]),
-                "exposure": float(row["實質曝險(台幣)"]),
+                "exposure": _optional_exposure(row.get("實質曝險(台幣)")),
                 "pnl_native": float(row["淨未實現損益(原幣)"]),
                 "pnl_twd": float(row["淨未實現損益(原幣)"]) * fx,
                 "fx": fx,
                 "roi": float(row["報酬率 (%)"]),
                 "max_loss_pct": float(row["最大虧損比例"]),
+                "stop_source": str(row.get("停損來源") or ""),
+                "exposure_known": _position_exposure_known(row),
                 "occupied_native": float(row["實質佔用本金(原幣)"]),
                 "notional_native": float(row["名目合約總值(原幣)"]),
                 "eff_beta": eff_beta,
@@ -540,22 +564,30 @@ def health_flags(snapshot: Snapshot, rules: Rules, stress_rows: list[dict] | Non
     def add(name: str, ok: bool, detail: str):
         flags.append({"name": name, "ok": bool(ok), "status": "符合" if ok else "超出", "detail": detail})
 
-    add(
-        "合併槓桿",
-        metrics["leverage"] <= rules.target_leverage + 1e-9,
-        f"{metrics['leverage']:.2f}x，上限 {rules.target_leverage:.2f}x（第二階段 {rules.stage2_leverage:.2f}x）",
-    )
+    incomplete = metrics.get("exposure_complete") is False
+    if incomplete:
+        add(
+            "合併槓桿",
+            False,
+            f"已知 {metrics['leverage']:.2f}x，上限 {rules.target_leverage:.2f}x。缺 Delta，合計不完整，不能當成未超標。",
+        )
+    else:
+        add(
+            "合併槓桿",
+            metrics["leverage"] <= rules.target_leverage + 1e-9,
+            f"{metrics['leverage']:.2f}x，上限 {rules.target_leverage:.2f}x（第二階段 {rules.stage2_leverage:.2f}x）",
+        )
     add(
         "現金水位",
         metrics["cash_pct"] + 1e-9 >= rules.min_cash_pct,
         f"{metrics['cash_pct']:.1f}%，下限 {rules.min_cash_pct:.1f}%",
     )
     beta_ok = rules.beta_low - 1e-9 <= metrics["beta"] <= rules.beta_high + 1e-9
-    add(
-        "投組 Beta",
-        beta_ok,
-        f"總 Beta {metrics['total_beta']:.2f}（台股 {metrics['tw_beta']:.2f}／美股 {metrics['us_beta']:.2f}），目標 {rules.beta_low:.2f}–{rules.beta_high:.2f}",
-    )
+    beta_detail = f"總 Beta {metrics['total_beta']:.2f}（台股 {metrics['tw_beta']:.2f}／美股 {metrics['us_beta']:.2f}），目標 {rules.beta_low:.2f}–{rules.beta_high:.2f}"
+    if incomplete:
+        beta_ok = False
+        beta_detail += "。缺 Delta，這個 Beta 不完整。"
+    add("投組 Beta", beta_ok, beta_detail)
     if metrics["margin_ratio"] is None:
         add("保證金比率", True, "目前沒有期貨維持保證金")
     else:
@@ -770,9 +802,9 @@ def _candidates(snapshot: Snapshot, phase: str, protected: set[str]) -> list[dic
     elif phase == "laggard":
         rows.sort(key=lambda pos: pos["roi"])
     elif phase == "futures":
-        rows.sort(key=lambda pos: -pos["exposure"])
+        rows.sort(key=lambda pos: -(pos["exposure"] or 0.0))
     else:
-        rows.sort(key=lambda pos: -pos["exposure"])
+        rows.sort(key=lambda pos: -(pos["exposure"] or 0.0))
     return rows
 
 
@@ -787,8 +819,9 @@ def _shares_to_sell(snapshot: Snapshot, pos: dict, target_leverage: float, min_c
     if _is_futures_kind(pos["kind"]):
         return min(pos["qty"], 1.0)
     fracs = []
-    if pos["exposure"] > 0 and exp_gap > 0:
-        fracs.append(exp_gap / pos["exposure"])
+    known_exposure = pos.get("exposure")
+    if known_exposure is not None and known_exposure > 0 and exp_gap > 0:
+        fracs.append(exp_gap / known_exposure)
     if pos["mv_twd"] > 0 and cash_gap > 0:
         fracs.append(cash_gap / pos["mv_twd"])
     if not fracs:
@@ -1336,11 +1369,19 @@ def build_checklist_text(
     lines = [
         "下單輔助檢查清單（規劃用，不是委託）",
         f"淨值 NT$ {metrics['nav']:,.0f}",
-        f"實質曝險 NT$ {metrics['exposure']:,.0f}",
+        (
+            f"已知名目曝險 NT$ {metrics['exposure']:,.0f}（缺 Delta 的部位未計入，不是確認為 0）"
+            if metrics.get("exposure_complete") is False
+            else f"實質曝險 NT$ {metrics['exposure']:,.0f}"
+        ),
         f"合併槓桿 {metrics['leverage']:.2f}x（上限 {rules.target_leverage:.2f}x，第二階段 {rules.stage2_leverage:.2f}x）",
         f"現金水位 {metrics['cash_pct']:.1f}%（下限 {rules.min_cash_pct:.1f}%）",
         f"總 Beta {metrics['total_beta']:.2f}（台股 {metrics['tw_beta']:.2f}／美股 {metrics['us_beta']:.2f}）（目標 {rules.beta_low:.2f}–{rules.beta_high:.2f}）",
     ]
+    if metrics.get("exposure_complete") is False:
+        from portfolio_risk import exposure_warning_text
+
+        lines.append(exposure_warning_text(metrics))
     if metrics["margin_ratio"] is not None:
         lines.append(
             f"保證金比率 {metrics['margin_ratio']:.1f}%，可動用保證金 NT$ {metrics['excess_margin']:,.0f}"

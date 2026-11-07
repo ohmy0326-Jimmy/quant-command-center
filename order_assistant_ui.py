@@ -136,6 +136,20 @@ def _priority_table(items: list[dict]):
     st.dataframe(styler, width="stretch", hide_index=True)
 
 
+def _priority_with_stops(snapshot, rules, after=None):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    today = datetime.now(ZoneInfo("Asia/Taipei")).date()
+    return priority_list(
+        snapshot,
+        rules,
+        after,
+        stop_dates=st.session_state.get("_oa_stop_dates") or {},
+        today=today,
+    )
+
+
 def _queue_regime_reset():
     st.session_state["oa_apply_regime_defaults"] = True
 
@@ -485,7 +499,7 @@ def _render_order(snapshot, rules: Rules):
         _side_metrics(after)
 
     st.markdown("**處置優先順序（追繳風險與觸發停損排最前）**")
-    _priority_table(priority_list(snapshot, rules, after))
+    _priority_table(_priority_with_stops(snapshot, rules, after))
 
     st.markdown(f"**下單帳戶「{selected_account}」（下單前 → 下單後）**")
     b_acc = account_view(snapshot, selected_account)
@@ -1218,7 +1232,7 @@ def _fragment_plan(snapshot, rules: Rules):
         strict_sector=bool(st.session_state["oa_strict_sector"]),
     )
     st.markdown("**先處理：追繳風險與觸發停損**")
-    _priority_table(priority_list(snapshot, rules))
+    _priority_table(_priority_with_stops(snapshot, rules))
     st.markdown(f"**目標槓桿 {rules.target_leverage:.2f}x 執行後**")
     _metric_row(plan["before"], plan["after"])
     _show_action_table(plan["actions"])
@@ -1564,13 +1578,20 @@ def _render_ai_stress(snapshot, send_to_telegram) -> None:
             send_to_telegram("AI 避險基金經理人風控審查報告", memo["text"])
 
 
-def render_order_assistant(send_to_telegram, load_sheets, beta_fn, load_market=None, clear_caches=None):
+def render_order_assistant(send_to_telegram, load_sheets, beta_fn, load_market=None, clear_caches=None, stop_dates_fn=None):
     view = cached_macro_cycle_view()
     if st.session_state.get("oa_apply_regime_defaults"):
         st.session_state["oa_target_leverage"] = float(view["risk"]["target_leverage"])
         st.session_state["oa_min_cash_pct"] = float(view["risk"]["min_cash_pct"])
         st.session_state["oa_apply_regime_defaults"] = False
     _init_rule_state(view)
+    dates = {}
+    if stop_dates_fn is not None:
+        try:
+            dates = dict(stop_dates_fn() or {})
+        except Exception:
+            dates = {}
+    st.session_state["_oa_stop_dates"] = dates
     st.title("第六頁：下單輔助系統")
     st.caption("參數來自：" + ("手動" if _regime_overridden(view) else "牛熊等級"))
     st.caption("下單前先看這一筆對整個部位的影響：槓桿、現金、Beta、保證金與壓力淨值。只做規劃，不會送出任何委託。")
@@ -1658,9 +1679,13 @@ def render_order_assistant(send_to_telegram, load_sheets, beta_fn, load_market=N
     with tab_health:
         # 淨值／槓桿／Beta／權益比率的完整數字只放第四頁「風險與績效」，這裡留一行摘要。
         st.info(page6_health_line(snapshot.metrics, rules.target_leverage))
+        if snapshot.metrics.get("exposure_complete") is False:
+            from portfolio_risk import exposure_warning_text
+
+            st.error(exposure_warning_text(snapshot.metrics))
         render_strategy_radar(snapshot, nav_hist, compact=True)
         st.subheader("處置優先順序")
-        _priority_table(priority_list(snapshot, rules))
+        _priority_table(_priority_with_stops(snapshot, rules))
         st.caption(
             f"經濟槓桿 {economic_leverage(snapshot):.2f}x：股票沿用第四頁曝險，臺指期改以指數 × 乘數 × 口數。"
             "合併槓桿則與第四頁完全相同。"

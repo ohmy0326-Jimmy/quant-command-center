@@ -188,7 +188,7 @@ class ThreeNumbersTests(unittest.TestCase):
         self.assertAlmostEqual(block["total"]["leverage"], m["leverage"], places=12)
         self.assertAlmostEqual(block["tw"]["notional_exposure"] + block["us"]["notional_exposure"], block["total"]["notional_exposure"], places=4)
         payload = portfolio_payload(_df, m, usdtwd=USDTWD, as_of=AS_OF)
-        self.assertEqual(payload["schema_version"], "1.5.0")
+        self.assertEqual(payload["schema_version"], "1.6.0")
         self.assertAlmostEqual(payload["beta_leverage"]["total"]["account_beta"], payload["beta"], places=12)
         from api.schemas import PortfolioResponse
         PortfolioResponse(**payload)

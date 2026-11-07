@@ -415,9 +415,9 @@ def normalize_positions(quant_data: pd.DataFrame, today: date | None = None) -> 
         df["投入總金額"] = 0.0
     df["投入總金額"] = pd.to_numeric(df["投入總金額"], errors="coerce").fillna(0.0)
     if "最大虧損比例" not in df.columns:
-        df["最大虧損比例"] = -100.0
-    else:
-        df["最大虧損比例"] = pd.to_numeric(df["最大虧損比例"], errors="coerce").fillna(-100.0)
+        df["最大虧損比例"] = np.nan
+    if "停損原值" not in df.columns:
+        df["停損原值"] = df["最大虧損比例"]
     if "標的槓桿" not in df.columns:
         df["標的槓桿"] = 1.0
     else:
@@ -432,6 +432,10 @@ def normalize_positions(quant_data: pd.DataFrame, today: date | None = None) -> 
         df["帳戶"] = ""
     df["帳戶"] = df["帳戶"].astype(str).str.strip()
     df = df[df["持有數量"] != 0].copy()
+    if not df.empty:
+        from stop_rules import apply_stop_defaults
+
+        apply_stop_defaults(df)
     return df
 
 
@@ -887,6 +891,9 @@ def _empty_metrics() -> dict:
         "futures_ledger_margin_per_lot": {},
         "futures_ledger_margin_basis": {},
         "beta_fallbacks_used": [],
+        "exposure_complete": True,
+        "exposure_scope": "complete",
+        "unknown_delta_symbols": [],
     }
 
 
@@ -958,9 +965,14 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
     cb_missing_terms: list[str] = []
 
     if not df.empty:
+        if "停損原值" not in df.columns and "最大虧損比例" in df.columns:
+            df["停損原值"] = df["最大虧損比例"]
         for col in ("持有數量", "平均成本", "投入總金額", "最大虧損比例", "標的槓桿", "即時報價", "Beta值"):
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce").astype(float)
+        from stop_rules import apply_stop_defaults
+
+        apply_stop_defaults(df)
         if "即時報價" not in df.columns:
             df["即時報價"] = df["平均成本"]
         else:
@@ -1092,6 +1104,8 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
             df["標的Beta"] = np.nan
         # 標的Beta 只放即時抓到的值；實際採用的（含預設值）另存，重算時預設值不會被當成即時值。
         df["採用標的Beta"] = np.nan
+        df["曝險已知"] = True
+        df["Delta狀態"] = "not_applicable"
 
         for idx, row in df.iterrows():
             ticker_str = str(row["標的"]).strip().upper()
@@ -1106,34 +1120,43 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
 
             if "_cb_mv" in df.columns and pd.notna(row.get("_cb_mv")):
                 equity_native = _row_float(row.get("_cb_equity"), default=float("nan"))
-                if not math.isfinite(equity_native):
-                    gross_exp = 0.0
-                    beta_exp = 0.0
-                else:
-                    signed = equity_native * fx
-                    gross_exp = abs(signed)
-                    beta_exp = signed * _row_float(row.get("_cb_beta"), 1.0)
-                df.at[idx, "實質曝險(台幣)"] = gross_exp
-                df.at[idx, "Beta曝險(台幣)"] = beta_exp
                 df.at[idx, "採用槓桿"] = 1.0
                 df.at[idx, "有效Beta"] = np.nan
                 df.at[idx, "採用標的Beta"] = _row_float(row.get("_cb_beta"), 1.0)
-                df.at[idx, "Beta來源"] = str(row.get("_cb_beta_source") or "")
+                if not math.isfinite(equity_native):
+                    df.at[idx, "實質曝險(台幣)"] = np.nan
+                    df.at[idx, "Beta曝險(台幣)"] = np.nan
+                    df.at[idx, "曝險已知"] = False
+                    df.at[idx, "Delta狀態"] = "missing"
+                    df.at[idx, "Beta來源"] = "Delta 缺漏，曝險未計入"
+                else:
+                    signed = equity_native * fx
+                    df.at[idx, "實質曝險(台幣)"] = abs(signed)
+                    df.at[idx, "Beta曝險(台幣)"] = signed * _row_float(row.get("_cb_beta"), 1.0)
+                    df.at[idx, "曝險已知"] = True
+                    df.at[idx, "Delta狀態"] = "known"
+                    df.at[idx, "Beta來源"] = str(row.get("_cb_beta_source") or "")
             elif is_opt:
                 delta_val = None
                 for dcol in ("Delta", "delta"):
                     if dcol in df.columns and pd.notna(row[dcol]):
                         try:
-                            delta_val = float(row[dcol])
-                            break
+                            parsed = float(row[dcol])
                         except (ValueError, TypeError):
-                            pass
+                            continue
+                        if math.isfinite(parsed):
+                            delta_val = parsed
+                            break
 
+                df.at[idx, "有效Beta"] = np.nan
                 if delta_val is None:
                     if ticker_str not in options_missing_delta:
                         options_missing_delta.append(ticker_str)
-                    beta_exp = 0.0
-                    gross_exp = 0.0
+                    df.at[idx, "實質曝險(台幣)"] = np.nan
+                    df.at[idx, "Beta曝險(台幣)"] = np.nan
+                    df.at[idx, "曝險已知"] = False
+                    df.at[idx, "Delta狀態"] = "missing"
+                    df.at[idx, "Beta來源"] = "Delta 缺漏，曝險未計入"
                 else:
                     opt_mult = 100.0 if "美" in kind_str else 50.0
                     if "合約乘數" in df.columns and pd.notna(row["合約乘數"]):
@@ -1150,12 +1173,12 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
                         except (ValueError, TypeError):
                             pass
                     beta_exp = delta_val * qty * opt_mult * und_px * fx
-                    gross_exp = abs(beta_exp)
-
-                df.at[idx, "實質曝險(台幣)"] = gross_exp
-                df.at[idx, "Beta曝險(台幣)"] = beta_exp
-                df.at[idx, "有效Beta"] = np.nan
-                df.at[idx, "Beta來源"] = "選擇權 Delta 曝險"
+                    df.at[idx, "Delta"] = delta_val
+                    df.at[idx, "實質曝險(台幣)"] = abs(beta_exp)
+                    df.at[idx, "Beta曝險(台幣)"] = beta_exp
+                    df.at[idx, "曝險已知"] = True
+                    df.at[idx, "Delta狀態"] = "known"
+                    df.at[idx, "Beta來源"] = "選擇權 Delta 曝險"
 
             elif is_fut:
                 # 期貨：曝險＝名目（報價 × 乘數 × 口數），Beta＝標的 Beta（臺指期定義 1）。槓桿已在名目裡，不再乘。
@@ -1212,12 +1235,15 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
 
         if not df.empty:
             acc_market = df.groupby("帳戶")["權益市值(台幣)"].sum()
-            acc_exp = df.groupby("帳戶")["實質曝險(台幣)"].sum()
+            acc_exp = df.groupby("帳戶")["實質曝險(台幣)"].apply(_group_known_notional)
         else:
             acc_market, acc_exp = pd.Series(dtype=float), pd.Series(dtype=float)
 
         account_data["即時持股市值"] = account_data["帳戶名稱"].map(acc_market).fillna(0.0).astype(float)
-        account_data["名目曝險"] = account_data["帳戶名稱"].map(acc_exp).fillna(0.0).astype(float)
+        account_data["名目曝險"] = account_data["帳戶名稱"].map(acc_exp)
+        held_accounts = set(df["帳戶"].astype(str)) if not df.empty and "帳戶" in df.columns else set()
+        no_positions = ~account_data["帳戶名稱"].isin(held_accounts)
+        account_data.loc[no_positions, "名目曝險"] = 0.0
         account_data["原始保證金總額"] = 0.0
         account_data["維持保證金總額"] = 0.0
         account_data["可動用保證金"] = 0.0
@@ -1371,6 +1397,13 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
     metrics = _metrics_from_frames(df, account_data, nav, tw_nav, us_nav, options_missing_delta if not df.empty else [], expired_removed)
     metrics["cb_missing_delta"] = list(dict.fromkeys(cb_missing_delta))
     metrics["cb_missing_terms"] = list(dict.fromkeys(cb_missing_terms))
+    unknown_symbols: list[str] = []
+    if not df.empty and "曝險已知" in df.columns:
+        unknown_rows = df[df["曝險已知"] == False]  # noqa: E712 — 欄位是布林，不用 ~
+        unknown_symbols = [str(ticker) for ticker in unknown_rows["標的"].tolist() if str(ticker)]
+    metrics["unknown_delta_symbols"] = list(dict.fromkeys(unknown_symbols))
+    metrics["exposure_complete"] = not metrics["unknown_delta_symbols"]
+    metrics["exposure_scope"] = "complete" if metrics["exposure_complete"] else "partial"
     
     if not df.empty and "Beta來源" in df.columns:
         fallbacks = []
@@ -1438,7 +1471,9 @@ def _metrics_from_frames(
     if account_data is None or account_data.empty or "帳戶淨值" not in account_data.columns:
         return metrics
 
-    exposure = float(account_data["名目曝險"].sum())
+    exposure_values = pd.to_numeric(account_data["名目曝險"], errors="coerce").to_numpy(dtype=float)
+    finite_exposure = exposure_values[np.isfinite(exposure_values)]
+    exposure = float(finite_exposure.sum()) if len(finite_exposure) else 0.0
     debt = float(account_data["融資/質押借款"].sum()) if "融資/質押借款" in account_data.columns else 0.0
     metrics["exposure"] = exposure
     metrics["debt"] = debt
@@ -1492,6 +1527,25 @@ def _metrics_from_frames(
 
     metrics.update(ledger_metrics_from_accounts(account_data))
     return metrics
+
+
+def _group_known_notional(series: pd.Series) -> float:
+    """已知名目曝險加總。整組都不是有限數字時回 NaN，避免把未知加成 0。"""
+    values = pd.to_numeric(series, errors="coerce").to_numpy(dtype=float)
+    finite = values[np.isfinite(values)]
+    if len(finite) == 0:
+        return float("nan")
+    return float(finite.sum())
+
+
+def exposure_warning_text(metrics: dict | None) -> str:
+    """合計槓桿／Beta 不完整時的同一句話。第四頁、第六頁、API warnings 共用。"""
+    symbols = [str(item) for item in ((metrics or {}).get("unknown_delta_symbols") or []) if str(item)]
+    listed = "、".join(symbols) if symbols else "有部位"
+    return (
+        f"{listed} 缺少 Delta。這些部位的名目曝險與 Beta 沒有計入，也不是 0。"
+        "合計槓桿與 Beta 只加總已知部位，不完整，不能當成安全。"
+    )
 
 
 def _row_float(value, default: float = 0.0) -> float:

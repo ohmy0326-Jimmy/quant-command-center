@@ -1,5 +1,6 @@
 """可轉債／CBAS 計價與曝險。不連網、不讀金鑰、不下單。"""
 
+import math
 from datetime import date
 
 import numpy as np
@@ -131,9 +132,17 @@ def test_cbas_without_delta_keeps_market_value_and_zero_exposure():
     row.pop("Delta", None)
     valued, _a, metrics = finalize_valuation(pd.DataFrame([row]), _accounts(), 32.0)
     assert valued.iloc[0]["即時市值(台幣)"] == 15_000
+    assert math.isnan(float(valued.iloc[0]["實質曝險(台幣)"]))
     assert metrics["exposure"] == 0
+    assert metrics["exposure_complete"] is False
+    assert metrics["exposure_scope"] == "partial"
     assert metrics["nav"] == 65_000
     assert metrics["cb_missing_delta"] == ["13164"]
+    record = position_records(valued)[0]
+    assert record["notional_exposure"] is None
+    assert record["delta"] is None
+    assert record["delta_status"] == "missing"
+    assert record["exposure_known"] is False
 
 
 def test_cbas_black_scholes_delta_when_vol_and_expiry_exist():
@@ -163,7 +172,9 @@ def test_missing_stock_price_still_marks_the_bond():
     row.pop("標的股價")
     valued, _a, metrics = finalize_valuation(pd.DataFrame([row]), _accounts(), 32.0)
     assert valued.iloc[0]["即時市值(台幣)"] == 240_000
+    assert math.isnan(float(valued.iloc[0]["實質曝險(台幣)"]))
     assert metrics["exposure"] == 0
+    assert metrics["exposure_complete"] is False
     assert metrics["cb_missing_terms"] == ["13164"]
     assert metrics["nav"] == 290_000
 

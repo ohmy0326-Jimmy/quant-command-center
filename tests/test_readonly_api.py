@@ -318,6 +318,9 @@ class ApiHttpTests(unittest.TestCase):
                 "as_of",
                 "usdtwd_source",
                 "warnings",
+                "exposure_complete",
+                "exposure_scope",
+                "unknown_delta_symbols",
                 "currency",
                 "usdtwd",
                 "net_value",
@@ -343,6 +346,7 @@ class ApiHttpTests(unittest.TestCase):
                 "equity_value", "leverage", "notional_exposure", "underlying", "underlying_beta",
                 "beta", "effective_beta", "beta_exposure", "beta_source",
                 "product", "delta", "delta_source", "conversion_value", "conversion_value_points", "parity_premium_pct",
+                "exposure_known", "delta_status",
             },
         )
         self.assertEqual(set(body["beta_leverage"]), {"tw", "us", "total"})
