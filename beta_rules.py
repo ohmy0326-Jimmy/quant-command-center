@@ -1,21 +1,32 @@
-"""槓桿 ETF 與一般持倉的有效 Beta：全系統（第四頁、第六頁、唯讀 API、美股避險）共用同一條規則。
+"""槓桿／反向 ETF 與一般持倉的有效 Beta。第四頁、第六頁、唯讀 API、美股避險共用。
 
-槓桿 ETF = 槓桿 × 標的一年 Beta（美股對 S&P 500；台股槓桿 ETF 追蹤加權指數，定義為 1）。
-抓不到即時 Beta 時用 FALLBACK_UNDERLYING_BETA 的預設值，並在來源欄標示「預設值」。
+已知商品用契約倍數，不使用 ETF 自己的報酬。每日重置 ETF 的自身回歸已經含槓桿，
+再乘一次倍數會重複。倍數可以是負的（SOXS＝−3）。名目曝險用倍數的絕對值，
+Beta 曝險用帶正負號的倍數 × 標的 Beta，只乘一次。
+
+標的 Beta 抓不到、且不在預設表裡時，不假設 1。台股槓桿 ETF 追蹤加權指數，標的 Beta 定義為 1。
+選擇權若標的是這類 ETF，沿用同一組契約倍數，不另估選擇權價格自己的 Beta。
 """
 import math
+import re
 
 LEVERAGED_UNDERLYING = {
     "SOXL": ("SOXX", 3.0),
+    "SOXS": ("SOXX", -3.0),
     "AMUU": ("AMD", 2.0),
     "MUU": ("MU", 2.0),
     "SNXX": ("SNDK", 2.0),
     "LITX": ("LITE", 2.0),
     "KORU": ("EWY", 3.0),
     "TQQQ": ("QQQ", 3.0),
+    "SQQQ": ("QQQ", -3.0),
     "QLD": ("QQQ", 2.0),
+    "QID": ("QQQ", -2.0),
     "UPRO": ("SPY", 3.0),
+    "SPXU": ("SPY", -3.0),
+    "SPXS": ("SPY", -3.0),
     "SSO": ("SPY", 2.0),
+    "SDS": ("SPY", -2.0),
     "TECL": ("XLK", 3.0),
     "NVDL": ("NVDA", 2.0),
     "USD": ("SMH", 2.0),
@@ -40,6 +51,15 @@ TW_INDEX_UNDERLYING = "^TWII"
 SOURCE_LIVE = "一年回歸"
 SOURCE_FALLBACK = "預設值"
 SOURCE_DEFINITION = "定義"
+SOURCE_MISSING = "資料不足，Beta 未計入"
+
+_OCC_OPTION = re.compile(r"^([A-Z]{1,6})(\d{6})([CP])(\d{8})$")
+
+
+def occ_root(symbol: str) -> str | None:
+    """美股 OCC 代號的標的根代碼。MUU261030C00045000 → MUU。對不上回 None。"""
+    match = _OCC_OPTION.match(str(symbol or "").strip().upper())
+    return match.group(1) if match else None
 
 
 def _num(value, default=None):
@@ -51,10 +71,11 @@ def _num(value, default=None):
 
 
 def underlying_of(ticker: str, kind: str, lev: float | None = None) -> tuple[str | None, float | None]:
+    """已知槓桿／反向 ETF 回 (標的, 契約倍數)。倍數可以是負的。不在表內的非美股、|倍數|>1，視為追蹤加權。"""
     t_upper = str(ticker).upper()
     if t_upper in LEVERAGED_UNDERLYING:
         return LEVERAGED_UNDERLYING[t_upper]
-    elif "美" not in str(kind) and lev is not None and lev > 1:
+    if "美" not in str(kind) and lev is not None and abs(lev) > 1:
         return (TW_INDEX_UNDERLYING, None)
     return (None, None)
 
@@ -112,57 +133,70 @@ def fallback_underlying_beta(underlying: str | None, overrides: dict | None = No
     if u in FALLBACK_UNDERLYING_BETA:
         return FALLBACK_UNDERLYING_BETA[u], f"{u} {SOURCE_FALLBACK}"
         
-    return 1.0, f"{u or '未知標的'} {SOURCE_FALLBACK} 1.0"
+    return None, f"{u or '未知標的'} {SOURCE_MISSING}"
+
+
+def _beta_result(sens, gross, signed, underlying, underlying_beta, source, quality) -> dict:
+    return {
+        "sens": sens,
+        "lev": gross,
+        "signed_lev": signed,
+        "underlying": underlying or "",
+        "underlying_beta": underlying_beta,
+        "source": source,
+        "is_fallback": quality == "fallback",
+        "quality": quality,
+    }
 
 
 def effective_beta(ticker, kind, lev, own_beta, underlying_beta=None, underlying_source="", own_beta_source="", overrides=None) -> dict:
+    """有效 Beta。
+
+    ``lev`` 是名目用的倍數絕對值。``signed_lev`` 是契約倍數（反向為負）。
+    ``sens`` 是套在市值上的 Beta＝signed_lev × 標的 Beta；資料不足時是 None，不是 1。
+    已知商品以對照表的契約倍數為準，試算表填 1 或填錯的正數都不會改寫它。
+    """
     lev_val = _num(lev, 1.0)
+    if lev_val is None:
+        lev_val = 1.0
     own_val = _num(own_beta, None)
-    
     u, map_lev = underlying_of(ticker, kind, lev_val)
-    if u is not None and lev_val <= 1 and map_lev:
-        lev_val = map_lev
-        
-    if u is None or lev_val <= 1:
-        sens = own_val if own_val is not None else 1.0
-        source = str(own_beta_source) if own_beta_source else ("持倉 Beta" if own_val is not None else f"{SOURCE_FALLBACK} 1.0")
-        is_fallback = (own_val is None) or (SOURCE_FALLBACK in source)
-        return {
-            "sens": sens,
-            "lev": lev_val,
-            "underlying": "",
-            "underlying_beta": None,
-            "source": source,
-            "is_fallback": is_fallback
-        }
-        
+    signed = float(map_lev) if map_lev is not None else float(lev_val)
+    gross = abs(signed) if signed else 1.0
+
+    if u is None:
+        source = str(own_beta_source or "")
+        if own_val is None or SOURCE_MISSING in source:
+            return _beta_result(None, gross, signed, "", None, source or SOURCE_MISSING, "missing")
+        quality = "fallback" if SOURCE_FALLBACK in source else "estimated"
+        if not source:
+            source = "持倉 Beta"
+        return _beta_result(own_val, gross, signed, "", None, source, quality)
+
     ub = _num(underlying_beta, None)
-    if ub is not None and ub > 0:
+    if ub is not None and ub != 0:
         src = str(underlying_source) if underlying_source else f"{u} {SOURCE_LIVE}"
-        fb = False
+        if SOURCE_DEFINITION in src:
+            quality = "definition"
+        elif SOURCE_FALLBACK in src:
+            quality = "fallback"
+        else:
+            quality = "estimated"
     else:
         ub, src = fallback_underlying_beta(u, overrides)
-        fb = SOURCE_FALLBACK in src
-        
-    sens = lev_val * ub
-    source = f"槓桿 {lev_val:g}x × {src}"
-    
-    return {
-        "sens": sens,
-        "lev": lev_val,
-        "underlying": u,
-        "underlying_beta": ub,
-        "source": source,
-        "is_fallback": fb
-    }
+        if ub is None:
+            return _beta_result(None, gross, signed, u, None, src, "missing")
+        quality = "definition" if SOURCE_DEFINITION in src else "fallback"
+
+    return _beta_result(signed * ub, gross, signed, u, ub, f"槓桿 {signed:g}x × {src}", quality)
 
 
 def beta_source_label(kind, ok: bool, definition: bool = False) -> str:
     if definition:
         return f"{SOURCE_DEFINITION} 1.0"
     if ok:
-        return f"{SOURCE_LIVE}（對{'S&P 500' if '美' in kind else '加權指數'}）"
-    return f"{SOURCE_FALLBACK} 1.0（抓不到報價）"
+        return f"{SOURCE_LIVE}（對{'S&P 500' if '美' in str(kind) else '加權指數'}）"
+    return SOURCE_MISSING
 
 
 BETA_FALLBACK_STATE_KEY = "beta_fallback_overrides"

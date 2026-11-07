@@ -75,8 +75,12 @@ class Page4SnapshotTests(unittest.TestCase):
         self.assertAlmostEqual(payload["cash_pct"], 50000 / 525808 * 100, places=8)
         self.assertAlmostEqual(payload["beta"], 4_368_000 / 525808, places=8)
         self.assertAlmostEqual(payload["total_beta"], 4_368_000 / 525808, places=8)
-        self.assertAlmostEqual(payload["tw_nav"], 518308.0, places=6)
-        self.assertAlmostEqual(payload["us_nav"], 7500.0, places=6)
+        # 股票戶同時有台股與美股，現金不拆。台股淨值只剩元大期貨。
+        self.assertAlmostEqual(payload["tw_nav"], 368308.0, places=6)
+        self.assertAlmostEqual(payload["us_nav"], 0.0, places=6)
+        self.assertAlmostEqual(payload["unallocated_nav"], 157500.0, places=6)
+        self.assertEqual(payload["beta_basis"], "total_nav")
+        self.assertAlmostEqual(payload["tw_nav"] + payload["us_nav"] + payload["unallocated_nav"], payload["net_value"], places=6)
         self.assertAlmostEqual(payload["net_value"], metrics["nav"], places=8)
         self.assertAlmostEqual(payload["leverage"], metrics["leverage"], places=8)
 
@@ -326,6 +330,12 @@ class ApiHttpTests(unittest.TestCase):
                 "exposure_complete",
                 "exposure_scope",
                 "unknown_delta_symbols",
+                "beta_complete",
+                "unknown_beta_symbols",
+                "sleeve_nav_complete",
+                "unallocated_nav",
+                "beta_basis",
+                "beta_label",
                 "currency",
                 "usdtwd",
                 "net_value",
@@ -349,7 +359,7 @@ class ApiHttpTests(unittest.TestCase):
             {
                 "symbol", "name", "qty", "price", "market_value", "pnl",
                 "equity_value", "leverage", "notional_exposure", "underlying", "underlying_beta",
-                "beta", "effective_beta", "beta_exposure", "beta_source",
+                "beta", "effective_beta", "beta_exposure", "beta_source", "beta_quality",
                 "product", "delta", "delta_source", "conversion_value", "conversion_value_points", "parity_premium_pct",
                 "exposure_known", "delta_status",
             },

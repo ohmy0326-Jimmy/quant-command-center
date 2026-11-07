@@ -26,4 +26,9 @@ def render_beta_leverage_table(st, metrics: dict) -> pd.DataFrame:
         hide_index=True,
     )
     st.caption(BETA_LEVERAGE_NOTE)
+    from portfolio_risk import beta_quality_warning
+
+    quality = beta_quality_warning(metrics)
+    if quality:
+        st.warning(quality)
     return frame
