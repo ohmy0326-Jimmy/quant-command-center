@@ -148,7 +148,8 @@ class AdvicePromptTests(unittest.TestCase):
         self.assertNotIn("請給予 3 點風控建議。", dashboard)
         self.assertNotIn("請給予 3 點風控建議。", page6)
         self.assertIn("請給予 3 點風控建議。", advice)
-        self.assertEqual(dashboard.count("gemini-3.8-flash"), 3)
+        # 第一頁、第二頁仍是手動按鈕。第三頁行事曆不再呼叫 Gemini。
+        self.assertEqual(dashboard.count("gemini-3.8-flash"), 2)
         self.assertNotIn("HttpOptions", advice)
         self.assertIn("genai.Client(api_key=api_key)", advice)
         self.assertIn("generate_content(model=RISK_MANAGER_MODEL, contents=prompt)", advice)
