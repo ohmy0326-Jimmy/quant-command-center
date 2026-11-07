@@ -80,6 +80,7 @@ from portfolio_risk import (
     normalize_positions,
     populate_market_fields,
 )
+from strategy_cards_ui import panel_title, render_strategy_radar
 
 
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
@@ -243,7 +244,7 @@ def _public_error(exc: Exception) -> str:
 
 
 def _load_live(load_sheets, beta_fn, load_market=None, beta_fallbacks=None):
-    accounts, _nav_hist, quant = load_sheets()
+    accounts, nav_hist, quant = load_sheets()
     raw = normalize_positions(quant)
     pairs = tuple(dict.fromkeys(zip(raw["標的"].astype(str), raw["種類"].astype(str) if "種類" in raw.columns else [""] * len(raw)))) if not raw.empty and "標的" in raw.columns else tuple()
     if load_market is not None:
@@ -259,7 +260,7 @@ def _load_live(load_sheets, beta_fn, load_market=None, beta_fallbacks=None):
             prices, betas, sectors = populate_market_fields(raw, beta_fn, twii, extras=extras)
     if not raw.empty:
         raw = attach_quotes(raw, prices, betas, sectors, extras=extras, beta_fallbacks=beta_fallbacks)
-    return build_snapshot_from_frames(raw, accounts, usdtwd, twii)
+    return build_snapshot_from_frames(raw, accounts, usdtwd, twii), nav_hist
 
 
 def _with_beta_fallbacks(snapshot, overrides):
@@ -1597,14 +1598,16 @@ def render_order_assistant(send_to_telegram, load_sheets, beta_fn, load_market=N
     )
 
     using_sample = source.startswith("示範")
+    nav_hist = None
     if not using_sample:
         try:
             with st.spinner("正在用第四頁同一套算法讀持倉..."):
-                snapshot = _load_live(load_sheets, beta_fn, load_market, beta_fallbacks=overrides)
+                snapshot, nav_hist = _load_live(load_sheets, beta_fn, load_market, beta_fallbacks=overrides)
             st.caption(f"線上持倉。美元／台幣 {snapshot.usdtwd:.2f}，台指 {snapshot.twii:,.0f}。槓桿定義與第四頁相同。")
         except Exception as exc:
             st.warning(_public_error(exc))
             snapshot = _with_beta_fallbacks(build_sample_snapshot(), overrides)
+            nav_hist = None
             using_sample = True
     else:
         snapshot = _with_beta_fallbacks(build_sample_snapshot(), overrides)
@@ -1630,6 +1633,7 @@ def render_order_assistant(send_to_telegram, load_sheets, beta_fn, load_market=N
 
     (
         tab_health,
+        tab_radar,
         tab_plan,
         tab_order,
         tab_leaps,
@@ -1640,6 +1644,7 @@ def render_order_assistant(send_to_telegram, load_sheets, beta_fn, load_market=N
     ) = st.tabs(
         [
             "現況健檢",
+            panel_title(),
             "調倉建議",
             "單筆下單試算",
             "LEAPS 試算",
@@ -1653,6 +1658,7 @@ def render_order_assistant(send_to_telegram, load_sheets, beta_fn, load_market=N
     with tab_health:
         # 淨值／槓桿／Beta／權益比率的完整數字只放第四頁「風險與績效」，這裡留一行摘要。
         st.info(page6_health_line(snapshot.metrics, rules.target_leverage))
+        render_strategy_radar(snapshot, nav_hist, compact=True)
         st.subheader("處置優先順序")
         _priority_table(priority_list(snapshot, rules))
         st.caption(
@@ -1688,6 +1694,9 @@ def render_order_assistant(send_to_telegram, load_sheets, beta_fn, load_market=N
                 hide_index=True,
             )
             st.caption("減碼數量 = 持有數量 ×（1 − 上限 ÷ 目前損失）。減完之後，這檔的損失金額會回到淨值上限以內。")
+
+    with tab_radar:
+        render_strategy_radar(snapshot, nav_hist, compact=False)
 
     with tab_plan:
         plan = _fragment_plan(snapshot, rules)
