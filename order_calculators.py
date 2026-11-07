@@ -1,6 +1,7 @@
-"""第六頁的兩個試算器：LEAPS Call 與台指期下單。只做試算，不送委託。
+"""第六頁的試算器：LEAPS Call、台指期，以及現股風險預算股數。只做試算，不送委託。
 
 Black-Scholes、IV 回推、乘數、保證金與整組估價都沿用 order_assistant／portfolio_risk。
+期貨口數仍由 futures_trial 計算，現股股數不走那條。
 """
 
 from __future__ import annotations
@@ -10,6 +11,197 @@ from datetime import date
 
 from order_assistant import Snapshot, apply_order, bs_price_greeks, implied_vol_bs
 from portfolio_risk import equity_ratio_pct, futures_initial_margin, futures_multiplier, is_option_row
+
+# 現股風險預算的上限。使用者可以選更低，不可以悄悄用更高的比例。
+STOCK_RISK_BUDGET_CAP_PCT = 2.0
+STOCK_RISK_UNIT = "股"
+STOCK_SLIPPAGE_NOTE = "跳空、滑價與手續費可能讓實際虧損大於這個停損距離。"
+
+FX_SOURCE_LABELS = {
+    "live": "即時",
+    "cached": "本機最近一次成功值",
+    "last_known": "淨值快照最後一筆",
+    "fallback": "預設值",
+    "demo": "示範持倉固定值",
+    "unknown": "未標明",
+}
+
+
+def _finite_number(value) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    return number
+
+
+def _stock_market(kind: str) -> str | None:
+    text = str(kind or "")
+    if any(token in text for token in ("期", "選", "權證")):
+        return None
+    if "美" in text:
+        return "US"
+    return "TW"
+
+
+def reference_stop_price(entry: float, kind: str, ticker: str, leverage, sheet_stop_pct=None, name: str = "") -> dict:
+    """用試算表停損（沒有才用商品預設）從成交價推出停損價。推不出來 price 是 None。"""
+    from stop_rules import default_stop, explicit_stop
+
+    pct = explicit_stop(sheet_stop_pct)
+    source = "試算表"
+    if pct is None:
+        pct, source = default_stop(kind, ticker, leverage, name)
+    entry_px = _finite_number(entry)
+    if pct is None or entry_px is None or entry_px <= 0 or pct >= 0:
+        return {"price": None, "pct": pct, "source": source}
+    price = entry_px * (1.0 + pct / 100.0)
+    if price <= 0 or price >= entry_px:
+        return {"price": None, "pct": pct, "source": source}
+    return {"price": price, "pct": pct, "source": source}
+
+
+def stock_risk_quantity(
+    *,
+    nav_twd: float,
+    entry_price: float,
+    stop_price: float,
+    kind: str,
+    budget_pct: float = STOCK_RISK_BUDGET_CAP_PCT,
+    fx_rate: float | None = None,
+    fx_source: str = "unknown",
+    fx_warning: str | None = None,
+) -> dict:
+    """買進現股的風險預算上限股數。
+
+    股數 ＝ 風險預算（台幣）÷ 每股停損（台幣），無條件捨去到整股。
+    台股價格已是新台幣。美股價差先乘美元／台幣。這不是現金買得起的數量。
+    """
+    market = _stock_market(kind)
+    source = str(fx_source or "unknown")
+    result = {
+        "ok": False,
+        "reason": "",
+        "market": market,
+        "market_label": "美股" if market == "US" else "台股",
+        "unit": STOCK_RISK_UNIT,
+        "budget_pct_requested": None,
+        "budget_pct_used": None,
+        "budget_capped": False,
+        "risk_budget_twd": None,
+        "loss_per_share_native": None,
+        "loss_per_share_twd": None,
+        "fx_rate": None,
+        "fx_source": source,
+        "fx_source_label": FX_SOURCE_LABELS.get(source, source),
+        "fx_warning": fx_warning or "",
+        "shares": None,
+        "lines": [],
+    }
+    if market is None:
+        result["reason"] = "這個試算只給現股與股票型 ETF，單位是股。期貨口數請用期貨下單試算。"
+        result["lines"] = [result["reason"]]
+        return result
+
+    requested = _finite_number(budget_pct)
+    if requested is None or requested <= 0:
+        result["reason"] = "風險預算要大於 0%。"
+        result["lines"] = [result["reason"]]
+        return result
+    result["budget_pct_requested"] = requested
+    used = requested
+    if requested > STOCK_RISK_BUDGET_CAP_PCT + 1e-9:
+        used = STOCK_RISK_BUDGET_CAP_PCT
+        result["budget_capped"] = True
+    result["budget_pct_used"] = used
+
+    nav = _finite_number(nav_twd)
+    if nav is None or nav <= 0:
+        result["reason"] = "淨值要是正數，才算得出風險預算。"
+        result["lines"] = [result["reason"]]
+        return result
+    entry = _finite_number(entry_price)
+    if entry is None or entry <= 0:
+        result["reason"] = "成交價要大於 0。"
+        result["lines"] = [result["reason"]]
+        return result
+    stop = _finite_number(stop_price)
+    if stop is None or stop <= 0 or stop >= entry:
+        result["reason"] = "買進現股的停損價要大於 0，而且要低於成交價。停損距離不是正數時不給股數。"
+        result["lines"] = [result["reason"]]
+        return result
+
+    loss_native = entry - stop
+    if market == "US":
+        fx = _finite_number(fx_rate)
+        if fx is None or fx <= 0:
+            result["reason"] = "沒有可用的美元／台幣匯率，不算股數。"
+            result["lines"] = [result["reason"]]
+            return result
+        result["fx_rate"] = fx
+        loss_twd = loss_native * fx
+    else:
+        result["fx_rate"] = 1.0
+        loss_twd = loss_native
+    if loss_twd <= 0:
+        result["reason"] = "每股停損換算成台幣後不是正數，不給股數。"
+        result["lines"] = [result["reason"]]
+        return result
+
+    if market != "US":
+        result["fx_warning"] = ""
+    budget = nav * used / 100.0
+    shares = int(math.floor(budget / loss_twd))
+    if shares < 0:
+        shares = 0
+    result.update(
+        ok=True,
+        reason="",
+        risk_budget_twd=budget,
+        loss_per_share_native=loss_native,
+        loss_per_share_twd=loss_twd,
+        shares=shares,
+    )
+    result["lines"] = _stock_risk_lines(result)
+    return result
+
+
+def _stock_risk_lines(result: dict) -> list[str]:
+    shares = int(result["shares"])
+    unit = result["unit"]
+    lines = [
+        f"風險預算允許的最大數量：{shares:,} {unit}（{result['market_label']}，無條件捨去到整股）。",
+        (
+            f"風險預算 NT$ {result['risk_budget_twd']:,.0f}"
+            f"（淨值的 {result['budget_pct_used']:.2f}%）"
+            f" ÷ 每股停損 NT$ {result['loss_per_share_twd']:,.2f}。"
+        ),
+    ]
+    if result["market"] == "US":
+        lines.append(
+            f"美股價差 US$ {result['loss_per_share_native']:,.4f} × 匯率 {result['fx_rate']:.4f}。"
+            f"匯率來源：{result['fx_source_label']}。"
+        )
+        lines.append("美股單位是股，無條件捨去，不拆碎股。")
+    else:
+        lines.append("台股價格已是新台幣。單位是股，不是口，也不是張。")
+    if shares == 0:
+        lines.append("一股的停損就超過風險預算，無條件捨去後是 0 股。")
+    if result["budget_capped"]:
+        lines.append(
+            f"輸入的 {result['budget_pct_requested']:.2f}% 高過 {STOCK_RISK_BUDGET_CAP_PCT:.0f}%，"
+            f"已改以 {STOCK_RISK_BUDGET_CAP_PCT:.0f}% 計算，沒有放大預算。"
+        )
+    if result.get("fx_warning"):
+        lines.append(str(result["fx_warning"]))
+    elif result["market"] == "US" and result["fx_source"] != "live":
+        lines.append(f"美元／台幣不是即時匯率（{result['fx_source_label']}）。")
+    lines.append(STOCK_SLIPPAGE_NOTE)
+    lines.append("這是風險預算下的股數上限，沒有拿來跟帳戶現金比較。現金、下單後槓桿與 Beta 另外看試算，不會用這個股數去擋單。")
+    return lines
+
 
 def years_to_expiry(expiry: date, today: date) -> float:
     days = (expiry - today).days
