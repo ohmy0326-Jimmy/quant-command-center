@@ -44,6 +44,7 @@ import taifex_quotes
 import taiex_vix
 import us_hedge
 import macro_risk
+import sector_board
 import chart_history
 
 # ==========================================
@@ -295,6 +296,32 @@ def cached_top_holdings_map(tickers: tuple):
     return found
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_etf_holding_rows(tickers: tuple):
+    """真實前十大。抓不到是空清單，不放示例持股。"""
+    found = {}
+    for ticker in tickers:
+        table = None
+        try:
+            table = yf.Ticker(ticker).funds_data.top_holdings
+        except Exception:
+            table = None
+        found[ticker] = sector_board.holdings_from_frame(table)
+    return found
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_symbol_closes(symbols: tuple):
+    """強勢股用的收盤。整批快取一小時，失敗的代號留空序列。"""
+    if not symbols:
+        return {}
+    try:
+        raw = yf.download(list(symbols), period="1mo", auto_adjust=True, progress=False, threads=False)
+    except Exception:
+        raw = None
+    return sector_board.closes_from_download(raw, symbols)
+
+
 # 第一頁風險計分板的資料。抓不到時 fetch 會丟例外，st.cache_data 不快取例外，下次重整會重抓。
 @st.cache_data(ttl=300, show_spinner=False)
 def cached_macro_history(ticker, period):
@@ -522,9 +549,11 @@ elif page == "第二頁：板塊與主題資金輪動":
         if st.button("🔄 重新整理", key="refresh_p2", use_container_width=True):
             cached_history_map.clear()
             cached_top_holdings_map.clear()
+            cached_etf_holding_rows.clear()
+            cached_symbol_closes.clear()
             st.rerun()
     st.markdown("---")
-    st.info("💡 追蹤 11 大核心 SPDR 行業 ETF 之外，同步解構焦點主題 ETF：軟體 (IGV)、硬體 (SOXX)、太空 (UFO) 之日／月漲跌幅與前十大持股。")
+    st.info("追蹤 11 大 SPDR 與主題 ETF 的價格漲跌。上方的相對強弱是對 S&P 500 的價格比較，不是資金流。")
 
     sectors_dict = {
         "XLK": "科技", "XLC": "通訊服務", "XLY": "非必需消費", "XLF": "金融", "XLV": "醫療保健", 
@@ -532,29 +561,32 @@ elif page == "第二頁：板塊與主題資金輪動":
         "XLRE": "房地產", "IGV": "軟體 ETF", "SOXX": "半導體 ETF", "UFO": "太空 ETF"
     }
 
-    fallback_top10 = {
-        "XLK": "1. MSFT (21.5%), 2. AAPL (18.2%), 3. NVDA (15.8%), 4. AVGO (6.4%)",
-        "XLC": "1. GOOGL (22.5%), 2. META (21.8%), 3. NFLX (6.2%)",
-        "XLY": "1. AMZN (33.5%), 2. TSLA (13.2%), 3. HD (8.5%)",
-        "XLF": "1. BRK.B (13.2%), 2. JPM (11.8%), 3. V (7.5%)",
-        "XLV": "1. LLY (12.5%), 2. UNH (9.8%), 3. JNJ (8.2%)",
-        "XLI": "1. GE (5.5%), 2. CAT (5.2%), 3. RTX (4.8%)",
-        "XLE": "1. XOM (23.5%), 2. CVX (15.2%), 3. COP (7.8%)",
-        "XLB": "1. LIN (19.5%), 2. SHW (11.2%), 3. FCX (8.5%)",
-        "XLP": "1. PG (14.2%), 2. WMT (13.8%), 3. COST (11.5%)",
-        "XLU": "1. NEE (15.5%), 2. SO (8.2%), 3. DUK (7.5%)",
-        "XLRE": "1. PLD (14.5%), 2. AMT (12.2%), 3. EQIX (8.5%)",
-        "IGV": "1. MSFT (8.8%), 2. CRM (8.5%), 3. NOW (8.2%)",
-        "SOXX": "1. NVDA (8.5%), 2. AVGO (8.2%), 3. QCOM (7.8%)",
-        "UFO": "1. IRDM (8.2%), 2. PL (7.8%), 3. BKSY (7.2%)"
-    }
-
     with st.spinner("📡 正在同步板塊與主題 ETF 數據..."):
         try:
             performance_list = []
             sector_data_cache = {}
-            etf_hist = cached_history_map(tuple((ticker, "1y") for ticker in sectors_dict))
-            holdings_map = cached_top_holdings_map(tuple(sectors_dict.keys()))
+            history_keys = tuple((ticker, "1y") for ticker in sectors_dict) + (("SPY", "1y"),)
+            etf_hist = cached_history_map(history_keys)
+            benchmark = etf_hist.get(("SPY", "1y"), pd.DataFrame())
+            holding_rows = cached_etf_holding_rows(tuple(sectors_dict.keys()))
+            from macro_cycle_live import macro_view_for_orders
+
+            macro_view = macro_view_for_orders()
+            regime = (macro_view or {}).get("regime")
+            board_rows = []
+            holdings_map = {}
+            for ticker, name in sectors_dict.items():
+                frame = etf_hist.get((ticker, "1y"), pd.DataFrame())
+                board_rows.append(sector_board.board_row(ticker, name, frame, benchmark, macro_view, regime))
+                holdings_map[ticker] = sector_board.format_holdings(holding_rows.get(ticker) or [])
+            symbols = tuple(sorted({item["symbol"] for rows in holding_rows.values() for item in rows}))
+            closes = cached_symbol_closes(symbols)
+            strong_by_etf = {
+                ticker: sector_board.strong_holdings(holding_rows.get(ticker) or [], closes)
+                for ticker in sectors_dict
+            }
+            sector_board.render_sector_summary(st, board_rows, strong_by_etf)
+            st.markdown("---")
             for ticker, name in sectors_dict.items():
                 df_k = etf_hist.get((ticker, "1y"), pd.DataFrame())
                 if df_k is None:
@@ -577,7 +609,7 @@ elif page == "第二頁：板塊與主題資金輪動":
                     performance_list.append({
                         "代號": ticker, "板塊名稱": name, "收盤價": latest_close,
                         "日漲跌幅 (%)": round(daily_pct, 2), "月漲跌幅 (%)": round(monthly_pct, 2),
-                        "前十大核心持股與佔比": holdings_map.get(ticker) or fallback_top10.get(ticker, "資料同步中...")
+                        "前十大真實持股": holdings_map.get(ticker) or "未取得真實持股"
                     })
             
             df_sectors = pd.DataFrame(performance_list).sort_values(by="月漲跌幅 (%)", ascending=False)
@@ -585,39 +617,35 @@ elif page == "第二頁：板塊與主題資金輪動":
             st.dataframe(df_sectors.style.format({"收盤價": "{:.2f}", "日漲跌幅 (%)": "{:+.2f}%", "月漲跌幅 (%)": "{:+.2f}%"}).background_gradient(subset=["日漲跌幅 (%)", "月漲跌幅 (%)"], cmap="RdYlGn"), use_container_width=True, hide_index=True)
             st.markdown("---")
 
-            st.subheader("📈 板塊與焦點主題 ETF 1 年期多均線互動式日 K 線與成交量戰情圖")
-            tickers_sorted = df_sectors['代號'].tolist()
-
-            for i in range(0, len(tickers_sorted), 2):
-                cols = st.columns(2)
-                for j in range(2):
-                    if i + j < len(tickers_sorted):
+            with st.expander("板塊日 K（可摺疊）", expanded=False):
+                tickers_sorted = df_sectors["代號"].tolist()
+                for i in range(0, len(tickers_sorted), 2):
+                    cols = st.columns(2)
+                    for j in range(2):
+                        if i + j >= len(tickers_sorted):
+                            continue
                         t_code = tickers_sorted[i + j]
                         t_name = sectors_dict[t_code]
-                        df_chart = sector_data_cache[t_code]
-
+                        df_chart = sector_data_cache.get(t_code)
+                        if df_chart is None or df_chart.empty:
+                            continue
                         with cols[j]:
                             st.markdown(f"**{t_code} - {t_name}**")
-
                             fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.04, row_heights=[0.75, 0.25])
-
                             fig.add_trace(go.Candlestick(
-                                x=df_chart.index, open=df_chart['Open'], high=df_chart['High'], low=df_chart['Low'], close=df_chart['Close'], name='K線'
+                                x=df_chart.index, open=df_chart["Open"], high=df_chart["High"], low=df_chart["Low"], close=df_chart["Close"], name="K線"
                             ), row=1, col=1)
-
-                            fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['MA5'], name='5MA', line=dict(color='#FFEE58', width=1)), row=1, col=1)
-                            fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['MA20'], name='20MA', line=dict(color='#29B6F6', width=1.5)), row=1, col=1)
-                            fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['MA60'], name='60MA', line=dict(color='#FFA726', width=1.5)), row=1, col=1)
-                            fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['MA200'], name='200MA', line=dict(color='#AB47BC', width=2)), row=1, col=1)
-
-                            colors = ['#EF5350' if row['Close'] < row['Open'] else '#26A69A' for index, row in df_chart.iterrows()]
-                            fig.add_trace(go.Bar(x=df_chart.index, y=df_chart['Volume'], name='成交量', marker_color=colors), row=2, col=1)
-
+                            fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart["MA5"], name="5MA", line=dict(color="#FFEE58", width=1)), row=1, col=1)
+                            fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart["MA20"], name="20MA", line=dict(color="#29B6F6", width=1.5)), row=1, col=1)
+                            fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart["MA60"], name="60MA", line=dict(color="#FFA726", width=1.5)), row=1, col=1)
+                            fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart["MA200"], name="200MA", line=dict(color="#AB47BC", width=2)), row=1, col=1)
+                            colors = ["#EF5350" if row["Close"] < row["Open"] else "#26A69A" for _, row in df_chart.iterrows()]
+                            fig.add_trace(go.Bar(x=df_chart.index, y=df_chart["Volume"], name="成交量", marker_color=colors), row=2, col=1)
                             fig.update_layout(
-                                height=380, margin=dict(l=10, r=10, t=10, b=10),
+                                height=320, margin=dict(l=10, r=10, t=10, b=10),
                                 xaxis_rangeslider_visible=False, showlegend=True,
                                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                                template="plotly_dark"
+                                template="plotly_dark",
                             )
                             st.plotly_chart(fig, use_container_width=True)
 
