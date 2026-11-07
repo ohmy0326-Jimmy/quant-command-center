@@ -47,6 +47,9 @@ import macro_risk
 import page1_lights
 import sector_board
 import chart_history
+import calendar_events
+import calendar_actions
+import calendar_page
 
 # ==========================================
 # 網頁基本設定與密碼驗證防護（支援環境變數與 Secret）
@@ -343,6 +346,58 @@ def clear_macro_risk_caches():
 @st.cache_data(ttl=3600, show_spinner=False)
 def cached_fred_observations(series_id: str):
     return page1_lights.fetch_fred_observations(series_id)
+
+
+# 第三頁財報日快取 6 小時。抓取失敗會丟例外，st.cache_data 不快取例外。
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def cached_yahoo_earnings(symbol: str):
+    return calendar_events.fetch_yahoo_calendar(symbol)
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def cached_fmp_raw(start_iso: str, end_iso: str, api_key: str):
+    return calendar_events.fetch_fmp_calendar(api_key, datetime.fromisoformat(start_iso).date(), datetime.fromisoformat(end_iso).date())
+
+
+def load_calendar_model(watchlist: str):
+    today = datetime.now().date()
+    fetched_at = datetime.now(calendar_events.TAIPEI)
+    try:
+        _account_data, _nav_data, quant_data = load_quant_database()
+        rows = normalize_positions(quant_data)
+    except Exception:
+        rows = None
+    if rows is None:
+        symbols = calendar_events.earnings_symbols(calendar_events.watch_from_text(watchlist)[0])
+    else:
+        held, _notes = calendar_events.holdings_from_positions(rows)
+        watched, _watch_notes = calendar_events.watch_from_text(watchlist)
+        symbols = calendar_events.earnings_symbols(held + watched)
+    symbols = symbols[: calendar_events.MAX_EARNINGS_LOOKUPS]
+    payloads = {}
+    for symbol in symbols:
+        try:
+            payloads[symbol] = cached_yahoo_earnings(symbol)
+        except Exception:
+            payloads[symbol] = {"error": "來源失敗"}
+    fmp_key = os.environ.get("FMP_API_KEY") or read_secret("", "FMP_API_KEY")
+    fmp_items = None
+    fmp_error = ""
+    if fmp_key:
+        try:
+            fmp_items = cached_fmp_raw(today.isoformat(), (today + timedelta(days=90)).isoformat(), fmp_key)
+        except Exception:
+            fmp_items = []
+            fmp_error = "FMP 來源失敗，這一段缺漏。其餘事件仍顯示。不會改用寫死日期。"
+    return calendar_events.build_calendar(
+        rows,
+        watchlist,
+        payloads,
+        fmp_items,
+        today,
+        fetched_at,
+        fmp_error=fmp_error,
+    )
 
 
 def load_page1_board(macro_items: list):
@@ -700,136 +755,41 @@ elif page == "第二頁：板塊與主題資金輪動":
 elif page == "第三頁：重大行事曆與會展":
     c1, c2 = st.columns([0.85, 0.15])
     with c1:
-        st.title("📅 第三頁：重大行事曆與 M7 財報戰情室 (FMP 動態整合)")
+        st.title("📅 第三頁：持倉與觀察清單行事曆")
     with c2:
         st.write("")
         if st.button("🔄 重新整理", key="refresh_p3", use_container_width=True):
+            cached_yahoo_earnings.clear()
+            cached_fmp_raw.clear()
             st.rerun()
     st.markdown("---")
-    st.info("💡 系統已透過 **Financial Modeling Prep (FMP) API** 自動抓取未來 3 個月內的全球總經事件、通膨與央行決議，並同步整合 M7 財報日。")
-
-    today = datetime.now().date()
-    three_months_later = today + timedelta(days=90)
-
-    # 1. 動態透過 FMP 抓取經濟行事曆
-    @st.cache_data(ttl=3600)
-    def get_fmp_economic_calendar():
-        fmp_key = os.environ.get("FMP_API_KEY") or read_secret("", "FMP_API_KEY")
-        if not fmp_key:
-            return []
-        
-        today_str = today.strftime("%Y-%m-%d")
-        future_str = three_months_later.strftime("%Y-%m-%d")
-        url = f"https://financialmodelingprep.com/api/v3/economic_calendar?from={today_str}&to={future_str}&apikey={fmp_key}"
-        
-        try:
-            res = requests.get(url, timeout=10)
-            if res.status_code == 200:
-                data = res.json()
-                events = []
-                for item in data:
-                    country = item.get("country", "")
-                    if country in ["US", "United States", "Global", "EMU"]:
-                        ev_date = str(item.get("date", ""))[:10]
-                        ev_name = item.get("event", "總經事件")
-                        impact = item.get("impact", "Medium")
-                        estimate = item.get("estimate")
-                        prev = item.get("previous")
-                        
-                        impact_label = "🔥 高" if impact == "High" else ("⚡ 中" if impact == "Medium" else "📌 低")
-                        effect_desc = f"重要性: {impact_label} | 預估值: {str(estimate)} | 前值: {str(prev)}"
-                        
-                        events.append({
-                            "日期": ev_date,
-                            "項目": f"{ev_name} ({country})",
-                            "影響": effect_desc
-                        })
-                return events
-        except:
-            pass
-        return []
-
-    # 2. 動態抓取 M7 財報日
-    @st.cache_data(ttl=3600)
-    def get_m7_earnings_events():
-        m7_dict = {"AAPL": "Apple", "MSFT": "Microsoft", "NVDA": "NVIDIA", "GOOGL": "Alphabet", "AMZN": "Amazon", "META": "Meta", "TSLA": "Tesla"}
-        events = []
-        for ticker, name in m7_dict.items():
-            try:
-                t_obj = yf.Ticker(ticker)
-                cal = t_obj.calendar
-                earnings_date = None
-                if isinstance(cal, dict):
-                    for k in cal.keys():
-                        if 'earnings' in k.lower():
-                            val = cal[k]
-                            if isinstance(val, list) and len(val) > 0:
-                                earnings_date = pd.to_datetime(val[0]).date()
-                            elif isinstance(val, (datetime, pd.Timestamp)):
-                                earnings_date = val.date()
-                elif hasattr(cal, 'loc') and not cal.empty:
-                    if 'Earnings Date' in cal.index:
-                        earnings_date = pd.to_datetime(cal.loc['Earnings Date'].iloc[0]).date()
-                
-                if earnings_date:
-                    events.append({
-                        "日期": earnings_date.strftime("%Y-%m-%d"),
-                        "項目": f"美股 M7 財報：{name} ({ticker})",
-                        "影響": "左右全球 AI 資本支出與科技股情緒連動"
-                    })
-            except:
-                pass
-        return events
-
-    fmp_events = get_fmp_economic_calendar()
-    m7_events = get_m7_earnings_events()
-    
-    fallback_base = [
-        {"日期": "2026-10-29", "項目": "FOMC 利率決議與聲明 (清晨02:00)", "影響": "基準利率調整與流動性震盪"},
-        {"日期": "2026-11-06", "項目": "美國 10 月非農就業報告 (NFP)", "影響": "經濟軟著陸預期與勞動市場體檢"},
-        {"日期": "2026-11-12", "項目": "美國 10 月 CPI 消費者物價指數", "影響": "終端通膨黏著度與 Fed 走向"},
-        {"日期": "2026-12-10", "項目": "FOMC 利率決議與聲明 (清晨02:00)", "影響": "年底前關鍵利率決議"}
-    ]
-    
-    all_events = (fmp_events if fmp_events else fallback_base) + m7_events
-    filtered_events = [ev for ev in all_events if today <= datetime.strptime(ev["日期"], "%Y-%m-%d").date() <= three_months_later]
-    filtered_events.sort(key=lambda x: x["日期"])
-
-    if filtered_events:
-        st.markdown("### 📌 未來 3 個月動態排程事件")
-        for idx, ev in enumerate(filtered_events):
-            event_key = f"{ev['日期']}_{ev['項目']}"
-            with st.container():
-                cols = st.columns([1.2, 2.5, 2.5, 3.8])
-                cols[0].markdown(f"**📅 {ev['日期']}**")
-                cols[1].markdown(f"**{ev['項目']}**")
-                cols[2].markdown(f"⚡ {ev['影響']}")
-                
-                with cols[3]:
-                    sub_c1, sub_c2 = st.columns(2)
-                    with sub_c1:
-                        if st.button(f"🧠 AI 解析", key=f"ai_event_btn_{idx}"):
-                            with st.spinner("AI 經理人正在生成戰術..."):
-                                try:
-                                    gemini_key = os.environ.get("GEMINI_API_KEY") or read_secret("", "GEMINI_API_KEY")
-                                    client = genai.Client(api_key=gemini_key)
-                                    res = client.models.generate_content(model='gemini-3.8-flash', contents=f"身為避險基金經理人，面對事件：【{ev['項目']}】（影響：{ev['影響']}），請給出具體資產配置與風控建議。")
-                                    st.session_state.ai_memo_p3[event_key] = {"text": res.text, "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-                                except Exception as e:
-                                    st.error(f"生成失敗: {e}")
-                    with sub_c2:
-                        if st.button(f"📲 推播TG", key=f"tg_event_btn_{idx}"):
-                            send_to_telegram(f"行事曆提醒：{ev['項目']}", f"日期：{ev['日期']}\n影響：{ev['影響']}")
-                
-                if event_key in st.session_state.ai_memo_p3:
-                    memo = st.session_state.ai_memo_p3[event_key]
-                    st.info(f"📌 **戰術建議（時間：{memo['time']}）**")
-                    st.markdown(memo["text"])
-                    if st.button(f"📤 推播此事件建議到 TG", key=f"btn_tg_p3_{idx}"):
-                        send_to_telegram(f"行事曆戰術建議：{ev['項目']}", memo["text"])
-            st.markdown("---")
-    else:
-        st.info("目前未來 3 個月內無登錄的重大排程事件。")
+    watchlist = st.text_input(
+        "觀察清單（選填，逗號分隔。只留在這次工作階段，不寫入試算表）",
+        key="calendar_watchlist",
+    )
+    try:
+        calendar_model = load_calendar_model(watchlist)
+    except Exception as exc:
+        calendar_model = calendar_events.build_calendar(
+            None,
+            watchlist,
+            {},
+            None,
+            datetime.now().date(),
+            datetime.now(calendar_events.TAIPEI),
+            fmp_error=f"行事曆組裝失敗：{exc}",
+        )
+    if any("持倉讀不到" in note for note in calendar_model["notes"]):
+        st.warning("持倉讀不到。台股制度事件仍顯示，部位對照這次空白。")
+    gemini_key = os.environ.get("GEMINI_API_KEY") or read_secret("", "GEMINI_API_KEY") or ""
+    calendar_page.render_calendar(
+        st,
+        calendar_model,
+        memos=st.session_state.ai_memo_p3,
+        gemini_key=str(gemini_key),
+        complete_analysis=calendar_actions.complete_event_analysis,
+        send=send_to_telegram,
+    )
 
 # ==========================================
 # 第四頁：部位監控與量化風控 (完整風控與 Telegram 推播)
