@@ -42,11 +42,14 @@ import taifex_quotes
 import us_hedge
 from order_calculators import (
     FUTURES_PRODUCTS,
+    STOCK_RISK_BUDGET_CAP_PCT,
     default_margin_per_lot,
     futures_order_impact,
     ledger_margin_per_lot,
     futures_trial,
     leaps_call_metrics,
+    reference_stop_price,
+    stock_risk_quantity,
 )
 from taiex_vix import fetch_taiex_vix
 from nav_scenario_sim_ui import render_nav_scenario_simulator
@@ -72,13 +75,15 @@ from beta_rules import BETA_FALLBACK_STATE_KEY, fallback_table_rows, overrides_f
 from macro_cycle import format_holding_tag, holding_tag
 from macro_cycle_ui import cached_macro_cycle_view
 from portfolio_risk import (
+    FxQuote,
     attach_quotes,
     equity_ratio_pct,
+    exposure_warning_text,
     fetch_twii,
-    fetch_usdtwd,
     is_taiex_future,
     normalize_positions,
     populate_market_fields,
+    resolve_usdtwd,
 )
 from strategy_cards_ui import panel_title, render_strategy_radar
 
@@ -257,16 +262,35 @@ def _public_error(exc: Exception) -> str:
     return f"線上持倉讀取失敗，下面改用示範持倉。原因：{text[:300]}"
 
 
+def _remember_fx(snapshot, quote: FxQuote | None, *, demo: bool = False):
+    if demo:
+        snapshot.metrics["usdtwd_source"] = "demo"
+        snapshot.metrics["usdtwd_warning"] = "示範持倉的美元／台幣是固定數字，不是即時匯率。"
+        return snapshot
+    if quote is None:
+        snapshot.metrics.setdefault("usdtwd_source", "unknown")
+        snapshot.metrics.setdefault("usdtwd_warning", "")
+        return snapshot
+    snapshot.metrics["usdtwd_source"] = quote.source
+    snapshot.metrics["usdtwd_warning"] = quote.warning() or ""
+    return snapshot
+
+
 def _load_live(load_sheets, beta_fn, load_market=None, beta_fallbacks=None):
     accounts, nav_hist, quant = load_sheets()
     raw = normalize_positions(quant)
     pairs = tuple(dict.fromkeys(zip(raw["標的"].astype(str), raw["種類"].astype(str) if "種類" in raw.columns else [""] * len(raw)))) if not raw.empty and "標的" in raw.columns else tuple()
+    quote = None
     if load_market is not None:
         res = load_market(pairs)
         usdtwd, twii, prices, betas, sectors = res[:5]
         extras = res[5] if len(res) > 5 else None
+        if len(res) > 6 and isinstance(res[6], FxQuote):
+            quote = res[6]
+            usdtwd = quote.rate
     else:
-        usdtwd = fetch_usdtwd()
+        quote = resolve_usdtwd()
+        usdtwd = quote.rate
         twii = fetch_twii()
         prices, betas, sectors = ({}, {}, {})
         extras = {}
@@ -274,7 +298,8 @@ def _load_live(load_sheets, beta_fn, load_market=None, beta_fallbacks=None):
             prices, betas, sectors = populate_market_fields(raw, beta_fn, twii, extras=extras)
     if not raw.empty:
         raw = attach_quotes(raw, prices, betas, sectors, extras=extras, beta_fallbacks=beta_fallbacks)
-    return build_snapshot_from_frames(raw, accounts, usdtwd, twii), nav_hist
+    snapshot = build_snapshot_from_frames(raw, accounts, usdtwd, twii)
+    return _remember_fx(snapshot, quote), nav_hist
 
 
 def _with_beta_fallbacks(snapshot, overrides):
@@ -389,6 +414,66 @@ def _order_kind(snapshot, ticker: str, held):
     return "美股" if choice == "美股" else "台股"
 
 
+def _render_stock_risk_size(snapshot, kind: str, ticker: str, name: str, lev: float, price: float, held, qty: float, side: str) -> None:
+    """現股風險預算股數。不改使用者填的數量，也不碰期貨口數。"""
+    if not ticker or "期" in str(kind) or "選" in str(kind) or is_taiex_future(ticker):
+        return
+    st.markdown("**風險預算股數**")
+    st.caption("只算買進現股或 ETF。你填的數量保持可改，這裡不會送單，也不拿股數去跟帳戶現金比較。")
+    if side != "買進":
+        st.info("賣出不計算風險預算股數。這個上限只給買進，停損價要低於成交價。")
+        return
+    if snapshot.metrics.get("exposure_complete") is False:
+        st.error(exposure_warning_text(snapshot.metrics))
+
+    sheet_pct = held.get("max_loss_pct") if held else None
+    ref = reference_stop_price(price, kind, ticker, lev, sheet_pct, name)
+    stop_key = f"oa_stock_stop_{ticker}"
+    if st.button("帶入停損價", key=f"oa_stock_stop_fill_{ticker}", disabled=ref["price"] is None):
+        if ref["price"] is not None:
+            st.session_state[stop_key] = float(ref["price"])
+            st.rerun()
+    if ref["price"] is not None and ref.get("pct") is not None:
+        st.caption(f"可帶入的停損價來自{ref['source']}（{ref['pct']:.0f}%）：{ref['price']:.4f}。帶入後仍可改。")
+    if stop_key not in st.session_state:
+        st.session_state[stop_key] = 0.0
+    stop_price = st.number_input("停損價", min_value=0.0, step=0.5, key=stop_key)
+    if "oa_stock_risk_pct" not in st.session_state:
+        st.session_state["oa_stock_risk_pct"] = STOCK_RISK_BUDGET_CAP_PCT
+    budget_pct = st.number_input(
+        "風險預算（占淨值 %）",
+        min_value=0.1,
+        max_value=STOCK_RISK_BUDGET_CAP_PCT,
+        step=0.1,
+        key="oa_stock_risk_pct",
+        help="預設 2%，可以調低。欄位最高就是 2%，計算函式也不會用更高的比例。",
+    )
+    sizing = stock_risk_quantity(
+        nav_twd=float(snapshot.metrics.get("nav") or 0.0),
+        entry_price=price,
+        stop_price=stop_price,
+        kind=kind,
+        budget_pct=budget_pct,
+        fx_rate=float(snapshot.usdtwd) if snapshot.usdtwd else None,
+        fx_source=str(snapshot.metrics.get("usdtwd_source") or "unknown"),
+        fx_warning=str(snapshot.metrics.get("usdtwd_warning") or ""),
+    )
+    if not sizing["ok"]:
+        st.warning(sizing["reason"])
+        return
+    st.metric("風險預算允許的最大股數", f"{sizing['shares']:,} 股")
+    for line in sizing["lines"]:
+        if line == sizing["lines"][0]:
+            continue
+        st.caption(line)
+    if qty > float(sizing["shares"]):
+        planned = qty * float(sizing["loss_per_share_twd"])
+        st.warning(
+            f"你填的 {qty:,.0f} 股，依這個停損約虧 NT$ {planned:,.0f}，"
+            f"高過風險預算 NT$ {sizing['risk_budget_twd']:,.0f}。數量仍可保留，不會擋下。"
+        )
+
+
 @st.fragment
 def _render_order(snapshot, rules: Rules):
     st.caption("輸入後立即重算整組淨值、槓桿、Beta、現金、保證金與產業。數量 0 代表還沒有要試的單。")
@@ -469,6 +554,7 @@ def _render_order(snapshot, rules: Rules):
         st.caption("修改後第四頁、第六頁、美股避險一起套用（同一個瀏覽器分頁）。")
     qty = float(st.session_state["oa_qty"])
     side = st.session_state["oa_side"]
+    _render_stock_risk_size(snapshot, kind, ticker, name, lev, price, held, qty, side)
     if qty <= 0 or not ticker:
         st.info("填了數量才會試算。這頁不會把單子送到券商。")
         return None
@@ -1624,14 +1710,15 @@ def render_order_assistant(send_to_telegram, load_sheets, beta_fn, load_market=N
         try:
             with st.spinner("正在用第四頁同一套算法讀持倉..."):
                 snapshot, nav_hist = _load_live(load_sheets, beta_fn, load_market, beta_fallbacks=overrides)
-            st.caption(f"線上持倉。美元／台幣 {snapshot.usdtwd:.2f}，台指 {snapshot.twii:,.0f}。槓桿定義與第四頁相同。")
+            fx_note = snapshot.metrics.get("usdtwd_warning") or f"匯率來源：{snapshot.metrics.get('usdtwd_source', '未標明')}"
+            st.caption(f"線上持倉。美元／台幣 {snapshot.usdtwd:.2f}。{fx_note} 台指 {snapshot.twii:,.0f}。槓桿定義與第四頁相同。")
         except Exception as exc:
             st.warning(_public_error(exc))
-            snapshot = _with_beta_fallbacks(build_sample_snapshot(), overrides)
+            snapshot = _remember_fx(_with_beta_fallbacks(build_sample_snapshot(), overrides), None, demo=True)
             nav_hist = None
             using_sample = True
     else:
-        snapshot = _with_beta_fallbacks(build_sample_snapshot(), overrides)
+        snapshot = _remember_fx(_with_beta_fallbacks(build_sample_snapshot(), overrides), None, demo=True)
 
     if using_sample:
         st.info("現在是示範持倉（台股、美股、SOXL／00663L、元大期貨），用來熟悉流程。數字不是你的真實帳戶，也不會寫回 Google 試算表。")

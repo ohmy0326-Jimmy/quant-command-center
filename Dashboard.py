@@ -214,12 +214,13 @@ def load_book_for_page5():
 
 
 def load_market_for_page6(tickers: tuple):
-    usdtwd = cached_usdtwd()
+    quote = usdtwd_quote()
+    usdtwd = quote.rate
     if not tickers:
-        return usdtwd, cached_twii(), {}, {}, {}, {}
+        return usdtwd, cached_twii(), {}, {}, {}, {}, quote
     pairs = tuple(dict.fromkeys((t, "") if isinstance(t, str) else (str(t[0]), str(t[1])) for t in tickers))
     bundle = cached_quote_bundle(pairs)
-    return usdtwd, bundle["twii"], bundle["prices"], bundle["betas"], bundle["sectors"], bundle.get("extras") or {}
+    return usdtwd, bundle["twii"], bundle["prices"], bundle["betas"], bundle["sectors"], bundle.get("extras") or {}, quote
 
 
 # K 線快取：成功的結果快取 5 分鐘；空資料／抓取失敗會丟例外，st.cache_data 不快取例外，
