@@ -307,7 +307,10 @@ def compose_macro_view(json_view: dict, sheet: dict | None, auto: dict | None, t
         view["warnings"] = warnings
         _apply_auto(view, auto, warnings, today)
         view["warnings"] = warnings
-        return _refresh_totals(view)
+        view["history_origin"] = "json"
+        view["history_example"] = True
+        view["history_note"] = "試算表讀不到，歷史改用倉庫示例。這不是已核對的真實週報。"
+        return _refresh_totals(view, today)
 
     if sheet.get("score_error"):
         warnings.append(str(sheet["score_error"]))
@@ -333,7 +336,10 @@ def compose_macro_view(json_view: dict, sheet: dict | None, auto: dict | None, t
         view["warnings"] = warnings
         _apply_auto(view, auto, warnings, today)
         view["warnings"] = warnings
-        return _refresh_totals(view)
+        view["history_origin"] = "json"
+        view["history_example"] = True
+        view["history_note"] = "試算表沒有可用的列，歷史改用倉庫示例。這不是已核對的真實週報。"
+        return _refresh_totals(view, today)
 
     indicators = _merge_indicators(json_indicators, score_rows if use_sheet_scores else {}, warnings)
     industries, industry_updated = _merge_industries(
@@ -358,7 +364,7 @@ def compose_macro_view(json_view: dict, sheet: dict | None, auto: dict | None, t
         return view
     _apply_auto(view, auto, view["warnings"], today)
     _attach_history(view, sheet, json_view)
-    return _refresh_totals(view)
+    return _refresh_totals(view, today)
 
 
 def _attach_history(view: dict, sheet: dict, json_view: dict) -> None:
@@ -366,10 +372,22 @@ def _attach_history(view: dict, sheet: dict, json_view: dict) -> None:
     if sheet.get("history_error"):
         warnings.append(str(sheet["history_error"]))
         view["history"] = list(json_view.get("history") or [])
+        view["history_origin"] = "json"
+        view["history_example"] = True
+        view["history_note"] = "Macro_Score_History 讀不到，改用倉庫示例。頁面不會改寫這一頁。"
         return
     rows, extra = parse_history_rows(sheet.get("history") or [])
     warnings.extend(extra)
-    view["history"] = rows or list(json_view.get("history") or [])
+    if rows:
+        view["history"] = rows
+        view["history_origin"] = "sheet"
+        view["history_example"] = False
+        view["history_note"] = "來源是試算表 Macro_Score_History。程式只讀，不會用今天重算的分數覆蓋舊週。"
+        return
+    view["history"] = list(json_view.get("history") or [])
+    view["history_origin"] = "json"
+    view["history_example"] = True
+    view["history_note"] = "試算表沒有可用的歷史列，改用倉庫示例。"
 
 
 def score_ma_gap(gap: float) -> int:
@@ -522,7 +540,7 @@ def _apply_auto(view: dict, auto: dict, warnings: list[str], today: str) -> None
             warnings.append(f"{item['name']} 自動抓取失敗，沿用倉庫備援。")
 
 
-def _refresh_totals(view: dict) -> dict:
+def _refresh_totals(view: dict, today: str | None = None) -> dict:
     indicators = view.get("indicators") or []
     if not indicators:
         return view
@@ -538,7 +556,18 @@ def _refresh_totals(view: dict) -> dict:
         industry_as_of_day=view.get("industry_as_of_day"),
     )
     refreshed["history"] = list(view.get("history") or [])
+    refreshed["history_origin"] = view.get("history_origin") or "json"
+    refreshed["history_example"] = bool(view.get("history_example", refreshed["history_origin"] != "sheet"))
+    refreshed["history_note"] = view.get("history_note") or ""
     refreshed["week_change"] = week_change(refreshed["total"], refreshed["history"], refreshed.get("score_updated_at"))
+    from macro_score_trend import assess_trend
+
+    refreshed["score_trend"] = assess_trend(
+        refreshed["history"],
+        today,
+        origin=refreshed["history_origin"],
+        example=refreshed["history_example"],
+    )
     return refreshed
 
 

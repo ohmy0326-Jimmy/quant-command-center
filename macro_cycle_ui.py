@@ -34,6 +34,7 @@ from macro_cycle_sheet import (
     exposure_by_industry,
     underweight_warnings,
 )
+from macro_score_trend import arrow_symbol, chart_rows, format_average
 
 RESEARCH_URL = "https://cursor.com/canvas/store-9fa877c7-1d47-4b9a-a8f8-eaeb67263eba/aaaf4e7c-fb03-4170-93ac-a7f93481fbb7"
 
@@ -55,13 +56,12 @@ def render_macro_cycle_page(load_book=None, clear_caches=None):
         st.warning("總經資料沒有套用。下單輔助暫用中性：1.5 倍、現金 15%。")
         return
     _render_summary(view, book)
+    _render_history(view)
     _render_indicators(view["indicators"])
     _render_industries(view["industries"], book)
     _render_framework(view["industries"], book)
     with st.expander("四象限", expanded=False):
         _render_quadrant(view["industries"], book)
-    with st.expander("總分歷史", expanded=False):
-        _render_history(view)
     with st.expander("制度對照"):
         st.caption(regime_scale_text())
         _render_risk_table(view["regime"])
@@ -208,11 +208,12 @@ def _render_industries(industries: list[dict], book: dict):
         rows.append(
             {
                 "產業": item["name"],
-                "週期": item["cycle"],
+                "上期": item.get("prev_cycle") or "—",
+                "本期": item.get("cycle") or "—",
+                "換象限": quadrant_change_text(item),
                 "方向": item["direction"],
                 "立場": item["stance"],
                 "一句話": item.get("rationale") or "—",
-                "換象限": quadrant_change_text(item),
                 "你的持股": held.get("mv", 0.0),
                 "佔比": held.get("pct", 0.0),
                 "代表股": "、".join(item.get("tickers") or []),
@@ -223,11 +224,10 @@ def _render_industries(industries: list[dict], book: dict):
         return
     frame = pd.DataFrame(rows)
     styler = frame.style
-    paint = _paint_stance
     if hasattr(styler, "map"):
-        styler = styler.map(paint, subset=["立場"])
+        styler = styler.map(_paint_stance, subset=["立場"]).map(_paint_quadrant_change, subset=["換象限"])
     else:
-        styler = styler.applymap(paint, subset=["立場"])
+        styler = styler.applymap(_paint_stance, subset=["立場"]).applymap(_paint_quadrant_change, subset=["換象限"])
     st.dataframe(
         styler.format({"你的持股": "NT$ {:,.0f}", "佔比": "{:.1f}%"}),
         width="stretch",
@@ -264,14 +264,18 @@ def _render_framework(industries: list[dict], book: dict):
 
 
 def _render_history(view: dict):
-    history = list(view.get("history") or [])
-    if not history:
-        st.caption("尚無週分數歷史。")
+    trend = view.get("score_trend") or {}
+    render_score_trend(st, trend, str(view.get("history_note") or ""))
+    rows = chart_rows(view.get("history") or [], trend.get("as_of") or None)
+    if not rows:
+        st.caption("尚無可用的週分數，所以沒有圖。")
         return
-    frame = pd.DataFrame(history).sort_values("week")
-    fig = go.Figure(go.Scatter(x=frame["week"], y=frame["total"], mode="lines+markers", name="總分"))
+    weeks = [row["week"] for row in rows]
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=weeks, y=[row["total"] for row in rows], mode="lines+markers", name="週總分", connectgaps=False))
+    fig.add_trace(go.Scatter(x=weeks, y=[row["average"] for row in rows], mode="lines+markers", name="4週均線", connectgaps=False))
     fig.update_layout(
-        title="每週總分",
+        title="每週總分與 4 週均線",
         template="plotly_dark",
         height=320,
         margin=dict(l=10, r=10, t=40, b=10),
@@ -279,6 +283,47 @@ def _render_history(view: dict):
         yaxis_title="總分",
     )
     st.plotly_chart(fig, width="stretch")
+
+
+def render_score_trend(st, trend: dict, note: str = ""):
+    """4 週趨勢。呼叫端已經算好，這裡不讀試算表。"""
+    trend = trend or {}
+    st.subheader("總經分數趨勢")
+    st.caption("這是總經分數的 4 週趨勢燈，不是淨值回撤煞車。回撤停新倉是 -8%、降到 1 倍是 -12%。這裡不改那兩條，也不推播。")
+    if note:
+        st.caption(note)
+    if trend.get("example") or trend.get("origin") != "sheet":
+        st.warning("這段歷史不是已核對的真實試算表週報。倉庫示例不能當投資回測。")
+    origin = "試算表 Macro_Score_History" if trend.get("origin") == "sheet" else "倉庫 JSON 備援"
+    st.caption(
+        f"來源：{origin}。有效週數 {int(trend.get('count') or 0)}。"
+        f"從 {trend.get('first') or '—'} 到 {trend.get('last') or '—'}。"
+    )
+    gaps = trend.get("gaps") or []
+    if gaps:
+        shown = "、".join(f"{item['from']}→{item['to']}（隔 {item['days']} 天）" for item in gaps[:6])
+        st.caption(f"缺週 {len(gaps)} 段：{shown}。空檔沒有補 0，也沒有插值。")
+    else:
+        st.caption("相鄰的有效週沒有超過 10 天的缺口。")
+    if trend.get("future"):
+        st.caption("晚於評估日、沒有拿來計算的日期：" + "、".join(trend["future"]))
+    left, middle, right = st.columns(3)
+    delta = trend.get("delta")
+    left.metric("4 週變化", "—" if delta is None else f"{int(delta):+d}", arrow_symbol(trend.get("arrow") or ""))
+    middle.metric("4 週均線", format_average(trend.get("average")))
+    right.metric("趨勢燈", trend.get("light") or "未知")
+    if trend.get("reason"):
+        st.caption(trend["reason"])
+    elif trend.get("light") == "黃燈":
+        st.warning(f"黃燈：4 週下跌 {abs(int(delta))} 分，達到 {int(trend.get('yellow_drop') or 3)} 分。這不是淨值回撤黃燈。")
+    elif delta is not None:
+        st.caption(f"4 週變化 {int(delta):+d}，未達下跌 {int(trend.get('yellow_drop') or 3)} 分。樣本不足時燈號是未知，不會當成安全。")
+    block = trend.get("backtest") or {}
+    st.caption(f"門檻回測：{block.get('label') or '不可回測'}。沒有產出績效數字，也沒有調整門檻。")
+    with st.expander("回測還缺什麼，以及尚未啟用的歷史寫入"):
+        for item in block.get("missing") or []:
+            st.caption(item)
+        st.caption("日期 upsert 只是可測試的純函式。沒有雲端排程，打開這一頁或讀取 API 都不會寫入試算表。")
 
 
 def _render_quadrant(industries: list[dict], book: dict | None = None):
@@ -324,7 +369,10 @@ def _render_quadrant(industries: list[dict], book: dict | None = None):
                     symbol=["circle-open" if point["example"] else "circle" for point in subset],
                     line=dict(width=2, color=color),
                 ),
-                hovertext=[_hover(point, exposure.get(point["name"], {}).get("mv", 0.0)) for point in subset],
+                hovertext=[
+                    _hover(point, exposure.get(point["name"], {}).get("mv", 0.0), next((item for item in industries if item.get("name") == point["name"]), {}))
+                    for point in subset
+                ],
                 hoverinfo="text",
             )
         )
@@ -400,10 +448,24 @@ def marker_size(mv: float, exposure: dict, smallest: float = 12.0, largest: floa
     return smallest + (largest - smallest) * (mv / top) ** 0.5
 
 
-def _hover(point: dict, mv: float = 0.0) -> str:
+def _hover(point: dict, mv: float = 0.0, item: dict | None = None) -> str:
     mark = "（示例）" if point["example"] else ""
     tickers = "、".join(point["tickers"])
-    return f"{point['name']}{mark}<br>立場：{point['stance']}<br>週期：{point['cycle']}　方向：{point['direction']}<br>代表股：{tickers}<br>持股市值：NT$ {mv:,.0f}"
+    change = quadrant_change_text(item or {})
+    return (
+        f"{point['name']}{mark}<br>立場：{point['stance']}<br>上期→本期：{change}"
+        f"<br>週期：{point['cycle']}　方向：{point['direction']}<br>代表股：{tickers}<br>持股市值：NT$ {mv:,.0f}"
+    )
+
+
+def _paint_quadrant_change(value: str) -> str:
+    text = str(value or "")
+    if "→" not in text or text == "—":
+        return ""
+    previous, current = text.split("→", 1)
+    if not previous or previous == current:
+        return ""
+    return "background-color: #ef6c00; color: white"
 
 
 def _score_color(score: int) -> str:
