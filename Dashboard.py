@@ -48,6 +48,7 @@ import page1_lights
 import sector_board
 import chart_history
 import calendar_events
+import calendar_actions
 import calendar_page
 
 # ==========================================
@@ -780,7 +781,15 @@ elif page == "第三頁：重大行事曆與會展":
         )
     if any("持倉讀不到" in note for note in calendar_model["notes"]):
         st.warning("持倉讀不到。台股制度事件仍顯示，部位對照這次空白。")
-    calendar_page.render_calendar(st, calendar_model)
+    gemini_key = os.environ.get("GEMINI_API_KEY") or read_secret("", "GEMINI_API_KEY") or ""
+    calendar_page.render_calendar(
+        st,
+        calendar_model,
+        memos=st.session_state.ai_memo_p3,
+        gemini_key=str(gemini_key),
+        complete_analysis=calendar_actions.complete_event_analysis,
+        send=send_to_telegram,
+    )
 
 # ==========================================
 # 第四頁：部位監控與量化風控 (完整風控與 Telegram 推播)

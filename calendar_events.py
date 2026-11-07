@@ -62,7 +62,7 @@ NOT_DONE = (
     {"name": "台積電月營收、合約負債", "why": "使用者後來限定只放財模，不進行事曆。"},
     {"name": "央行理監事會、主計總處 GDP", "why": "沒有固定月規則，也沒有接上官方行程檔，不硬編日期。"},
     {"name": "MSCI 等指數調整", "why": "沒有免費且可核對的官方調整日來源，不加事件型標籤。"},
-    {"name": "財報前自動 AI 解析", "why": "要排程與 Gemini，這批不自動呼叫。"},
+    {"name": "財報前自動 AI 解析", "why": "第三頁保留手動按鈕。載入頁面不會呼叫，也不排程。"},
     {"name": "全球經濟事件全集", "why": "沒有 FMP_API_KEY 時不顯示；有金鑰也只留與利率、美國總經、匯率有關的項目。"},
 )
 
@@ -723,7 +723,33 @@ def build_calendar(rows, watchlist: str, earnings_by_symbol: dict, fmp_items, to
     for event in events:
         event["impacts"] = impacts_for(event, items)
         event.setdefault("updated_at", fetched_at)
+        event["id"] = event_public_id(event)
+        event["fingerprint"] = event_fingerprint(event)
     return {"events": events, "notes": notes, "gaps": gaps, "symbols": symbols, "holdings": holdings, "not_done": list(NOT_DONE)}
+
+
+def event_public_id(event: dict) -> str:
+    """同一列的穩定鍵。不用畫面上的順序，避免換日後按鈕對到別列。"""
+    day = event.get("date")
+    day_text = day.isoformat() if isinstance(day, date) else str(event.get("when_text") or "")
+    parts = (event.get("kind") or "", event.get("symbol") or "", day_text, event.get("title") or "")
+    return "｜".join(str(part) for part in parts)
+
+
+def event_fingerprint(event: dict) -> str:
+    """日期、確定性、來源與部位對照。內容變了，舊解析就不能當成這一列。"""
+    numbers = "｜".join(format_number(event.get(name)) for name in ("estimate", "previous", "actual"))
+    impacts = "\n".join(event.get("impacts") or [])
+    return "\n".join([
+        event.get("id") or event_public_id(event),
+        str(event.get("when_text") or ""),
+        str(event.get("session") or ""),
+        str(event.get("certainty") or ""),
+        str(event.get("source") or ""),
+        str(event.get("note") or ""),
+        numbers,
+        impacts,
+    ])
 
 
 def format_number(value) -> str:

@@ -280,10 +280,17 @@ class PageTests(unittest.TestCase):
         page = text[start:end]
         self.assertNotIn("2026-10-29", page)
         self.assertNotIn("get_m7_earnings", page)
-        self.assertNotIn("send_to_telegram", page)
         self.assertNotIn("generate_content", page)
+        self.assertNotIn("send_to_telegram(", page)
+        self.assertIn("send=send_to_telegram", page)
+        self.assertIn("ai_memo_p3", page)
+        self.assertIn("complete_event_analysis", page)
         self.assertIn("calendar_watchlist", page)
         self.assertIn("load_calendar_model", page)
+        actions = (ROOT / "calendar_page.py").read_text(encoding="utf-8")
+        self.assertIn("🧠 AI 解析", actions)
+        self.assertIn("📲 推播TG", actions)
+        self.assertIn("📤 推播此事件建議到 TG", actions)
 
     def test_apptest_shows_gap_and_unknown_settlement(self):
         try:
@@ -345,6 +352,213 @@ class DataFrameTests(unittest.TestCase):
         held, notes = cal.holdings_from_positions(frame)
         self.assertEqual(held, [])
         self.assertEqual(notes, [])
+
+
+def _two_earnings():
+    return cal.build_calendar(
+        [
+            _row(種類="美股", 標的="AAPL", 名稱="蘋果"),
+            _row(標的="2330", 名稱="台積電"),
+        ],
+        "",
+        {
+            "AAPL": {"Earnings Date": date(2026, 11, 12)},
+            "2330.TW": {"Earnings Date": date(2026, 11, 13)},
+        },
+        [],
+        date(2026, 11, 7),
+        FETCHED,
+    )
+
+
+class ActionTests(unittest.TestCase):
+    def test_missing_key_and_incomplete_event_do_not_call(self):
+        from unittest.mock import MagicMock, patch
+
+        import calendar_actions
+
+        event = {"title": "財報 AAPL", "when_text": "2026-11-12", "fingerprint": "a"}
+        self.assertIn("GEMINI_API_KEY", calendar_actions.analysis_block_reason(event, ""))
+        self.assertIn("缺漏", calendar_actions.analysis_block_reason({"title": "只有標題"}, "key"))
+        self.assertIsNone(calendar_actions.event_notice({"title": "", "when_text": "2026-11-12"}))
+        with patch("google.genai.Client") as ctor, patch("requests.post") as post:
+            with self.assertRaises(RuntimeError):
+                calendar_actions.complete_event_analysis("提示", "")
+            ctor.assert_not_called()
+            post.assert_not_called()
+            fake = MagicMock()
+            fake.models.generate_content.return_value.text = "   "
+            ctor.return_value = fake
+            with self.assertRaises(RuntimeError) as caught:
+                calendar_actions.complete_event_analysis("提示", "fake-key")
+            self.assertIn("解析未完成", str(caught.exception))
+            post.assert_not_called()
+
+    def test_mock_analysis_uses_the_same_model_and_does_not_post(self):
+        from unittest.mock import MagicMock, patch
+
+        import calendar_actions
+
+        fake = MagicMock()
+        fake.models.generate_content.return_value.text = " 只談這一則 "
+        with patch("google.genai.Client", return_value=fake), patch("requests.post") as post:
+            text = calendar_actions.complete_event_analysis("提示", "fake-key")
+        self.assertEqual(text, "只談這一則")
+        fake.models.generate_content.assert_called_once_with(model="gemini-3.8-flash", contents="提示")
+        post.assert_not_called()
+
+    def test_stale_memo_cannot_be_sent_as_another_event(self):
+        import calendar_actions
+
+        model = _two_earnings()
+        aapl = next(event for event in model["events"] if event["symbol"] == "AAPL")
+        tw = next(event for event in model["events"] if event["symbol"] == "2330.TW")
+        self.assertNotEqual(aapl["id"], tw["id"])
+        self.assertNotEqual(aapl["fingerprint"], tw["fingerprint"])
+        memo = {"text": "只談蘋果", "fingerprint": aapl["fingerprint"]}
+        self.assertEqual(calendar_actions.memo_status(memo, aapl), "ready")
+        self.assertIsNone(calendar_actions.advice_notice(tw, memo))
+        changed = dict(aapl)
+        changed["impacts"] = ["直接標的換了"]
+        changed["fingerprint"] = cal.event_fingerprint(changed)
+        self.assertEqual(calendar_actions.memo_status(memo, changed), "stale")
+        self.assertIsNone(calendar_actions.advice_notice(changed, memo))
+        title, body = calendar_actions.event_notice(tw)
+        self.assertIn("財報 2330.TW", title)
+        self.assertIn("台積電", body)
+        self.assertNotIn("只談蘋果", body)
+        self.assertNotIn("AAPL", body)
+        prompt = calendar_actions.analysis_prompt(aapl)
+        self.assertIn("財報 AAPL", prompt)
+        self.assertIn("估計", prompt)
+        self.assertIn("—", prompt)
+        self.assertNotIn("2330.TW", prompt)
+
+    def test_apptest_buttons_are_manual(self):
+        try:
+            from streamlit.testing.v1 import AppTest
+        except ImportError:
+            self.skipTest("streamlit.testing.v1 not available")
+        from unittest.mock import patch
+
+        import calendar_page
+
+        model = _two_earnings()
+        aapl = next(event for event in model["events"] if event["symbol"] == "AAPL")
+        tw = next(event for event in model["events"] if event["symbol"] == "2330.TW")
+        script = """
+import streamlit as st
+from datetime import date, datetime
+import calendar_events as cal
+import calendar_page
+
+if "log" not in st.session_state:
+    st.session_state.log = []
+    st.session_state.memos = {}
+    st.session_state.gkey = ""
+    st.session_state.mode = "ok"
+
+def complete(prompt, api_key):
+    st.session_state.log.append(("ai", api_key, prompt))
+    if st.session_state.mode == "fail":
+        raise RuntimeError("boom")
+    if st.session_state.mode == "empty":
+        return "  "
+    return "建議只談這一則"
+
+def send(title, text):
+    st.session_state.log.append(("tg", title, text))
+
+model = cal.build_calendar(
+    [
+        {"帳戶": "甲", "種類": "美股", "標的": "AAPL", "名稱": "蘋果"},
+        {"帳戶": "甲", "種類": "台股", "標的": "2330", "名稱": "台積電"},
+    ],
+    "",
+    {
+        "AAPL": {"Earnings Date": date(2026, 11, 12)},
+        "2330.TW": {"Earnings Date": date(2026, 11, 13)},
+    },
+    [],
+    date(2026, 11, 7),
+    datetime(2026, 11, 7, 9, 0, tzinfo=cal.TAIPEI),
+)
+calendar_page.render_calendar(
+    st,
+    model,
+    memos=st.session_state.memos,
+    gemini_key=st.session_state.gkey,
+    complete_analysis=complete,
+    send=send,
+)
+"""
+
+        def blocked(*args, **kwargs):
+            raise AssertionError("不該連網")
+
+        with patch("requests.post", side_effect=blocked), patch("google.genai.Client", side_effect=blocked):
+            at = AppTest.from_string(script, default_timeout=60).run()
+            self.assertFalse(at.exception)
+            labels = [button.label for button in at.button]
+            self.assertIn("🧠 AI 解析", labels)
+            self.assertIn("📲 推播TG", labels)
+            self.assertNotIn("📤 推播此事件建議到 TG", labels)
+            self.assertEqual(at.session_state["log"], [])
+
+            at = at.button(key=calendar_page.widget_key("ai", aapl["id"])).click().run()
+            self.assertFalse(at.exception)
+            warnings = "\n".join(str(item.value) for item in at.warning)
+            self.assertIn("沒有 GEMINI_API_KEY", warnings)
+            self.assertEqual(at.session_state["log"], [])
+
+            at.session_state["gkey"] = "fake-key"
+            at.session_state["mode"] = "empty"
+            at = at.button(key=calendar_page.widget_key("ai", aapl["id"])).click().run()
+            self.assertFalse(at.exception)
+            warnings = "\n".join(str(item.value) for item in at.warning)
+            self.assertIn("解析未完成", warnings)
+            self.assertNotIn(aapl["id"], at.session_state["memos"])
+
+            at.session_state["mode"] = "fail"
+            at = at.button(key=calendar_page.widget_key("ai", aapl["id"])).click().run()
+            self.assertFalse(at.exception)
+            errors = "\n".join(str(item.value) for item in at.error)
+            self.assertIn("生成失敗", errors)
+            self.assertNotIn(aapl["id"], at.session_state["memos"])
+
+            at.session_state["mode"] = "ok"
+            at = at.button(key=calendar_page.widget_key("ai", aapl["id"])).click().run()
+            self.assertFalse(at.exception)
+            self.assertEqual(at.session_state["memos"][aapl["id"]]["text"], "建議只談這一則")
+            self.assertEqual(at.session_state["log"][-1][0], "ai")
+            self.assertIn("財報 AAPL", at.session_state["log"][-1][2])
+            self.assertNotIn("2330.TW", at.session_state["log"][-1][2])
+            self.assertIn("📤 推播此事件建議到 TG", [button.label for button in at.button])
+
+            at = at.button(key=calendar_page.widget_key("tg", tw["id"])).click().run()
+            self.assertFalse(at.exception)
+            kind, title, body = at.session_state["log"][-1]
+            self.assertEqual(kind, "tg")
+            self.assertIn("財報 2330.TW", title)
+            self.assertIn("台積電", body)
+            self.assertNotIn("建議只談這一則", body)
+            self.assertNotIn("AAPL", title)
+
+            at.session_state["memos"][aapl["id"]]["fingerprint"] = "別列舊解析"
+            at = at.run()
+            self.assertFalse(at.exception)
+            warnings = "\n".join(str(item.value) for item in at.warning)
+            self.assertIn("較早的事件內容", warnings)
+            self.assertNotIn(calendar_page.widget_key("advice", aapl["id"]), [button.key for button in at.button])
+
+            at = at.button(key=calendar_page.widget_key("ai", aapl["id"])).click().run()
+            at = at.button(key=calendar_page.widget_key("advice", aapl["id"])).click().run()
+            self.assertFalse(at.exception)
+            kind, title, body = at.session_state["log"][-1]
+            self.assertEqual(kind, "tg")
+            self.assertIn("行事曆戰術建議：財報 AAPL", title)
+            self.assertEqual(body, "建議只談這一則")
+            self.assertNotIn("2330", title)
 
 
 if __name__ == "__main__":
