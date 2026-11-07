@@ -5,7 +5,8 @@
 
 現金用「融資殘值」＝淨值 − 股票／ETF／選擇權市值，不用 API 的現金水位。
 期貨只以名目計曝險，損益進出殘值；槓桿 ETF 的淨值用市值、曝險再乘倍數；
-選擇權用 Delta。詳見 `cash_basis_text`。
+選擇權用 Delta。可轉債／CBAS 的市值進淨值，有效曝險是 Delta × 轉換價值，
+情境損益再用標的 Beta；不把 CB 與 CBAS 對沖，也不做跨市場對沖。詳見 `cash_basis_text`。
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from cb_holdings import is_convertible_row
 from portfolio_risk import futures_multiplier, is_option_row, is_taiex_future
 
 SEED = 20261103
@@ -225,6 +227,13 @@ class Book:
     opt_tw_delta: float = 0.0
     opt_us_mv: float = 0.0
     opt_us_delta: float = 0.0
+    cb_tw_mv: float = 0.0
+    cb_tw_equity: float = 0.0
+    cb_tw_beta_exp: float = 0.0
+    cb_us_mv: float = 0.0
+    cb_us_equity: float = 0.0
+    cb_us_beta_exp: float = 0.0
+    yuanta_cb_mv: float = 0.0
     tw_hedge_base: float = 0.0
     gross_exposure: float = 0.0
     leverage: float = 0.0
@@ -380,21 +389,21 @@ def _unit(key: str, lev: float) -> float:
     return 1.0 if MODE_OF[key] == "futures" else float(lev)
 
 
-def _gross(amounts: dict, levs: dict, opt_tw_delta: float, opt_us_delta: float) -> float:
-    total = abs(float(opt_tw_delta)) + abs(float(opt_us_delta))
+def _gross(amounts: dict, levs: dict, opt_tw_delta: float, opt_us_delta: float, cb_tw_equity: float = 0.0, cb_us_equity: float = 0.0) -> float:
+    total = abs(float(opt_tw_delta)) + abs(float(opt_us_delta)) + abs(float(cb_tw_equity)) + abs(float(cb_us_equity))
     for key, amount in amounts.items():
         total += abs(float(amount)) * _unit(key, levs.get(key, 1.0))
     return float(total)
 
 
-def _asset_mv(amounts: dict, opt_tw_mv: float, opt_us_mv: float) -> float:
-    total = float(opt_tw_mv) + float(opt_us_mv)
+def _asset_mv(amounts: dict, opt_tw_mv: float, opt_us_mv: float, cb_tw_mv: float = 0.0, cb_us_mv: float = 0.0) -> float:
+    total = float(opt_tw_mv) + float(opt_us_mv) + float(cb_tw_mv) + float(cb_us_mv)
     for key in _ASSET_KEYS:
         total += float(amounts.get(key, 0.0))
     return total
 
 
-def _tw_hedge_base(amounts: dict, levs: dict, betas: dict, opt_tw_delta: float) -> float:
+def _tw_hedge_base(amounts: dict, levs: dict, betas: dict, opt_tw_delta: float, cb_tw_beta_exp: float = 0.0) -> float:
     base = 0.0
     for key in ("fut_tw", "fut_other"):
         if amounts.get(key, 0.0) > 0:
@@ -407,20 +416,22 @@ def _tw_hedge_base(amounts: dict, levs: dict, betas: dict, opt_tw_delta: float) 
         base += stock * max(float(betas.get("tw_stock", 1.0)), 0.0)
     if opt_tw_delta > 0:
         base += float(opt_tw_delta)
+    if cb_tw_beta_exp > 0:
+        base += float(cb_tw_beta_exp)
     return float(base)
 
 
 def finalize_book(book: Book) -> Book:
-    book.gross_exposure = _gross(book.amounts, book.levs, book.opt_tw_delta, book.opt_us_delta)
-    assets = _asset_mv(book.amounts, book.opt_tw_mv, book.opt_us_mv)
+    book.gross_exposure = _gross(book.amounts, book.levs, book.opt_tw_delta, book.opt_us_delta, book.cb_tw_equity, book.cb_us_equity)
+    assets = _asset_mv(book.amounts, book.opt_tw_mv, book.opt_us_mv, book.cb_tw_mv, book.cb_us_mv)
     # 呼叫端若已給定 nav（估價結果），殘值負責把恆等式補齊。
     if book.nav > 0 and abs((book.cash_residual + assets) - book.nav) > 1.0:
         book.cash_residual = float(book.nav) - assets
     else:
         book.nav = float(book.cash_residual) + assets
     book.leverage = (book.gross_exposure / book.nav) if book.nav > 0 else 0.0
-    book.tw_hedge_base = _tw_hedge_base(book.amounts, book.levs, book.betas, book.opt_tw_delta)
-    expected = book.non_futures_cash - book.debt + book.futures_equity - book.yuanta_option_mv
+    book.tw_hedge_base = _tw_hedge_base(book.amounts, book.levs, book.betas, book.opt_tw_delta, book.cb_tw_beta_exp)
+    expected = book.non_futures_cash - book.debt + book.futures_equity - book.yuanta_option_mv - book.yuanta_cb_mv
     book.cash_identity_gap = float(book.cash_residual - expected)
     return book
 
@@ -436,6 +447,13 @@ def make_book(
     opt_tw_delta: float = 0.0,
     opt_us_mv: float = 0.0,
     opt_us_delta: float = 0.0,
+    cb_tw_mv: float = 0.0,
+    cb_tw_equity: float = 0.0,
+    cb_tw_beta_exp: float = 0.0,
+    cb_us_mv: float = 0.0,
+    cb_us_equity: float = 0.0,
+    cb_us_beta_exp: float = 0.0,
+    yuanta_cb_mv: float = 0.0,
     reported_cash: float = 0.0,
     debt: float = 0.0,
     futures_equity: float = 0.0,
@@ -470,6 +488,13 @@ def make_book(
         opt_tw_delta=float(opt_tw_delta),
         opt_us_mv=float(opt_us_mv),
         opt_us_delta=float(opt_us_delta),
+        cb_tw_mv=float(cb_tw_mv),
+        cb_tw_equity=float(cb_tw_equity),
+        cb_tw_beta_exp=float(cb_tw_beta_exp),
+        cb_us_mv=float(cb_us_mv),
+        cb_us_equity=float(cb_us_equity),
+        cb_us_beta_exp=float(cb_us_beta_exp),
+        yuanta_cb_mv=float(yuanta_cb_mv),
         notes=tuple(notes),
     )
     if nav is None:
@@ -502,6 +527,11 @@ def cash_basis_text(book: Book) -> str:
             "所以報表現金可以是正的，同時融資殘值是負的：兩邊不是同一個欄位。"
         ),
     ]
+    if abs(getattr(book, "cb_tw_mv", 0.0)) + abs(getattr(book, "cb_us_mv", 0.0)) >= 1:
+        lines.append(
+            "可轉債／CBAS 的市值在淨值裡，有效曝險是 Delta × 轉換價值。"
+            "情境損益用標的 Beta。不把 CB 和 CBAS 互相抵銷，也不做跨市場對沖。"
+        )
     if abs(book.cash_identity_gap) >= 1:
         lines.append(
             f"殘值與「非期貨現金 − 融資 ＋ 期貨權益 − 元大選擇權市值」差 NT$ {book.cash_identity_gap:,.0f}。"
@@ -557,7 +587,10 @@ def build_book(valued: pd.DataFrame, metrics: dict) -> Book:
     beta_weight = {key: 0.0 for key in KEYS}
     beta_sum = {key: 0.0 for key in KEYS}
     opt_tw_mv = opt_us_mv = opt_tw_delta = opt_us_delta = 0.0
+    cb_tw_mv = cb_tw_equity = cb_tw_beta_exp = 0.0
+    cb_us_mv = cb_us_equity = cb_us_beta_exp = 0.0
     yuanta_option_mv = 0.0
+    yuanta_cb_mv = 0.0
     asset_mv = 0.0
     notes: list[str] = []
     mixed_lev: dict[str, set] = {key: set() for key in KEYS}
@@ -578,11 +611,34 @@ def build_book(valued: pd.DataFrame, metrics: dict) -> Book:
             beta_exp = _row_float(row, "Beta曝險(台幣)")
             display_mv = _row_float(row, "即時市值(台幣)")
             opt = is_option_row(row)
-            fut = ("期" in kind) and not opt
+            convertible = is_convertible_row(row)
+            fut = ("期" in kind) and not opt and not convertible
             yuanta = "元大期貨" in account
             mult = _row_float(row, "合約乘數", 0.0)
             if mult <= 0:
                 mult = futures_multiplier(ticker) if fut or is_taiex_future(ticker) else _option_multiplier(row, kind)
+
+            if convertible:
+                us = "美" in kind
+                mv = abs(display_mv)
+                asset_mv += mv
+                gross_exp = abs(_row_float(row, "實質曝險(台幣)"))
+                if beta_exp < 0 or (beta_exp == 0 and qty < 0):
+                    equity_signed = -gross_exp
+                else:
+                    equity_signed = gross_exp
+                if us:
+                    cb_us_mv += mv
+                    cb_us_equity += equity_signed
+                    cb_us_beta_exp += beta_exp
+                else:
+                    cb_tw_mv += mv
+                    cb_tw_equity += equity_signed
+                    cb_tw_beta_exp += beta_exp
+                if yuanta:
+                    yuanta_cb_mv += mv
+                notes.append("可轉債／CBAS 市值計入淨值，曝險用 Delta × 轉換價值，不另做跨市場對沖。")
+                continue
 
             if opt:
                 if yuanta:
@@ -652,6 +708,13 @@ def build_book(valued: pd.DataFrame, metrics: dict) -> Book:
         opt_tw_delta=opt_tw_delta,
         opt_us_mv=opt_us_mv,
         opt_us_delta=opt_us_delta,
+        cb_tw_mv=cb_tw_mv,
+        cb_tw_equity=cb_tw_equity,
+        cb_tw_beta_exp=cb_tw_beta_exp,
+        cb_us_mv=cb_us_mv,
+        cb_us_equity=cb_us_equity,
+        cb_us_beta_exp=cb_us_beta_exp,
+        yuanta_cb_mv=yuanta_cb_mv,
         reported_cash=reported,
         debt=float(metrics.get("debt") or 0.0),
         futures_equity=float(metrics.get("futures_equity") or 0.0),
@@ -714,7 +777,7 @@ def apply_delever(book: Book, strategy: Strategy) -> tuple[Book, dict]:
         return book, budgets
     amounts = {key: float(book.amounts.get(key, 0.0)) for key in KEYS}
     cash = float(book.cash_residual)
-    gross0 = _gross(amounts, book.levs, book.opt_tw_delta, book.opt_us_delta)
+    gross0 = _gross(amounts, book.levs, book.opt_tw_delta, book.opt_us_delta, book.cb_tw_equity, book.cb_us_equity)
     gap = max(0.0, gross0 - float(strategy.target_leverage) * float(book.nav))
     for group in strategy.reduce_priority:
         if gap <= 1.0:
@@ -749,6 +812,13 @@ def apply_delever(book: Book, strategy: Strategy) -> tuple[Book, dict]:
         opt_tw_delta=book.opt_tw_delta,
         opt_us_mv=book.opt_us_mv,
         opt_us_delta=book.opt_us_delta,
+        cb_tw_mv=book.cb_tw_mv,
+        cb_tw_equity=book.cb_tw_equity,
+        cb_tw_beta_exp=book.cb_tw_beta_exp,
+        cb_us_mv=book.cb_us_mv,
+        cb_us_equity=book.cb_us_equity,
+        cb_us_beta_exp=book.cb_us_beta_exp,
+        yuanta_cb_mv=book.yuanta_cb_mv,
         reported_cash=book.reported_cash,
         debt=book.debt,
         futures_equity=book.futures_equity,
@@ -818,6 +888,12 @@ class _PathState:
         self.opt_tw_delta = np.full(n, book.opt_tw_delta)
         self.opt_us_mv = np.full(n, book.opt_us_mv)
         self.opt_us_delta = np.full(n, book.opt_us_delta)
+        self.cb_tw_mv = np.full(n, book.cb_tw_mv)
+        self.cb_tw_equity = np.full(n, book.cb_tw_equity)
+        self.cb_tw_beta_exp = np.full(n, book.cb_tw_beta_exp)
+        self.cb_us_mv = np.full(n, book.cb_us_mv)
+        self.cb_us_equity = np.full(n, book.cb_us_equity)
+        self.cb_us_beta_exp = np.full(n, book.cb_us_beta_exp)
         self.tw = np.ones(n)
         self.sx = np.ones(n)
         self.hist_tw = np.tile(_as_prehistory(pre_tw), (n, 1))
@@ -833,7 +909,7 @@ class _PathState:
         hist[:, -1] = price
 
     def gross(self) -> np.ndarray:
-        total = np.abs(self.opt_tw_delta) + np.abs(self.opt_us_delta)
+        total = np.abs(self.opt_tw_delta) + np.abs(self.opt_us_delta) + np.abs(self.cb_tw_equity) + np.abs(self.cb_us_equity)
         for idx, key in enumerate(KEYS):
             unit = _unit(key, 1.0)
             # lev from outside; filled by caller via unit_of
@@ -842,14 +918,14 @@ class _PathState:
         return total
 
     def net(self, hedge_delta_notional) -> np.ndarray:
-        total = self.opt_tw_delta + self.opt_us_delta + hedge_delta_notional
+        total = self.opt_tw_delta + self.opt_us_delta + self.cb_tw_equity + self.cb_us_equity + hedge_delta_notional
         for idx, key in enumerate(KEYS):
             total = total + self.core[key] * self._units[key]
             total = total + self.batch[:, idx, :].sum(axis=1) * self._units[key]
         return total
 
     def asset_value(self) -> np.ndarray:
-        total = self.opt_tw_mv + self.opt_us_mv
+        total = self.opt_tw_mv + self.opt_us_mv + self.cb_tw_mv + self.cb_us_mv
         for idx, key in enumerate(KEYS):
             if MODE_OF[key] == "futures":
                 continue
@@ -937,6 +1013,12 @@ def _run_paths(book: Book, strategy: Strategy, rt, rs, rm, market: MarketCalib) 
         state.opt_tw_delta = state.opt_tw_delta * (1.0 + r_tw)
         state.opt_us_mv = state.opt_us_mv + state.opt_us_delta * r_sox
         state.opt_us_delta = state.opt_us_delta * (1.0 + r_sox)
+        state.cb_tw_mv = state.cb_tw_mv + state.cb_tw_beta_exp * r_tw
+        state.cb_tw_beta_exp = state.cb_tw_beta_exp * (1.0 + r_tw)
+        state.cb_tw_equity = state.cb_tw_equity * (1.0 + r_tw)
+        state.cb_us_mv = state.cb_us_mv + state.cb_us_beta_exp * r_sox
+        state.cb_us_beta_exp = state.cb_us_beta_exp * (1.0 + r_sox)
+        state.cb_us_equity = state.cb_us_equity * (1.0 + r_sox)
 
         mtm, hedge_delta = hedge_quote(state.tw, n_days - t - 1)
         if strategy.hold:
@@ -1314,5 +1396,9 @@ def sleeve_rows(book: Book) -> list[dict]:
         rows.append({"袖套": SLEEVE_LABELS["opt_tw"], "市值或名目": book.opt_tw_mv, "有效曝險": book.opt_tw_delta, "倍數": 1.0})
     if abs(book.opt_us_delta) >= 1 or abs(book.opt_us_mv) >= 1:
         rows.append({"袖套": SLEEVE_LABELS["opt_us"], "市值或名目": book.opt_us_mv, "有效曝險": book.opt_us_delta, "倍數": 1.0})
+    if abs(book.cb_tw_mv) >= 1 or abs(book.cb_tw_equity) >= 1:
+        rows.append({"袖套": "可轉債／CBAS", "市值或名目": book.cb_tw_mv, "有效曝險": book.cb_tw_equity, "倍數": 1.0})
+    if abs(book.cb_us_mv) >= 1 or abs(book.cb_us_equity) >= 1:
+        rows.append({"袖套": "美股可轉債／CBAS", "市值或名目": book.cb_us_mv, "有效曝險": book.cb_us_equity, "倍數": 1.0})
     rows.append({"袖套": "融資殘值（模擬現金）", "市值或名目": book.cash_residual, "有效曝險": 0.0, "倍數": 0.0})
     return rows

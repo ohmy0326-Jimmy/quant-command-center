@@ -6,5 +6,6 @@ Streamlit 戰情室（`Dashboard.py`，六頁）與另外部署的 API（`api/`�
 - 每日淨值快照 `POST /v1/nav-snapshot`、環境變數 `QCC_SNAPSHOT_KEY`、`Cash_Flows` 分頁格式：[docs/nav_snapshot.md](docs/nav_snapshot.md)
 - 元大期貨帳本：[docs/futures_ledger.md](docs/futures_ledger.md)
 - 下單輔助系統：[docs/order_assistant_v2.md](docs/order_assistant_v2.md)
+- 可轉債／CBAS 持倉欄位：[docs/cb_holdings.md](docs/cb_holdings.md)
 
 測試：`python -m pytest -q`

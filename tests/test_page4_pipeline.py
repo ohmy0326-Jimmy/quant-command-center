@@ -79,7 +79,7 @@ class QuotePairTests(unittest.TestCase):
         with open(os.path.join(ROOT, "Dashboard.py"), encoding="utf-8") as handle:
             dashboard = handle.read()
         page4 = dashboard.split('elif page == "第四頁：部位監控與量化風控":', 1)[1].split("第五頁", 1)[0]
-        self.assertIn("cached_quote_bundle(_ticker_kind_pairs(df))", page4)
+        self.assertIn("cached_quote_bundle(_ticker_kind_pairs(df), convertible_quote_context(df))", page4)
         self.assertNotIn('cached_quote_bundle(tuple(dict.fromkeys(df["標的"]', page4)
         self.assertIn("value_positions_safely(", page4)
         bundle = dashboard.split("def cached_quote_bundle", 1)[1].split("\ndef ", 1)[0]

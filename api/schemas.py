@@ -37,6 +37,12 @@ class PositionResponse(BaseModel):
     effective_beta: float | None = Field(default=None, description="1.3.0 新增。套在市值上的 Beta＝leverage × beta（槓桿 ETF＝槓桿 × 標的 Beta）。")
     beta_exposure: float | None = Field(default=None, description="1.3.0 新增。Beta 曝險，台幣＝notional_exposure × beta＝market_value × effective_beta（現股）。槓桿只乘一次。空單為負。")
     beta_source: str = Field(default="", description="1.3.0 新增。Beta 來源說明。")
+    product: str = Field(default="", description="1.5.0 新增。可轉債為 cb、可轉債資產交換為 cbas，其餘空字串。")
+    delta: float | None = Field(default=None, description="1.5.0 新增。可轉債／CBAS 的股權 Delta（轉換股數的比例）。試算表有填就用試算表；可轉債否則用轉換價值／市價或債底估算。沒有資料時為 null。")
+    delta_source: str = Field(default="", description="1.5.0 新增。Delta 來源：試算表、估算(轉換價值/市價)、估算(債底)、估算(Black-Scholes)。")
+    conversion_value: float | None = Field(default=None, description="1.5.0 新增。整筆轉換價值，台幣，＝股價 × (面額／轉換價格) × 張數。張數為負時為負。算不出來是 null。")
+    conversion_value_points: float | None = Field(default=None, description="1.5.0 新增。轉換價值的百元報價＝股價／轉換價格 × 100，跟可轉債報價同一單位，不乘張數。")
+    parity_premium_pct: float | None = Field(default=None, description="1.5.0 新增。可轉債轉換溢價率（百分點）＝百元報價／轉換價值百元 − 1，再乘 100。CBAS 或資料不足時為 null。")
 
 
 class BetaLeverageLegResponse(BaseModel):

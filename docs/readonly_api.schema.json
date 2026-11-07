@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.4.0",
+  "schema_version": "1.5.0",
   "header": "X-API-Key",
   "models": {
     "health": {
@@ -7,7 +7,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.4.0"
+            "1.5.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -265,6 +265,70 @@
               "description": "1.3.0 新增。Beta 來源說明。",
               "title": "Beta Source",
               "type": "string"
+            },
+            "product": {
+              "default": "",
+              "description": "1.5.0 新增。可轉債為 cb、可轉債資產交換為 cbas，其餘空字串。",
+              "title": "Product",
+              "type": "string"
+            },
+            "delta": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "1.5.0 新增。可轉債／CBAS 的股權 Delta（轉換股數的比例）。試算表有填就用試算表；可轉債否則用轉換價值／市價或債底估算。沒有資料時為 null。",
+              "title": "Delta"
+            },
+            "delta_source": {
+              "default": "",
+              "description": "1.5.0 新增。Delta 來源：試算表、估算(轉換價值/市價)、估算(債底)、估算(Black-Scholes)。",
+              "title": "Delta Source",
+              "type": "string"
+            },
+            "conversion_value": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "1.5.0 新增。整筆轉換價值，台幣，＝股價 × (面額／轉換價格) × 張數。張數為負時為負。算不出來是 null。",
+              "title": "Conversion Value"
+            },
+            "conversion_value_points": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "1.5.0 新增。轉換價值的百元報價＝股價／轉換價格 × 100，跟可轉債報價同一單位，不乘張數。",
+              "title": "Conversion Value Points"
+            },
+            "parity_premium_pct": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "1.5.0 新增。可轉債轉換溢價率（百分點）＝百元報價／轉換價值百元 − 1，再乘 100。CBAS 或資料不足時為 null。",
+              "title": "Parity Premium Pct"
             }
           },
           "required": [
@@ -373,7 +437,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.4.0"
+            "1.5.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -518,7 +582,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.4.0"
+            "1.5.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -565,7 +629,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.4.0"
+            "1.5.0"
           ],
           "title": "Schema Version",
           "type": "string"

@@ -12,7 +12,9 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-SCHEMA_VERSION = "1.4.0"
+from cb_holdings import product_kind
+
+SCHEMA_VERSION = "1.5.0"
 TAIPEI = ZoneInfo("Asia/Taipei")
 
 
@@ -91,6 +93,12 @@ def position_records(positions: pd.DataFrame) -> list[dict]:
                 "effective_beta": _col(row, positions, "有效Beta"),
                 "beta_exposure": _col(row, positions, "Beta曝險(台幣)"),
                 "beta_source": _name(row["Beta來源"]) if "Beta來源" in positions.columns else "",
+                "product": product_kind(row.get("種類")) or "",
+                "delta": _col(row, positions, "Delta"),
+                "delta_source": _name(row["Delta來源"]) if "Delta來源" in positions.columns else "",
+                "conversion_value": _col(row, positions, "轉換價值(台幣)"),
+                "conversion_value_points": _col(row, positions, "轉換價值(百元)"),
+                "parity_premium_pct": _col(row, positions, "轉換溢價(%)"),
             }
         )
     return rows

@@ -18,6 +18,7 @@ from app_secrets import read_secret
 from macro_cycle_ui import render_macro_cycle_page
 from order_assistant_ui import render_order_assistant
 from beta_rules import BETA_FALLBACK_STATE_KEY
+from cb_holdings import convertible_quote_context, is_convertible_row
 from risk_performance import render_risk_performance_card
 from portfolio_risk import (
     attach_quotes,
@@ -155,11 +156,17 @@ def _ticker_kind_pairs(frame: pd.DataFrame) -> tuple:
 
 
 @st.cache_data(ttl=60, show_spinner=False)
-def cached_quote_bundle(pairs: tuple):
-    """同一批持倉的報價與 Beta。60 秒內改數字不會重抓。"""
+def cached_quote_bundle(pairs: tuple, cb_context: tuple = ()):
+    """同一批持倉的報價與 Beta。60 秒內改數字不會重抓。
+
+    cb_context 是可轉債／CBAS 的 (標的, 標的股票)。債本身沒有 Yahoo 報價，這裡只為了抓標的股價。
+    """
     twii = fetch_twii()
     pairs = coerce_ticker_kind_pairs(pairs)
     frame = pd.DataFrame([{"標的": t, "種類": k} for t, k in pairs]) if pairs else pd.DataFrame(columns=["標的", "種類"])
+    if cb_context:
+        extra = pd.DataFrame(list(cb_context), columns=["標的", "標的代號"]).drop_duplicates(subset=["標的"], keep="first")
+        frame = frame.merge(extra, on="標的", how="left")
     extras = {}
     prices, betas, sectors = populate_market_fields_parallel(frame, market_beta_and_sector, twii, extras=extras)
     return {"prices": prices, "betas": betas, "sectors": sectors, "twii": float(twii), "extras": extras}
@@ -171,7 +178,7 @@ def load_book_for_page5():
     frame = normalize_positions(quant)
     usdtwd = cached_usdtwd()
     if not frame.empty and "標的" in frame.columns:
-        bundle = cached_quote_bundle(_ticker_kind_pairs(frame))
+        bundle = cached_quote_bundle(_ticker_kind_pairs(frame), convertible_quote_context(frame))
         frame = attach_quotes(
             frame,
             bundle["prices"],
@@ -785,7 +792,7 @@ elif page == "第四頁：部位監控與量化風控":
             df = normalize_positions(quant_data)
             bundle = {}
             if not df.empty and "標的" in df.columns:
-                bundle = cached_quote_bundle(_ticker_kind_pairs(df))
+                bundle = cached_quote_bundle(_ticker_kind_pairs(df), convertible_quote_context(df))
             df, account_data, metrics, row_warnings = value_positions_safely(
                 df, account_data, usdtwd_rate,
                 bundle.get("prices"), bundle.get("betas"), bundle.get("sectors"), extras=bundle.get("extras"),
@@ -821,6 +828,10 @@ elif page == "第四頁：部位監控與量化風控":
                     st.info(f"ℹ️ 已自動過期排除之選擇權標的：{', '.join(metrics['expired_removed'])}")
                 if metrics.get("options_missing_delta"):
                     st.warning(f"⚠️ 以下選擇權缺少 Delta 數值，Beta 曝險以 0 計算：{', '.join(metrics['options_missing_delta'])}")
+                if metrics.get("cb_missing_terms"):
+                    st.warning(f"⚠️ 以下可轉債／CBAS 缺少轉換價格或標的股價，沒有轉換價值，名目曝險以 0 計算：{', '.join(metrics['cb_missing_terms'])}")
+                if metrics.get("cb_missing_delta"):
+                    st.warning(f"⚠️ 以下可轉債／CBAS 缺少 Delta，名目曝險以 0 計算：{', '.join(metrics['cb_missing_delta'])}")
                 st.markdown("---")
 
                 st.subheader("🏢 各精細產業別持股曝險與資金佔比分佈")
@@ -895,6 +906,9 @@ elif page == "第四頁：部位監控與量化風控":
                 c_b.metric("總淨未實現損益 (TWD)", f"NT$ {total_pnl_twd:,.0f}", f"{total_roi_pct:+.2f}%")
                 
                 base_cols = ['帳戶', '產業別', '種類', '標的', '名稱', 'Beta值', '有效Beta', 'Beta來源', '真實風險權重 (%)', '標的槓桿', '持有數量', '平均成本', '即時報價']
+                has_convertible = "種類" in df.columns and any(is_convertible_row(row) for _, row in df.iterrows())
+                if has_convertible:
+                    base_cols.extend(['Delta', '轉換價值(百元)', '轉換溢價(%)'])
                 if '報價來源' in df.columns:
                     base_cols.append('報價來源')
                 base_cols.extend(['顯示_投入總金額(原幣)', '顯示_即時市值(原幣)', '實質曝險(台幣)', '曝險Beta', 'Beta曝險(台幣)', '淨未實現損益(原幣)', '報酬率 (%)', '最大虧損比例'])
@@ -903,16 +917,30 @@ elif page == "第四頁：部位監控與量化風控":
                 display_df.rename(columns={'顯示_投入總金額(原幣)': '投入總金額', '顯示_即時市值(原幣)': '即時市值(原幣)', '淨未實現損益(原幣)': '淨損益(原幣)', '實質曝險(台幣)': '名目曝險(台幣)'}, inplace=True)
                 display_df['最大虧損比例'] = display_df['最大虧損比例'].apply(lambda x: f"{x:.0f}%" if x > -100 else "未設定")
 
+                def _blank_num(pattern: str):
+                    def _fmt(value):
+                        try:
+                            number = float(value)
+                        except (TypeError, ValueError):
+                            return "—"
+                        if number != number:
+                            return "—"
+                        return pattern.format(number)
+                    return _fmt
+
                 st.dataframe(display_df.style.format({
                     "Beta值": "{:.2f}", "有效Beta": "{:.2f}", "真實風險權重 (%)": "{:.2f}%", "標的槓桿": "{:.1f}x", "持有數量": "{:,.0f}",
                     "平均成本": "{:,.2f}", "即時報價": "{:,.2f}", "投入總金額": "{:,.0f}",
-                    "即時市值(原幣)": "{:,.0f}", "名目曝險(台幣)": "{:,.0f}", "曝險Beta": "{:.2f}", "Beta曝險(台幣)": "{:,.0f}", "淨損益(原幣)": "{:,.0f}", "報酬率 (%)": "{:+.2f}%"
+                    "即時市值(原幣)": "{:,.0f}", "名目曝險(台幣)": "{:,.0f}", "曝險Beta": "{:.2f}", "Beta曝險(台幣)": "{:,.0f}", "淨損益(原幣)": "{:,.0f}", "報酬率 (%)": "{:+.2f}%",
+                    "Delta": _blank_num("{:.2f}"), "轉換價值(百元)": _blank_num("{:,.2f}"), "轉換溢價(%)": _blank_num("{:+.1f}%"),
                 }, precision=2), use_container_width=True, hide_index=True)
 
                 if metrics.get("beta_fallbacks_used"):
                     names = "、".join(f"{item.get('標的')}（{item.get('Beta來源')}）" for item in metrics["beta_fallbacks_used"])
                     st.warning(f"以下持倉抓不到標的即時一年 Beta，暫用預設值：{names}。預設值可在第六頁「下單輔助系統」→「新標的才需要改：Beta、槓桿、產業」修改。")
                 st.caption("Beta值＝這檔自己的一年 Beta；有效Beta＝套在市值上的 Beta（槓桿 ETF＝槓桿 × 標的一年 Beta，對 S&P 500 或加權指數）；曝險Beta＝套在名目曝險上的 Beta（槓桿 ETF＝標的一年 Beta）。Beta曝險＝名目曝險 × 曝險Beta＝市值 × 有效Beta，槓桿只乘一次。期貨的即時市值是名目市值（報價 × 乘數 × 口數），不是未實現損益。")
+                if has_convertible:
+                    st.caption("可轉債／CBAS：市值＝百元報價 × 面額／100 × 張數，計入淨值。名目曝險＝Delta × 轉換價值（不加標的槓桿）。轉換價值（百元）＝股價／轉換價格 × 100。不把 CB 與 CBAS 互抵，也不做跨市場對沖。")
 
             st.markdown("---")
             st.info("🤖 AI 壓力測試已移到第六頁「下單輔助系統」→「壓力測試」分頁，壓力測試集中在同一處。")

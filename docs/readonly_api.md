@@ -40,7 +40,7 @@ X-API-Key: <READONLY_API_KEY>
 
 每個 JSON 都有：
 
-- `schema_version`：目前 `1.4.0`（1.4.0 在 `/v1/portfolio` 新增 `usdtwd_source` 與 `warnings`；1.3.0 新增 `beta_leverage` 與部位層的 Beta／名目欄位；舊欄位全部保留）
+- `schema_version`：目前 `1.5.0`（1.5.0 在部位新增可轉債／CBAS 的 `product`、`delta`、`conversion_value`；1.4.0 新增 `usdtwd_source` 與 `warnings`；1.3.0 新增 `beta_leverage` 與部位層的 Beta／名目欄位；舊欄位全部保留）
 - `as_of`：`Asia/Taipei` 的 ISO 8601，例如 `2026-10-29T22:00:00+08:00`
 
 機器可讀的 JSON Schema 在 [`readonly_api.schema.json`](readonly_api.schema.json)，由 `api/schemas.py` 的 Pydantic 模型產生。
@@ -51,7 +51,7 @@ X-API-Key: <READONLY_API_KEY>
 
 ```json
 {
-  "schema_version": "1.4.0",
+  "schema_version": "1.5.0",
   "as_of": "2026-10-29T22:00:00+08:00",
   "status": "ok"
 }
@@ -78,7 +78,7 @@ X-API-Key: <READONLY_API_KEY>
 
 | 名詞 | 定義 |
 |---|---|
-| 名目曝險 | 現股／ETF＝市值 × 槓桿倍數（SOXL 3、MUU 2、00663L 2、一般股票 1）；期貨＝報價 × 乘數 × 口數；選擇權＝\|Delta × 口數 × 乘數 × 標的價\| |
+| 名目曝險 | 現股／ETF＝市值 × 槓桿倍數（SOXL 3、MUU 2、00663L 2、一般股票 1）；期貨＝報價 × 乘數 × 口數；選擇權＝\|Delta × 口數 × 乘數 × 標的價\|；可轉債／CBAS＝\|Delta × 轉換價值\| |
 | Beta | 套在名目曝險上的 Beta。槓桿 ETF＝**標的**一年 Beta（SOXL→SOXX 對 S&P 500；台股槓桿 ETF 對加權指數定義 1）；一般股票＝自身一年 Beta；臺指期＝1 |
 | Beta 曝險 | Σ(名目曝險 × Beta)。等於 市值 × (槓桿 × 標的 Beta)，**槓桿只乘一次** |
 | 槓桿 | 名目曝險 ÷ 淨值 |
@@ -91,6 +91,8 @@ X-API-Key: <READONLY_API_KEY>
 
 部位層新增：`equity_value`（計入淨值的價值；期貨＝保證金＋未實現損益）、`leverage`、`notional_exposure`、`underlying`、`underlying_beta`、`beta`（套在名目上）、`effective_beta`（套在市值上＝槓桿 × 標的 Beta）、`beta_exposure`、`beta_source`。
 
+1.5.0 再加可轉債／CBAS（`product` 為 `cb` 或 `cbas`，其他部位是空字串）：`delta`、`delta_source`、`conversion_value`（整筆轉換價值，台幣）、`conversion_value_points`（百元報價，不乘張數）、`parity_premium_pct`（只有可轉債；CBAS 為 null）。市值進淨值，名目曝險是 Delta × 轉換價值，不加標的槓桿，也不把 CB 與 CBAS 互抵。欄位怎麼填見 [cb_holdings.md](cb_holdings.md)。沒有轉換價格或標的股價時，轉換價值與 Delta 相關欄位是 null，這筆名目曝險是 0，市值仍在淨值裡。
+
 `price` 是原幣報價（臺指期是指數點，美股是美元）。`market_value` 與 `pnl` 是台幣：分別對應第四頁的「即時市值(台幣)」與「淨未實現損益(原幣) × 換算匯率」。股票損益已含 0.3% 證交稅估算，不會再從淨值扣一次。1.3.0 起期貨 `market_value` 是名目市值（報價 × 乘數 × 口數），舊的「保證金加未實現損益」改放 `equity_value`。
 
 `yuanta_futures.equity` 是元大期貨權益數＝本日餘額（`cash_ledger`）＋期貨未實現損益（期交所即時／夜盤價）。本日餘額與第四頁同一條：有 `Futures_Ledger` 校正點就自動推算（校正餘額＋校正日之後的 `Trade_Log` 已實現損益−手續費−期交稅±出入金）；分頁或校正點缺少時退回 Active_Positions 元大期貨現金欄（目前是 B7）；現金欄也無效才用備援 168308。欄位格式見 [`futures_ledger.md`](futures_ledger.md)。
@@ -99,7 +101,7 @@ X-API-Key: <READONLY_API_KEY>
 
 ```json
 {
-  "schema_version": "1.4.0",
+  "schema_version": "1.5.0",
   "as_of": "2026-10-29T22:00:00+08:00",
   "currency": "TWD",
   "usdtwd": 30.0,
