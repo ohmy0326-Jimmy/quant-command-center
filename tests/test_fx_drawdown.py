@@ -212,7 +212,7 @@ class FlowAdjustedDrawdownTests(unittest.TestCase):
         flows = {"2026-10-03": 100.0}
         s = rp.risk_performance_summary({"nav": 185.0}, nav, flows)
         self.assertAlmostEqual(s["drawdown"]["current_dd_pct"], -15.0)
-        self.assertEqual(s["brake_light"], "🟡")
+        self.assertEqual(s["brake_light"], "🔴")  # -15% 已過紅燈線 -12%
         self.assertEqual(rp.risk_performance_summary({"nav": 185.0}, nav)["brake_light"], "🟢")
 
     def test_index_math_and_no_flows_identity(self):

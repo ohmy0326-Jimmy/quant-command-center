@@ -108,8 +108,9 @@ def test_strategy_presets_match_the_original_rules():
     assert active.reduce_priority == ("futures", "lev3", "lev2", "stock")
     assert active.n_batches == 3
     assert active.stop_stock == pytest.approx(-0.08)
-    assert active.brake_pause == pytest.approx(-0.12)
-    assert active.brake_cut == pytest.approx(-0.16)
+    assert active.brake_pause == pytest.approx(-0.08)
+    assert active.brake_cut == pytest.approx(-0.12)
+    assert active.brake_release == pytest.approx(-0.08)
     assert active.hedge_enabled is False
     with pytest.raises(ValueError):
         Strategy(name="太高", target_leverage=2.4)
@@ -299,7 +300,7 @@ def test_drawdown_brake_cuts_leverage_toward_one():
     shock = np.full((8, 3), -0.18)
     zeros = np.zeros_like(shock)
     scenario = Scenario("急跌", -0.2, 0.0, 1.0, 1.0)
-    braking = Strategy(name="有煞車", target_leverage=1.8, brake_enabled=True, brake_pause=-0.12, brake_cut=-0.16)
+    braking = Strategy(name="有煞車", target_leverage=1.8, brake_enabled=True, brake_pause=-0.08, brake_cut=-0.12)
     free = Strategy(name="無煞車", target_leverage=1.8, brake_enabled=False)
     result = simulate(
         book,
@@ -405,3 +406,28 @@ def test_simulator_is_on_page6_and_not_on_page4():
         ui = handle.read()
     assert "render_nav_scenario_simulator" in ui
     assert ui.count("render_nav_scenario_simulator") >= 2
+
+
+def test_simulator_brake_defaults_match_page4_lights():
+    import textwrap
+
+    from streamlit.testing.v1 import AppTest
+
+    script = textwrap.dedent(
+        f"""
+        import sys
+        sys.path.insert(0, {ROOT!r})
+        from nav_scenario_sim_ui import _one_strategy
+        _one_strategy(1, 1.8)
+        """
+    )
+    at = AppTest.from_string(script, default_timeout=60).run()
+    assert not at.exception
+    pause = at.number_input(key="nss_s1_pause")
+    cut = at.number_input(key="nss_s1_cut")
+    assert pause.value == pytest.approx(8.0)
+    assert cut.value == pytest.approx(12.0)
+    captions = " ".join(str(c.value) for c in at.caption)
+    assert "停新倉預設 -8%（黃燈）" in captions
+    assert "降到 1x 預設 -12%（紅燈）" in captions
+    assert "回到 -8% 以內後解除" in captions

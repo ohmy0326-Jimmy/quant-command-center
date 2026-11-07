@@ -77,15 +77,35 @@ class MarginTests(unittest.TestCase):
 
 class DrawdownMacroTests(unittest.TestCase):
     def test_drawdown_levels_and_hysteresis(self):
+        self.assertAlmostEqual(ae.BRAKE_PAUSE_PCT, -8.0)
+        self.assertAlmostEqual(ae.BRAKE_CUT_PCT, -12.0)
+        self.assertAlmostEqual(ae.DRAWDOWN_HYST_PCT, 1.0)
         store = MemoryAlertStore()
-        seq = [(-5, "green", 0), (-12.5, "yellow", 1), (-16.2, "red", 1), (-15.5, "red", 0), (-14.8, "yellow", 1),
-               (-11.5, "yellow", 0), (-10.9, "green", 1)]
+        # 黃燈 ≤ -8%、紅燈 ≤ -12%；降級要先回升 1 個百分點（紅停在 -11、黃停在 -7）。
+        seq = [(-5, "green", 0), (-8.5, "yellow", 1), (-12.2, "red", 1), (-11.5, "red", 0), (-10.8, "yellow", 1),
+               (-7.5, "yellow", 0), (-6.9, "green", 1)]
         for i, (dd, state, n) in enumerate(seq):
-            _r, s = step({"drawdown": {"dd_pct": dd}}, store, DAY + timedelta(minutes=15 * i))
+            r, s = step({"drawdown": {"dd_pct": dd}}, store, DAY + timedelta(minutes=15 * i))
             self.assertEqual(store.records["drawdown"].state, state, dd)
             self.assertEqual(len(s.calls), n, dd)
             if state == "red" and n:
                 self.assertEqual(s.calls[0][1], CRITICAL)
+                self.assertIn("-12%", r.sent[0].body)
+            if state == "yellow" and n:
+                self.assertIn("停新倉", r.sent[0].title)
+                self.assertIn("-8%", r.sent[0].body)
+
+    def test_drawdown_exact_boundaries(self):
+        store = MemoryAlertStore()
+        _r, s = step({"drawdown": {"dd_pct": -8.0}}, store, DAY)
+        self.assertEqual(store.records["drawdown"].state, "yellow")
+        _r, s = step({"drawdown": {"dd_pct": -12.0}}, store, DAY)
+        self.assertEqual(store.records["drawdown"].state, "red")
+        self.assertEqual(s.calls[0][1], CRITICAL)
+        _r, s = step({"drawdown": {"dd_pct": -11.0}}, store, DAY)
+        self.assertEqual((store.records["drawdown"].state, s.calls), ("red", []))
+        _r, s = step({"drawdown": {"dd_pct": -10.9}}, store, DAY)
+        self.assertEqual(store.records["drawdown"].state, "yellow")
 
     def test_macro_levels(self):
         store = MemoryAlertStore()
@@ -163,10 +183,14 @@ class OtherRuleTests(unittest.TestCase):
 class QuietCapTests(unittest.TestCase):
     def test_quiet_hours_only_critical_has_sound(self):
         store = MemoryAlertStore()
-        _r, s = step({"margin": {"already": True}, "leverage": {"value": 2.0}, "drawdown": {"dd_pct": -13}}, store, NIGHT)
+        _r, s = step({"margin": {"already": True}, "leverage": {"value": 2.0}, "drawdown": {"dd_pct": -9}}, store, NIGHT)
         by_key = {k: silent for k, _sev, silent in s.calls}
         self.assertEqual(by_key, {"margin": False, "leverage": True, "drawdown": True})
         self.assertEqual(s.calls[0][0], "margin")  # 緊急的排前面
+        # -9% 是黃燈（一般）；紅燈 -12% 在靜音時段仍要有聲音。
+        store = MemoryAlertStore()
+        _r, s = step({"drawdown": {"dd_pct": -12.5}}, store, NIGHT)
+        self.assertEqual(s.calls, [("drawdown", CRITICAL, False)])
 
     def test_quiet_boundaries(self):
         self.assertTrue(ae.is_quiet(datetime(2026, 11, 4, 0, 0, tzinfo=TPE)))
