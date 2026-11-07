@@ -71,7 +71,14 @@ _SECRET_ENV_NAME = re.compile(
     r"PRIVATE|AUTH|SERVICE_ACCOUNT|SA_JSON|COOKIE|DSN|WEBHOOK)(?:_|$)",
     re.IGNORECASE,
 )
-_ALWAYS_SECRET_ENV = ("READONLY_API_KEY", "GEMINI_API_KEY", "QCC_SNAPSHOT_KEY")
+_ALWAYS_SECRET_ENV = (
+    "READONLY_API_KEY",
+    "GEMINI_API_KEY",
+    "QCC_SNAPSHOT_KEY",
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_CHAT_ID",
+    "TELEGRAM_CONFIG",
+)
 _PEM_BLOCK = re.compile(
     r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)",
     re.DOTALL,
@@ -101,6 +108,15 @@ def _secret_env_values() -> list[str]:
             text = (value or "").strip()
             if len(text) >= _MIN_REDACT_LENGTH:
                 values.add(text)
+    try:
+        from alert_inputs import telegram_secret_values
+
+        for extra in telegram_secret_values():
+            if len(extra) >= _MIN_REDACT_LENGTH:
+                values.add(extra)
+    except Exception:
+        # 遮罩失敗不能讓日誌本身炸掉，也不要在這裡再寫日誌（會重入）。
+        pass
     # 長的先換，避免短值先換掉一部分而漏掉整段。
     return sorted(values, key=len, reverse=True)
 
@@ -130,6 +146,7 @@ def redact_secrets(message) -> str:
     """把日誌字串裡的祕密塗成 [redacted]。
 
     * 名稱像祕密的環境變數（*_KEY、*_TOKEN、*SECRET*、*PASSWORD*…）的值
+    * TELEGRAM_CONFIG／TELEGRAM_CONFIG_FILE 裡的 bot_token、chat_id
     * PEM 私鑰區塊與 JSON 的 private_key 欄位
     * key=value／key: value 形式的 api_key、token、secret、password、authorization
     * Bearer／Basic 權杖、常見金鑰格式（AIza…、ghp_…、sk-…、ya29.…、JWT）

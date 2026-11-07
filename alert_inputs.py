@@ -129,8 +129,107 @@ def gather_readings(spreadsheet, now: datetime) -> dict:
     return readings
 
 
+_CONFIG_KEYS = ("bot_token", "chat_id")
+_SECRET_CACHE: tuple | None = None
+
+
+def parse_telegram_config(text: str) -> dict[str, str]:
+    """解析 ``bot_token`` / ``chat_id``。
+
+    等號兩邊與行首行尾空白略過。值可以是雙引號、單引號或不加引號；
+    引號只用來包住值，前後空白會拿掉。``#`` 開頭的列是註解。
+    """
+    parsed: dict[str, str] = {}
+    if not text:
+        return parsed
+    for raw in str(text).lstrip("\ufeff").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, sep, value = line.partition("=")
+        if not sep:
+            continue
+        key = key.strip()
+        if key not in _CONFIG_KEYS:
+            continue
+        parsed[key] = _strip_config_value(value)
+    return parsed
+
+
+def _strip_config_value(value: str) -> str:
+    value = value.strip()
+    if not value:
+        return ""
+    quote = value[0]
+    if quote in "\"'":
+        end = value.find(quote, 1)
+        if end != -1:
+            return value[1:end].strip()
+    elif " #" in value:
+        value = value.split(" #", 1)[0].strip()
+    return value.strip()
+
+
+def load_telegram_config_text(*, log_errors: bool = False) -> str:
+    """``TELEGRAM_CONFIG`` 有內容就用它，否則讀 ``TELEGRAM_CONFIG_FILE``。"""
+    raw = os.environ.get("TELEGRAM_CONFIG", "")
+    if raw.strip():
+        return raw
+    path = os.environ.get("TELEGRAM_CONFIG_FILE", "").strip()
+    if not path:
+        return ""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return handle.read()
+    except OSError as exc:
+        if log_errors:
+            logger.warning("telegram config file unreadable type=%s", type(exc).__name__)
+        return ""
+
+
+def telegram_secret_values() -> list[str]:
+    """設定檔裡的 bot_token、chat_id，給日誌遮罩用。讀檔失敗回傳空，不寫日誌。"""
+    global _SECRET_CACHE
+    raw = os.environ.get("TELEGRAM_CONFIG", "")
+    path = "" if raw.strip() else os.environ.get("TELEGRAM_CONFIG_FILE", "").strip()
+    stamp: tuple = ()
+    if path:
+        try:
+            st = os.stat(path)
+            stamp = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            stamp = ("missing",)
+    key = (raw, path, stamp)
+    if _SECRET_CACHE is not None and _SECRET_CACHE[0] == key:
+        return _SECRET_CACHE[1]
+    if raw.strip():
+        text = raw
+    elif path and stamp != ("missing",):
+        text = load_telegram_config_text(log_errors=False)
+    else:
+        text = ""
+    parsed = parse_telegram_config(text)
+    values: list[str] = []
+    for name in _CONFIG_KEYS:
+        value = parsed.get(name, "").strip()
+        if value and value not in values:
+            values.append(value)
+    _SECRET_CACHE = (key, values)
+    return values
+
+
 def telegram_config() -> tuple[str, str]:
-    return os.environ.get("TELEGRAM_BOT_TOKEN", "").strip(), os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+    """回傳 (bot_token, chat_id)。
+
+    有設的 ``TELEGRAM_BOT_TOKEN``、``TELEGRAM_CHAT_ID`` 優先；缺的欄位改解析
+    ``TELEGRAM_CONFIG``，沒有內容再讀 ``TELEGRAM_CONFIG_FILE``。
+    """
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+    if token and chat_id:
+        return token, chat_id
+    parsed = parse_telegram_config(load_telegram_config_text(log_errors=True))
+    return token or parsed.get("bot_token", "").strip(), chat_id or parsed.get("chat_id", "").strip()
 
 
 def run_alert_check(now: datetime | None = None) -> dict:
