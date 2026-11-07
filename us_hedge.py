@@ -111,6 +111,7 @@ def us_spx_exposure(snapshot: Snapshot, beta_fn: Callable | None = None, overrid
     exposure_twd = 0.0
     notional_twd = 0.0
     fallback_rows = []
+    incomplete_rows = []
 
     if snapshot.valued is not None and not snapshot.valued.empty:
         for _, row in snapshot.valued.iterrows():
@@ -125,10 +126,11 @@ def us_spx_exposure(snapshot: Snapshot, beta_fn: Callable | None = None, overrid
             if lev is None:
                 lev = _num(row.get("標的槓桿"), 1.0)
             notional = _num(row.get("實質曝險(台幣)"), None)
-            if notional is None:
-                notional = mv_twd * lev
-            exposure = _num(row.get("Beta曝險(台幣)"), 0.0)
-            notional_twd += notional
+            exposure = _num(row.get("Beta曝險(台幣)"), None)
+            incomplete = notional is None or exposure is None
+            if not incomplete:
+                notional_twd += notional
+                exposure_twd += exposure
             
             eff_beta = _num(row.get("有效Beta"), None)
             u = str(row.get("標的代號", ""))
@@ -139,8 +141,9 @@ def us_spx_exposure(snapshot: Snapshot, beta_fn: Callable | None = None, overrid
 
             if is_fallback:
                 fallback_rows.append(ticker)
+            if incomplete:
+                incomplete_rows.append(ticker)
 
-            exposure_twd += exposure
             rows.append({
                 "ticker": ticker,
                 "name": name,
@@ -154,11 +157,17 @@ def us_spx_exposure(snapshot: Snapshot, beta_fn: Callable | None = None, overrid
                 "exposure_twd": exposure,
                 "notional_twd": notional,
                 "method": method,
+                "incomplete": incomplete,
             })
 
     usdtwd = float(snapshot.usdtwd)
     exposure_usd = exposure_twd / usdtwd if usdtwd > 0 else 0.0
     us_nav = float(snapshot.metrics.get("us_nav", 0.0))
+    # 混合帳戶沒有可分的現金時，第四頁的美股敏感度改除以總淨值。這裡用同一個分母。
+    if snapshot.metrics.get("beta_basis") == "total_nav":
+        denom = float(snapshot.metrics.get("nav") or 0.0)
+    else:
+        denom = us_nav
 
     return {
         "rows": rows,
@@ -166,11 +175,14 @@ def us_spx_exposure(snapshot: Snapshot, beta_fn: Callable | None = None, overrid
         "exposure_usd": exposure_usd,
         "page4_us_exposure": float(snapshot.metrics.get("us_exposure", 0.0)),
         "us_nav": us_nav,
-        "us_beta_spx": (exposure_twd / us_nav) if us_nav > 0 else 0.0,
+        "us_beta_spx": (exposure_twd / denom) if denom > 0 else 0.0,
         "notional_twd": notional_twd,
-        "us_leverage": (notional_twd / us_nav) if us_nav > 0 else 0.0,
+        "us_leverage": (notional_twd / denom) if denom > 0 else 0.0,
         "us_avg_beta": (exposure_twd / notional_twd) if notional_twd > 0 else 0.0,
         "fallback_rows": fallback_rows,
+        "incomplete_rows": incomplete_rows,
+        "beta_complete": bool(snapshot.metrics.get("beta_complete", not incomplete_rows)),
+        "exposure_complete": bool(snapshot.metrics.get("exposure_complete", not incomplete_rows)),
     }
 
 

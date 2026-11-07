@@ -14,7 +14,7 @@ import pandas as pd
 
 from cb_holdings import product_kind
 
-SCHEMA_VERSION = "1.6.0"
+SCHEMA_VERSION = "1.7.0"
 TAIPEI = ZoneInfo("Asia/Taipei")
 
 
@@ -93,6 +93,7 @@ def position_records(positions: pd.DataFrame) -> list[dict]:
                 "effective_beta": _col(row, positions, "有效Beta"),
                 "beta_exposure": _col(row, positions, "Beta曝險(台幣)"),
                 "beta_source": _name(row["Beta來源"]) if "Beta來源" in positions.columns else "",
+                "beta_quality": _beta_quality(_name(row["Beta來源"]) if "Beta來源" in positions.columns else ""),
                 "product": product_kind(row.get("種類")) or "",
                 "delta": _col(row, positions, "Delta"),
                 "delta_source": _name(row["Delta來源"]) if "Delta來源" in positions.columns else "",
@@ -104,6 +105,19 @@ def position_records(positions: pd.DataFrame) -> list[dict]:
             }
         )
     return rows
+
+
+def _beta_quality(source: str) -> str:
+    text = source or ""
+    if "未計入" in text or "缺漏" in text:
+        return "missing"
+    if "預設值" in text or "手動" in text:
+        return "fallback"
+    if "定義" in text:
+        return "definition"
+    if text:
+        return "estimated"
+    return "missing"
 
 
 def _exposure_known(row, frame: pd.DataFrame) -> bool:
@@ -154,10 +168,13 @@ def beta_leverage_block(metrics: dict) -> dict:
     """1.3.0 新增：台股／美股／合計各三個數字，名目曝險口徑一致（tw + us = total）。"""
 
     def leg(prefix: str, nav_key: str, lev_key: str, avg_key: str, acct_key: str) -> dict:
+        nav = float(metrics.get(nav_key, 0.0) or 0.0)
+        if prefix and metrics.get("beta_basis") == "total_nav":
+            nav = float(metrics.get("nav", 0.0) or 0.0)
         return {
             "notional_exposure": float(metrics.get(f"{prefix}notional_exposure", 0.0) or 0.0),
             "beta_exposure": float(metrics.get(f"{prefix}beta_exposure", 0.0) or 0.0),
-            "nav": float(metrics.get(nav_key, 0.0) or 0.0),
+            "nav": nav,
             "leverage": float(metrics.get(lev_key, 0.0) or 0.0),
             "avg_beta": float(metrics.get(avg_key, 0.0) or 0.0),
             "account_beta": float(metrics.get(acct_key, 0.0) or 0.0),
@@ -191,6 +208,11 @@ def portfolio_payload(
         text = exposure_warning_text(metrics)
         if text not in warning_lines:
             warning_lines.append(text)
+    from portfolio_risk import beta_quality_warning
+
+    quality = beta_quality_warning(metrics)
+    if quality and quality not in warning_lines:
+        warning_lines.append(quality)
     return {
         "schema_version": SCHEMA_VERSION,
         "as_of": format_as_of(as_of),
@@ -201,6 +223,12 @@ def portfolio_payload(
         "exposure_complete": complete,
         "exposure_scope": scope,
         "unknown_delta_symbols": [str(item) for item in (metrics.get("unknown_delta_symbols") or [])],
+        "beta_complete": bool(metrics.get("beta_complete", True)),
+        "unknown_beta_symbols": [str(item) for item in (metrics.get("unknown_beta_symbols") or [])],
+        "sleeve_nav_complete": bool(metrics.get("sleeve_nav_complete", True)),
+        "unallocated_nav": float(metrics.get("unallocated_nav", 0.0) or 0.0),
+        "beta_basis": "total_nav" if metrics.get("beta_basis") == "total_nav" else "sleeve_nav",
+        "beta_label": "本地基準敏感度合計。台股對加權指數，美股對 S&P 500，不是單一指數 Beta。",
         "net_value": float(metrics.get("nav", 0.0)),
         "exposure": float(metrics.get("exposure", 0.0)),
         "leverage": float(metrics.get("leverage", 0.0)),

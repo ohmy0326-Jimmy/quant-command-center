@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.6.0",
+  "schema_version": "1.7.0",
   "header": "X-API-Key",
   "models": {
     "health": {
@@ -7,7 +7,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.6.0"
+            "1.7.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -62,7 +62,7 @@
               "type": "number"
             },
             "account_beta": {
-              "description": "帳戶 Beta＝Beta 曝險 ÷ 淨值＝leverage × avg_beta。",
+              "description": "本地基準敏感度＝Beta 曝險 ÷ 這一列使用的淨值。全部 Beta 都估到時等於 leverage × avg_beta。台股對加權、美股對 S&P 500，合計不是單一指數 Beta。",
               "title": "Account Beta",
               "type": "number"
             }
@@ -279,8 +279,20 @@
             },
             "beta_source": {
               "default": "",
-              "description": "1.3.0 新增。Beta 來源說明。",
+              "description": "1.3.0 新增。Beta 來源說明。1.7.0 起，資料不足會寫「Beta 未計入」，不會把缺資料顯示成 Beta＝1。",
               "title": "Beta Source",
+              "type": "string"
+            },
+            "beta_quality": {
+              "default": "missing",
+              "description": "1.7.0 新增。estimated＝這次回歸；fallback＝已標示的預設或手動值；definition＝臺指或加權定義 1；missing＝沒有計入。",
+              "enum": [
+                "estimated",
+                "fallback",
+                "definition",
+                "missing"
+              ],
+              "title": "Beta Quality",
               "type": "string"
             },
             "product": {
@@ -454,7 +466,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.6.0"
+            "1.7.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -540,34 +552,76 @@
           "type": "number"
         },
         "beta": {
-          "description": "帳戶 Beta（合計）＝(tw_exposure + us_exposure) ÷ 總淨值＝Σ(名目曝險 × Beta) ÷ 淨值。第四頁 metrics.beta。＝beta_leverage.total.account_beta。",
+          "description": "本地基準敏感度合計＝(tw_exposure + us_exposure) ÷ 總淨值。台股那段對加權指數，美股那段對 S&P 500，相加後不是單一指數 Beta。第四頁 metrics.beta。＝beta_leverage.total.account_beta。",
           "title": "Beta",
           "type": "number"
         },
         "tw_beta": {
-          "description": "台股帳戶 Beta＝tw_exposure ÷ tw_nav。＝beta_leverage.tw.account_beta。",
+          "description": "台股敏感度。sleeve_nav_complete 為 true 時＝tw_exposure ÷ tw_nav；有混合帳戶時＝tw_exposure ÷ 總淨值。＝beta_leverage.tw.account_beta。",
           "title": "Tw Beta",
           "type": "number"
         },
         "us_beta": {
-          "description": "美股帳戶 Beta＝us_exposure ÷ us_nav。＝beta_leverage.us.account_beta。",
+          "description": "美股對 S&P 500 的敏感度。sleeve_nav_complete 為 true 時＝us_exposure ÷ us_nav；有混合帳戶時＝us_exposure ÷ 總淨值。＝beta_leverage.us.account_beta。",
           "title": "Us Beta",
           "type": "number"
         },
         "total_beta": {
-          "description": "同 beta。",
+          "description": "同 beta。本地基準敏感度合計，不是單一指數 Beta。",
           "title": "Total Beta",
           "type": "number"
         },
         "tw_nav": {
-          "description": "台股淨值（台股市值 + 元大期貨權益 + 台股現金 - 融資/質押）。",
+          "description": "只含整戶都是台股的帳戶淨值（含該戶現金與元大期貨）。混合帳戶不拆進來。",
           "title": "Tw Nav",
           "type": "number"
         },
         "us_nav": {
-          "description": "美股淨值（US 市值 + US 現金 - US 借款）。",
+          "description": "只含整戶都是美股的帳戶淨值（含該戶現金）。混合帳戶不拆進來。",
           "title": "Us Nav",
           "type": "number"
+        },
+        "sleeve_nav_complete": {
+          "default": true,
+          "description": "1.7.0 新增。false 表示有帳戶同時含台股與美股，現金沒有歸屬，tw_nav + us_nav 小於總淨值。",
+          "title": "Sleeve Nav Complete",
+          "type": "boolean"
+        },
+        "unallocated_nav": {
+          "default": 0.0,
+          "description": "1.7.0 新增。混合帳戶的淨值。tw_nav + us_nav + unallocated_nav＝net_value。",
+          "title": "Unallocated Nav",
+          "type": "number"
+        },
+        "beta_basis": {
+          "default": "sleeve_nav",
+          "description": "1.7.0 新增。sleeve_nav＝台股／美股各除以自己的淨值；total_nav＝因為現金拆不開，兩邊都除以總淨值。",
+          "enum": [
+            "sleeve_nav",
+            "total_nav"
+          ],
+          "title": "Beta Basis",
+          "type": "string"
+        },
+        "beta_label": {
+          "default": "本地基準敏感度合計。台股對加權指數，美股對 S&P 500，不是單一指數 Beta。",
+          "description": "1.7.0 新增。beta／total_beta 的讀法。",
+          "title": "Beta Label",
+          "type": "string"
+        },
+        "beta_complete": {
+          "default": true,
+          "description": "1.7.0 新增。false 表示有部位 Beta 沒估到。那些部位的名目仍可計入槓桿，但 Beta 不是 1，也沒有算進 beta。",
+          "title": "Beta Complete",
+          "type": "boolean"
+        },
+        "unknown_beta_symbols": {
+          "description": "1.7.0 新增。名目已知、Beta 未計入的代號。",
+          "items": {
+            "type": "string"
+          },
+          "title": "Unknown Beta Symbols",
+          "type": "array"
         },
         "tw_exposure": {
           "description": "舊欄位，保留相容。台股 **Beta 曝險** Σ(名目曝險 × Beta)，台幣；不是名目曝險，所以 tw_exposure + us_exposure ≠ exposure。名目曝險請用 beta_leverage.tw.notional_exposure。",
@@ -623,7 +677,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.6.0"
+            "1.7.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -670,7 +724,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.6.0"
+            "1.7.0"
           ],
           "title": "Schema Version",
           "type": "string"

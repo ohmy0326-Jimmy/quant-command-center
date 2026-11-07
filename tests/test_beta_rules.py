@@ -35,10 +35,10 @@ def test_effective_beta():
     res5 = effective_beta("AAPL", "美股", 1.0, 1.3)
     assert res5["sens"] == pytest.approx(1.3)
     
-    # own beta None -> 1.0 fallback
+    # 一般股票沒有 Beta 時不假設 1
     res6 = effective_beta("AAPL", "美股", 1.0, None)
-    assert res6["sens"] == pytest.approx(1.0)
-    assert res6["is_fallback"]
+    assert res6["sens"] is None
+    assert res6["quality"] == "missing"
 
 
 def test_fetch_underlying_beta():
