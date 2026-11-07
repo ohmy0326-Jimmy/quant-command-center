@@ -44,6 +44,7 @@ import taifex_quotes
 import taiex_vix
 import us_hedge
 import macro_risk
+import page1_lights
 import sector_board
 import chart_history
 
@@ -336,6 +337,23 @@ def cached_foreign_flows(today_iso):
 def clear_macro_risk_caches():
     cached_macro_history.clear()
     cached_foreign_flows.clear()
+    cached_fred_observations.clear()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_fred_observations(series_id: str):
+    return page1_lights.fetch_fred_observations(series_id)
+
+
+def load_page1_board(macro_items: list):
+    today = datetime.now(macro_risk.TPE).date()
+    series = {}
+    for key, spec in {**page1_lights.AGREED_SERIES, **page1_lights.READING_SERIES}.items():
+        try:
+            series[key] = cached_fred_observations(spec["series_id"])
+        except Exception:
+            series[key] = None
+    return page1_lights.assemble_board(macro_items, series, today)
 
 
 def load_macro_risk():
@@ -348,6 +366,38 @@ def load_macro_risk():
         "taiex": lambda: cached_macro_history("^TWII", "3mo"),
     }
     return macro_risk.evaluate(loaders)
+
+
+def _render_page1_charts(hist, indicators):
+    cols = st.columns(2)
+    for idx, (name, ticker) in enumerate(indicators.items()):
+        try:
+            df_item = hist.get((ticker, "1y"), pd.DataFrame())
+            if df_item is None:
+                df_item = pd.DataFrame()
+            else:
+                df_item = df_item.copy()
+            if df_item.empty:
+                continue
+            df_item["MA5"] = df_item["Close"].rolling(window=5).mean()
+            df_item["MA20"] = df_item["Close"].rolling(window=20).mean()
+            df_item["MA60"] = df_item["Close"].rolling(window=60).mean()
+            df_item["MA200"] = df_item["Close"].rolling(window=200).mean()
+            curr = float(df_item["Close"].iloc[-1])
+            prev = float(df_item["Close"].iloc[-2])
+            pct = ((curr - prev) / prev) * 100
+            with cols[idx % 2]:
+                st.markdown(f"**{name}**：`{curr:,.2f}`  (`{pct:+.2f}%`)")
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(x=df_item.index, y=df_item["Close"], name="收盤價", line=dict(color="#FFFFFF", width=1.2)))
+                fig.add_trace(go.Scatter(x=df_item.index, y=df_item["MA5"], name="5MA", line=dict(color="#FFEE58", width=1)))
+                fig.add_trace(go.Scatter(x=df_item.index, y=df_item["MA20"], name="20MA", line=dict(color="#29B6F6", width=1.5)))
+                fig.add_trace(go.Scatter(x=df_item.index, y=df_item["MA60"], name="60MA", line=dict(color="#FFA726", width=1.5)))
+                fig.add_trace(go.Scatter(x=df_item.index, y=df_item["MA200"], name="200MA", line=dict(color="#AB47BC", width=2)))
+                fig.update_layout(height=250, margin=dict(l=10, r=10, t=10, b=10), showlegend=True, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=10)), template="plotly_dark")
+                st.plotly_chart(fig, use_container_width=True)
+        except Exception:
+            continue
 
 
 def clear_market_caches():
@@ -452,7 +502,10 @@ if page == "第一頁：總經與風險鬧鐘":
                 f"燈號：0–{macro_risk.GREEN_MAX} 分 🟢、{macro_risk.GREEN_MAX + 1}–{macro_risk.YELLOW_MAX} 分 🟡、"
                 f"{macro_risk.YELLOW_MAX + 1} 分以上 🔴（滿分 {macro_risk.MAX_SCORE}）。核心指標缺漏且分數落在綠燈區時顯示 ⚪ 資料不足。"
                 f"資料超過 {macro_risk.STALE_BUSINESS_DAYS} 個工作日未更新視為過期、不計分。"
+                " DFII10 與下面的利差讀數不進這個分數，也不新增 Telegram 推播。"
             )
+            page1_board = load_page1_board(risk_items)
+            page1_lights.render_page1_summary(st, page1_board, risk_summary)
 
             st.markdown("---")
             
@@ -502,38 +555,8 @@ if page == "第一頁：總經與風險鬧鐘":
                                 
             st.markdown("---")
 
-            cols = st.columns(2)
-            for idx, (name, ticker) in enumerate(indicators.items()):
-                try:
-                    df_item = hist.get((ticker, "1y"), pd.DataFrame())
-                    if df_item is None:
-                        df_item = pd.DataFrame()
-                    else:
-                        df_item = df_item.copy()
-                    if not df_item.empty:
-                        df_item['MA5'] = df_item['Close'].rolling(window=5).mean()
-                        df_item['MA20'] = df_item['Close'].rolling(window=20).mean()
-                        df_item['MA60'] = df_item['Close'].rolling(window=60).mean()
-                        df_item['MA200'] = df_item['Close'].rolling(window=200).mean()
-                        
-                        curr = float(df_item['Close'].iloc[-1])
-                        prev = float(df_item['Close'].iloc[-2])
-                        pct = ((curr - prev) / prev) * 100
-                        
-                        with cols[idx % 2]:
-                            st.markdown(f"**{name}**：`{curr:,.2f}`  (`{pct:+.2f}%`)")
-                            
-                            fig = go.Figure()
-                            fig.add_trace(go.Scatter(x=df_item.index, y=df_item['Close'], name='收盤價', line=dict(color='#FFFFFF', width=1.2)))
-                            fig.add_trace(go.Scatter(x=df_item.index, y=df_item['MA5'], name='5MA', line=dict(color='#FFEE58', width=1)))
-                            fig.add_trace(go.Scatter(x=df_item.index, y=df_item['MA20'], name='20MA', line=dict(color='#29B6F6', width=1.5)))
-                            fig.add_trace(go.Scatter(x=df_item.index, y=df_item['MA60'], name='60MA', line=dict(color='#FFA726', width=1.5)))
-                            fig.add_trace(go.Scatter(x=df_item.index, y=df_item['MA200'], name='200MA', line=dict(color='#AB47BC', width=2)))
-                            
-                            fig.update_layout(height=250, margin=dict(l=10, r=10, t=10, b=10), showlegend=True, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=10)), template="plotly_dark")
-                            st.plotly_chart(fig, use_container_width=True)
-                except:
-                    pass
+            with st.expander("完整日 K（可摺疊）", expanded=False):
+                _render_page1_charts(hist, indicators)
         except Exception as e:
             st.error(f"總經圖表載入失敗: {e}")
 
