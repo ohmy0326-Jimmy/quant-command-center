@@ -30,6 +30,7 @@ from portfolio_risk import (
     resolve_usdtwd,
     finalize_valuation,
     load_service_account_info,
+    open_quant_spreadsheet,
     market_beta_and_sector,
     market_beta_info,
     normalize_positions,
@@ -126,6 +127,18 @@ def _google_key_from_secrets():
 def load_quant_database():
     key_data = load_service_account_info(_google_key_from_secrets)
     return fetch_quant_sheets(key_data)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def cached_stop_dates() -> dict:
+    """只讀 Alert_State。讀不到就當沒有日期，不建立分頁、不寫入。"""
+    try:
+        from alert_engine import recorded_stop_dates
+
+        book = open_quant_spreadsheet(load_service_account_info(_google_key_from_secrets))
+        return recorded_stop_dates(book)
+    except Exception:
+        return {}
 
 
 # 即時匯率快取 3 分鐘；抓不到會丟例外，st.cache_data 不快取例外，下次重整再抓。
@@ -809,12 +822,20 @@ elif page == "第四頁：部位監控與量化風控":
             nav_flows = nav_flow_map(nav_data)
 
             if not df.empty:
+                from zoneinfo import ZoneInfo
+
+                from stop_rules import stop_alarm_text
+
+                stop_dates = cached_stop_dates()
+                today = datetime.now(ZoneInfo("Asia/Taipei")).date()
                 alarms = df[(df['最大虧損比例'] > -100) & (df['報酬率 (%)'] <= df['最大虧損比例'])]
                 if not alarms.empty:
                     st.error("🚨 **【系統風控警報】偵測到部位觸及最大虧損限制，請評估是否停損處理！**")
                     for idx, row in alarms.iterrows():
                         name_display = row['名稱'] if row['名稱'] else row['標的']
-                        st.warning(f"⚠️ **{name_display} ({row['標的']})**：目前淨報酬率 **{row['報酬率 (%)']:.2f}%** (已跌破設定的 {row['最大虧損比例']:.0f}%)")
+                        source = str(row["停損來源"]) if "停損來源" in df.columns else ""
+                        seen = stop_dates.get(f"{row['帳戶']}|{str(row['標的']).upper()}")
+                        st.warning(stop_alarm_text(name_display, row['標的'], float(row['報酬率 (%)']), float(row['最大虧損比例']), source, seen, today))
                     
                     if st.button("🚨 一鍵推播停損警報至 Telegram", type="primary"):
                         send_to_telegram("量化戰情室風控警報", "偵測到部位觸及最大虧損限制，請立即前往戰情室檢查！")
@@ -823,31 +844,30 @@ elif page == "第四頁：部位監控與量化風控":
             # 風險與績效：Beta／槓桿三列表、現金、借款、最大回撤、回撤煞車燈合併成一張卡
             render_risk_performance_card(st, metrics, nav_series, capture, nav_flows)
             if not df.empty:
-                total_exposure_sum = df['實質曝險(台幣)'].sum()
+                known_exposure = pd.to_numeric(df['實質曝險(台幣)'], errors="coerce")
+                total_exposure_sum = float(known_exposure[np.isfinite(known_exposure)].sum()) if known_exposure.notna().any() else 0.0
                 if metrics.get("expired_removed"):
                     st.info(f"ℹ️ 已自動過期排除之選擇權標的：{', '.join(metrics['expired_removed'])}")
-                if metrics.get("options_missing_delta"):
-                    st.warning(f"⚠️ 以下選擇權缺少 Delta 數值，Beta 曝險以 0 計算：{', '.join(metrics['options_missing_delta'])}")
-                if metrics.get("cb_missing_terms"):
-                    st.warning(f"⚠️ 以下可轉債／CBAS 缺少轉換價格或標的股價，沒有轉換價值，名目曝險以 0 計算：{', '.join(metrics['cb_missing_terms'])}")
-                if metrics.get("cb_missing_delta"):
-                    st.warning(f"⚠️ 以下可轉債／CBAS 缺少 Delta，名目曝險以 0 計算：{', '.join(metrics['cb_missing_delta'])}")
                 st.markdown("---")
 
                 st.subheader("🏢 各精細產業別持股曝險與資金佔比分佈")
-                sector_grouped = df.groupby('產業別').agg(實質曝險合計=('實質曝險(台幣)', 'sum'), 標的數量=('標的', 'count')).reset_index()
-                sector_grouped['產業曝險佔比 (%)'] = (sector_grouped['實質曝險合計'] / total_exposure_sum) * 100.0
-                sector_grouped = sector_grouped.sort_values(by='產業曝險佔比 (%)', ascending=False)
+                if total_exposure_sum <= 0:
+                    st.caption("已知部位沒有名目曝險。缺 Delta 的部位不畫進圓餅圖，也不當成 0。")
+                else:
+                    known_rows = df[df["曝險已知"] != False] if "曝險已知" in df.columns else df
+                    sector_grouped = known_rows.groupby('產業別').agg(實質曝險合計=('實質曝險(台幣)', 'sum'), 標的數量=('標的', 'count')).reset_index()
+                    sector_grouped['產業曝險佔比 (%)'] = (sector_grouped['實質曝險合計'] / total_exposure_sum) * 100.0
+                    sector_grouped = sector_grouped.sort_values(by='產業曝險佔比 (%)', ascending=False)
 
-                sec_col1, sec_col2 = st.columns([1.5, 2.5])
-                with sec_col1:
-                    st.dataframe(sector_grouped.style.format({"實質曝險合計": "NT$ {:,.0f}", "產業曝險佔比 (%)": "{:.2f}%"}).background_gradient(subset=["產業曝險佔比 (%)"], cmap="Blues"), use_container_width=True, hide_index=True)
-                with sec_col2:
-                    import plotly.express as px
-                    fig_sec = px.pie(sector_grouped, names='產業別', values='產業曝險佔比 (%)', title="各精細產業別資金曝險佔比圓餅圖", hole=0.4, template="plotly_dark")
-                    fig_sec.update_traces(textinfo='percent+label')
-                    fig_sec.update_layout(height=320, margin=dict(l=10, r=10, t=40, b=10))
-                    st.plotly_chart(fig_sec, use_container_width=True)
+                    sec_col1, sec_col2 = st.columns([1.5, 2.5])
+                    with sec_col1:
+                        st.dataframe(sector_grouped.style.format({"實質曝險合計": "NT$ {:,.0f}", "產業曝險佔比 (%)": "{:.2f}%"}).background_gradient(subset=["產業曝險佔比 (%)"], cmap="Blues"), use_container_width=True, hide_index=True)
+                    with sec_col2:
+                        import plotly.express as px
+                        fig_sec = px.pie(sector_grouped, names='產業別', values='產業曝險佔比 (%)', title="各精細產業別資金曝險佔比圓餅圖", hole=0.4, template="plotly_dark")
+                        fig_sec.update_traces(textinfo='percent+label')
+                        fig_sec.update_layout(height=320, margin=dict(l=10, r=10, t=40, b=10))
+                        st.plotly_chart(fig_sec, use_container_width=True)
 
             st.markdown("---")
             st.subheader("🏦 各帳戶動態風險與全局槓桿 (即時市價結算)")
@@ -877,13 +897,25 @@ elif page == "第四頁：部位監控與量化風控":
                         st.caption(lbl_text)
 
                 acc_cols = [c for c in ['帳戶名稱', '現金餘額', '融資/質押借款', '名目曝險', '帳戶淨值', '可動用保證金', '距追繳金額', '槓桿率 (倍)', '權益比率%/現金水位%'] if c in account_data.columns]
+
+                def _known_num(pattern: str):
+                    def _fmt(value):
+                        try:
+                            number = float(value)
+                        except (TypeError, ValueError):
+                            return "未計入"
+                        if number != number:
+                            return "未計入"
+                        return pattern.format(number)
+                    return _fmt
+
                 fmt_dict = {
-                    "現金餘額": "NT$ {:,.0f}", "融資/質押借款": "NT$ {:,.0f}", "名目曝險": "NT$ {:,.0f}",
+                    "現金餘額": "NT$ {:,.0f}", "融資/質押借款": "NT$ {:,.0f}", "名目曝險": _known_num("NT$ {:,.0f}"),
                     "帳戶淨值": "NT$ {:,.0f}", "可動用保證金": "NT$ {:,.0f}", "距追繳金額": "NT$ {:,.0f}",
-                    "槓桿率 (倍)": "{:.2f}x", "權益比率%/現金水位%": "{:.1f}%"
+                    "槓桿率 (倍)": _known_num("{:.2f}x"), "權益比率%/現金水位%": "{:.1f}%"
                 }
                 st.dataframe(account_data[acc_cols].style.format(fmt_dict), use_container_width=True, hide_index=True)
-                st.caption("元大期貨：現金餘額＝本日餘額；帳戶淨值＝權益數＝本日餘額＋期貨未實現損益（期交所即時/夜盤價）；權益比率＝權益數÷原始保證金。")
+                st.caption("元大期貨：現金餘額＝本日餘額；帳戶淨值＝權益數＝本日餘額＋期貨未實現損益（期交所即時/夜盤價）；權益比率＝權益數÷原始保證金。名目曝險顯示「未計入」代表這個帳戶的部位都缺 Delta，不是曝險為 0。")
                 ledger_label = str(metrics.get("futures_cash_label") or "")
                 if ledger_label:
                     st.caption(f"元大明細：{ledger_label}")
@@ -911,7 +943,7 @@ elif page == "第四頁：部位監控與量化風控":
                     base_cols.extend(['Delta', '轉換價值(百元)', '轉換溢價(%)'])
                 if '報價來源' in df.columns:
                     base_cols.append('報價來源')
-                base_cols.extend(['顯示_投入總金額(原幣)', '顯示_即時市值(原幣)', '實質曝險(台幣)', '曝險Beta', 'Beta曝險(台幣)', '淨未實現損益(原幣)', '報酬率 (%)', '最大虧損比例'])
+                base_cols.extend(['顯示_投入總金額(原幣)', '顯示_即時市值(原幣)', '實質曝險(台幣)', '曝險Beta', 'Beta曝險(台幣)', '淨未實現損益(原幣)', '報酬率 (%)', '最大虧損比例', '停損來源'])
                 cols = [c for c in base_cols if c in df.columns]
                 display_df = df[cols].copy()
                 display_df.rename(columns={'顯示_投入總金額(原幣)': '投入總金額', '顯示_即時市值(原幣)': '即時市值(原幣)', '淨未實現損益(原幣)': '淨損益(原幣)', '實質曝險(台幣)': '名目曝險(台幣)'}, inplace=True)
@@ -929,11 +961,14 @@ elif page == "第四頁：部位監控與量化風控":
                     return _fmt
 
                 st.dataframe(display_df.style.format({
-                    "Beta值": "{:.2f}", "有效Beta": "{:.2f}", "真實風險權重 (%)": "{:.2f}%", "標的槓桿": "{:.1f}x", "持有數量": "{:,.0f}",
+                    "Beta值": "{:.2f}", "有效Beta": "{:.2f}", "標的槓桿": "{:.1f}x", "持有數量": "{:,.0f}",
                     "平均成本": "{:,.2f}", "即時報價": "{:,.2f}", "投入總金額": "{:,.0f}",
-                    "即時市值(原幣)": "{:,.0f}", "名目曝險(台幣)": "{:,.0f}", "曝險Beta": "{:.2f}", "Beta曝險(台幣)": "{:,.0f}", "淨損益(原幣)": "{:,.0f}", "報酬率 (%)": "{:+.2f}%",
+                    "即時市值(原幣)": "{:,.0f}", "淨損益(原幣)": "{:,.0f}", "報酬率 (%)": "{:+.2f}%",
                     "Delta": _blank_num("{:.2f}"), "轉換價值(百元)": _blank_num("{:,.2f}"), "轉換溢價(%)": _blank_num("{:+.1f}%"),
+                    "名目曝險(台幣)": _blank_num("{:,.0f}"), "Beta曝險(台幣)": _blank_num("{:,.0f}"), "曝險Beta": _blank_num("{:.2f}"),
+                    "真實風險權重 (%)": _blank_num("{:.2f}%"),
                 }, precision=2), use_container_width=True, hide_index=True)
+                st.caption("名目曝險空白表示 Delta 未知，沒有把這筆算成 0。停損來源「試算表」是持倉上寫的數字；「預設」是空白時依個股 −10%、2 倍 −15%、3 倍 −20% 補上。期貨、選擇權、可轉債沒有預設。")
 
                 if metrics.get("beta_fallbacks_used"):
                     names = "、".join(f"{item.get('標的')}（{item.get('Beta來源')}）" for item in metrics["beta_fallbacks_used"])
@@ -964,4 +999,5 @@ elif page == "第六頁：下單輔助系統":
         get_market_beta_and_sector,
         load_market=load_market_for_page6,
         clear_caches=clear_market_caches,
+        stop_dates_fn=cached_stop_dates,
     )

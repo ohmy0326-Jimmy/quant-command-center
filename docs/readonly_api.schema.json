@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.5.0",
+  "schema_version": "1.6.0",
   "header": "X-API-Key",
   "models": {
     "health": {
@@ -7,7 +7,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.5.0"
+            "1.6.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -199,8 +199,25 @@
                 }
               ],
               "default": null,
-              "description": "1.3.0 新增。名目曝險，台幣。現股／ETF＝market_value × leverage；期貨＝名目市值。",
+              "description": "1.3.0 新增。名目曝險，台幣。現股／ETF＝market_value × leverage；期貨＝名目市值。1.6.0 起，選擇權或可轉債／CBAS 沒有 Delta 時是 null，不是 0。Delta 為 0 仍是 0。",
               "title": "Notional Exposure"
+            },
+            "exposure_known": {
+              "default": true,
+              "description": "1.6.0 新增。false 表示這筆名目曝險未知，notional_exposure 是 null。",
+              "title": "Exposure Known",
+              "type": "boolean"
+            },
+            "delta_status": {
+              "default": "not_applicable",
+              "description": "1.6.0 新增。known 含 Delta 剛好是 0；missing 是沒有 Delta；not_applicable 是現股、ETF、期貨。",
+              "enum": [
+                "known",
+                "missing",
+                "not_applicable"
+              ],
+              "title": "Delta Status",
+              "type": "string"
             },
             "underlying": {
               "default": "",
@@ -437,7 +454,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.5.0"
+            "1.6.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -471,11 +488,35 @@
           "type": "string"
         },
         "warnings": {
-          "description": "1.4.0 新增。估價警告，例如匯率不是即時值。",
+          "description": "1.4.0 新增。估價警告，例如匯率不是即時值。1.6.0 起，缺 Delta 時也會說明合計不完整。",
           "items": {
             "type": "string"
           },
           "title": "Warnings",
+          "type": "array"
+        },
+        "exposure_complete": {
+          "default": true,
+          "description": "1.6.0 新增。false 表示有部位缺 Delta，exposure、leverage、beta 與 beta_leverage 只加總已知部位。",
+          "title": "Exposure Complete",
+          "type": "boolean"
+        },
+        "exposure_scope": {
+          "default": "complete",
+          "description": "1.6.0 新增。partial＝已知部位的部分合計，不是確認後的全部曝險。",
+          "enum": [
+            "complete",
+            "partial"
+          ],
+          "title": "Exposure Scope",
+          "type": "string"
+        },
+        "unknown_delta_symbols": {
+          "description": "1.6.0 新增。缺少 Delta、因此沒有計入名目曝險的代號。",
+          "items": {
+            "type": "string"
+          },
+          "title": "Unknown Delta Symbols",
           "type": "array"
         },
         "net_value": {
@@ -484,12 +525,12 @@
           "type": "number"
         },
         "exposure": {
-          "description": "總名目曝險，台幣。第四頁 metrics.exposure。＝beta_leverage.total.notional_exposure。",
+          "description": "已知名目曝險合計，台幣。exposure_complete 為 false 時這是部分合計，缺 Delta 的部位沒有算進去，也不是 0。＝beta_leverage.total.notional_exposure。",
           "title": "Exposure",
           "type": "number"
         },
         "leverage": {
-          "description": "名目曝險 ÷ 淨值。畫面上四捨五入到小數兩位。＝beta_leverage.total.leverage。",
+          "description": "已知名目曝險 ÷ 淨值。exposure_complete 為 false 時不完整。畫面上四捨五入到小數兩位。＝beta_leverage.total.leverage。",
           "title": "Leverage",
           "type": "number"
         },
@@ -582,7 +623,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.5.0"
+            "1.6.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -629,7 +670,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.5.0"
+            "1.6.0"
           ],
           "title": "Schema Version",
           "type": "string"

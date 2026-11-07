@@ -14,7 +14,7 @@ import pandas as pd
 
 from cb_holdings import product_kind
 
-SCHEMA_VERSION = "1.5.0"
+SCHEMA_VERSION = "1.6.0"
 TAIPEI = ZoneInfo("Asia/Taipei")
 
 
@@ -99,9 +99,34 @@ def position_records(positions: pd.DataFrame) -> list[dict]:
                 "conversion_value": _col(row, positions, "轉換價值(台幣)"),
                 "conversion_value_points": _col(row, positions, "轉換價值(百元)"),
                 "parity_premium_pct": _col(row, positions, "轉換溢價(%)"),
+                "exposure_known": _exposure_known(row, positions),
+                "delta_status": _delta_status(row, positions),
             }
         )
     return rows
+
+
+def _exposure_known(row, frame: pd.DataFrame) -> bool:
+    if "曝險已知" not in frame.columns:
+        return True
+    flag = row["曝險已知"]
+    if isinstance(flag, str):
+        return flag.strip().lower() not in {"false", "0", "no"}
+    try:
+        if pd.isna(flag):
+            return True
+    except TypeError:
+        pass
+    return bool(flag)
+
+
+def _delta_status(row, frame: pd.DataFrame) -> str:
+    if "Delta狀態" not in frame.columns:
+        return "not_applicable"
+    text = _name(row["Delta狀態"])
+    if text in {"known", "missing", "not_applicable"}:
+        return text
+    return "not_applicable"
 
 
 def yuanta_from_metrics(metrics: dict) -> dict:
@@ -155,13 +180,27 @@ def portfolio_payload(
     warnings: list[str] | None = None,
 ) -> dict:
     total_beta = float(metrics.get("total_beta", metrics.get("beta", 0.0)))
+    complete = bool(metrics.get("exposure_complete", True))
+    scope = str(metrics.get("exposure_scope") or ("complete" if complete else "partial"))
+    if scope not in {"complete", "partial"}:
+        scope = "complete" if complete else "partial"
+    warning_lines = [str(item) for item in (warnings or []) if str(item)]
+    if not complete:
+        from portfolio_risk import exposure_warning_text
+
+        text = exposure_warning_text(metrics)
+        if text not in warning_lines:
+            warning_lines.append(text)
     return {
         "schema_version": SCHEMA_VERSION,
         "as_of": format_as_of(as_of),
         "currency": "TWD",
         "usdtwd": float(usdtwd),
         "usdtwd_source": str(usdtwd_source),
-        "warnings": [str(w) for w in (warnings or [])],
+        "warnings": warning_lines,
+        "exposure_complete": complete,
+        "exposure_scope": scope,
+        "unknown_delta_symbols": [str(item) for item in (metrics.get("unknown_delta_symbols") or [])],
         "net_value": float(metrics.get("nav", 0.0)),
         "exposure": float(metrics.get("exposure", 0.0)),
         "leverage": float(metrics.get("leverage", 0.0)),

@@ -168,6 +168,10 @@ def render_risk_performance_card(
     dd = s["drawdown"]
     with st.container(border=True):
         st.subheader("📊 風險與績效")
+        if metrics.get("exposure_complete") is False:
+            from portfolio_risk import exposure_warning_text
+
+            st.error(exposure_warning_text(metrics))
         k1, k2, k3, k4 = st.columns(4)
         k1.metric(
             "現金水位",

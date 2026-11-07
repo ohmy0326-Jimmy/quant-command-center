@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import macro_risk
@@ -211,32 +211,106 @@ def rule_hedge(r: dict, prev: Record | None, now: datetime):
     return state, lit, alert
 
 
-def rule_stop_loss(r: dict, prev: Record | None, now: datetime):
+def stop_dates_from_value(value) -> dict[str, str]:
+    """Alert_State 的 value。舊版是人數的數字，沒有日期，不回推。"""
+    text = "" if value is None else str(value).strip()
+    if not text or text.lstrip("-").isdigit():
+        return {}
     try:
-        held = set(json.loads(prev.state)) if prev and prev.state else set()
+        raw = json.loads(text)
     except ValueError:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, str] = {}
+    for key, seen in raw.items():
+        iso = str(seen).strip()[:10]
+        try:
+            date.fromisoformat(iso)
+        except ValueError:
+            continue
+        out[str(key)] = iso
+    return out
+
+
+def _previous_stops(prev: Record | None) -> tuple[set[str], dict[str, str]]:
+    if prev is None or not prev.state:
+        return set(), {}
+    try:
+        parsed = json.loads(prev.state)
+    except ValueError:
+        return set(), {}
+    if isinstance(parsed, list):
+        held = {str(item) for item in parsed}
+    else:
         held = set()
+    return held, stop_dates_from_value(prev.value)
+
+
+def recorded_stop_dates(spreadsheet) -> dict[str, str]:
+    """讀 stop_loss 的首次觀察日。分頁不存在就回空，不建立、不寫入。"""
+    try:
+        worksheet = spreadsheet.worksheet(ALERT_STATE_SHEET)
+        rows = worksheet.get_all_records()
+    except Exception:
+        return {}
+    for row in rows:
+        if str(row.get("key") or "").strip() == "stop_loss":
+            return stop_dates_from_value(row.get("value"))
+    return {}
+
+
+def rule_stop_loss(r: dict, prev: Record | None, now: datetime):
+    from stop_rules import breach_age_label
+
+    held, dates = _previous_stops(prev)
+    today = now.astimezone(TAIPEI).date()
     current: set[str] = set()
+    kept: dict[str, str] = {}
     new_rows = []
     for p in r.get("positions") or []:
         key = f"{p.get('account', '')}|{p['ticker']}"
         roi, limit = float(p["roi"]), float(p["max_loss_pct"])
         if roi <= limit:
             current.add(key)
+            if key in dates:
+                kept[key] = dates[key]
+            elif key not in held:
+                kept[key] = today.isoformat()
             if key not in held:
                 new_rows.append(p)
         elif key in held and roi <= limit + STOP_CLEAR_PCT:
             current.add(key)
+            if key in dates:
+                kept[key] = dates[key]
     alert = None
     if new_rows:
-        lines = [f"{p.get('name') or p['ticker']}（{p['ticker']}）報酬 {float(p['roi']):.1f}%，停損線 {float(p['max_loss_pct']):.1f}%" for p in new_rows]
+        lines = []
+        for p in new_rows:
+            key = f"{p.get('account', '')}|{p['ticker']}"
+            lines.append(
+                f"{p.get('name') or p['ticker']}（{p['ticker']}）報酬 {float(p['roi']):.1f}%，"
+                f"停損線 {float(p['max_loss_pct']):.1f}%。{breach_age_label(kept.get(key), today)}"
+            )
         alert = Alert("stop_loss", NORMAL, f"⛔ 新觸發停損 {len(new_rows)} 檔", "\n".join(lines))
-    return json.dumps(sorted(current), ensure_ascii=False), str(len(current)), alert
+    return json.dumps(sorted(current), ensure_ascii=False), json.dumps(kept, ensure_ascii=False), alert
 
 
 def rule_leverage(r: dict, prev: Record | None, now: datetime):
     prev_state = prev.state if prev else "ok"
     lev = float(r["value"])
+    if r.get("exposure_complete", True) is False:
+        symbols = [str(item) for item in (r.get("unknown_delta_symbols") or []) if str(item)]
+        listed = "、".join(symbols) if symbols else "有部位"
+        alert = None
+        if prev_state != "incomplete":
+            alert = Alert(
+                "leverage",
+                NORMAL,
+                "⚠️ 槓桿與 Beta 不完整",
+                f"{listed} 缺少 Delta。已知槓桿 {lev:.2f}x 只含已知部位，不能當成未超標。",
+            )
+        return "incomplete", f"{lev:.3f}", alert
     if lev > LEVERAGE_WARN + 1e-9 or (prev_state == "high" and lev >= LEVERAGE_CLEAR):
         state = "high"
     else:
