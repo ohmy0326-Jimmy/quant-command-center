@@ -53,17 +53,132 @@ def render_macro_cycle_page(load_book=None, clear_caches=None):
     _show_warnings(view)
     if not view.get("ok"):
         st.warning("總經資料沒有套用。下單輔助暫用中性：1.5 倍、現金 15%。")
+    else:
+        _render_summary(view, book)
+        _render_history(view)
+        _render_indicators(view["indicators"])
+        _render_industries(view["industries"], book)
+        _render_framework(view["industries"], book)
+        with st.expander("四象限", expanded=False):
+            _render_quadrant(view["industries"], book)
+        with st.expander("制度對照"):
+            st.caption(regime_scale_text())
+            _render_risk_table(view["regime"])
+    _render_reference_panel()
+
+
+def _render_reference_panel() -> None:
+    """參考數據與黃燈次數。不改九項權重，按鈕按下才抓，也不寫試算表。"""
+    from reference_feeds import NOT_AVAILABLE, reference_rows
+
+    st.subheader("參考數據")
+    st.caption("這些不計入九項總分。抓不到是不完整，不是 0。寫入每週回補要另外執行 scripts/backfill_macro_history.py，這一頁不會自動寫。")
+    for item in NOT_AVAILABLE:
+        st.caption(f"{item['name']}：{item['why']}")
+    if st.button("讀參考數據", key="p5_reference"):
+        st.session_state["p5_reference_rows"] = reference_rows(_load_reference_values())
+    rows = st.session_state.get("p5_reference_rows")
+    if rows:
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+    if st.button("試算黃燈次數（不寫入）", key="p5_yellow_backtest"):
+        st.session_state["p5_yellow"] = _run_yellow_backtest()
+    report = st.session_state.get("p5_yellow")
+    if report:
+        if not report.get("ok"):
+            st.warning(report.get("note") or "資料不足")
+        else:
+            st.caption(
+                f"有效週 {report['weeks']}，完整 4 週窗口 {report['windows']}，"
+                f"黃燈 {report['yellow']}，樣本不足 {report['insufficient']}。沒有報酬數字。"
+            )
+    if st.button("寫入回補列", key="p5_backfill_write"):
+        _write_backfill(st.session_state.get("p5_yellow") or {})
+
+
+def _write_backfill(report: dict) -> None:
+    rows = report.get("rows") or []
+    if not rows:
+        st.warning("還沒有可寫的每週分數。先按試算黃燈次數。")
         return
-    _render_summary(view, book)
-    _render_history(view)
-    _render_indicators(view["indicators"])
-    _render_industries(view["industries"], book)
-    _render_framework(view["industries"], book)
-    with st.expander("四象限", expanded=False):
-        _render_quadrant(view["industries"], book)
-    with st.expander("制度對照"):
-        st.caption(regime_scale_text())
-        _render_risk_table(view["regime"])
+    try:
+        from macro_cycle_live import load_service_key, read_macro_tabs
+        from macro_history_backfill import append_backfill
+        from portfolio_risk import open_quant_spreadsheet
+
+        book = open_quant_spreadsheet(load_service_key())
+        existing = read_macro_tabs(book).get("history") or []
+        plan = append_backfill(book.worksheet("Macro_Score_History"), existing, rows)
+    except Exception:
+        st.warning("回補沒有寫入。已有的每日列不會被蓋過。")
+        return
+    st.caption(f"寫入 {len(plan['insert'])} 列，略過已有總分的 {len(plan['skipped'])} 週。")
+
+
+def _load_reference_values() -> dict:
+    import requests
+
+    from page1_lights import fetch_fred_observations
+    from reference_feeds import FRED_IDS, parse_institution_net, parse_margin_balance, parse_tsmc_revenue
+
+    found = {}
+    for key, series_id in FRED_IDS.items():
+        try:
+            points = fetch_fred_observations(series_id)
+        except Exception:
+            points = []
+        if points:
+            day, value = points[-1]
+            found[key] = {"value": value, "as_of": day.isoformat()}
+    try:
+        import yfinance as yf
+
+        frame = yf.Ticker("^MOVE").history(period="10d", auto_adjust=True)
+        closes = frame["Close"].dropna() if frame is not None else None
+        if closes is not None and len(closes):
+            found["move"] = {"value": float(closes.iloc[-1]), "as_of": closes.index[-1].date().isoformat()}
+    except Exception:
+        pass
+    _put(found, "tw_margin", "https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN?response=json&selectType=ALL", parse_margin_balance)
+    _put(found, "tw_institutions", "https://www.twse.com.tw/rwd/zh/fund/BFI82U?response=json", parse_institution_net)
+    try:
+        response = requests.get("https://openapi.twse.com.tw/v1/opendata/t187ap05_L", timeout=12, headers={"User-Agent": "quant-command-center/1.0"})
+        parsed = parse_tsmc_revenue(response.json())
+        if parsed:
+            found["tsmc_revenue"] = parsed
+    except Exception:
+        pass
+    return found
+
+
+def _put(found: dict, key: str, url: str, parser) -> None:
+    import requests
+
+    try:
+        response = requests.get(url, timeout=12, headers={"User-Agent": "quant-command-center/1.0"})
+        parsed = parser(response.json())
+    except Exception:
+        return
+    if parsed:
+        found[key] = parsed
+
+
+def _run_yellow_backtest() -> dict:
+    try:
+        from macro_history_backfill import reconstruct_fridays, yellow_threshold_backtest
+
+        rows = reconstruct_fridays(_load_auto_bundle())
+    except Exception:
+        return {"ok": False, "note": "自動歷史抓取失敗，資料不足。沒有把缺值當成 0。"}
+    if len([row for row in rows if row.get("total") is not None]) < 52:
+        report = yellow_threshold_backtest(rows)
+        report["rows"] = rows
+        report["ok"] = False
+        report["note"] = f"有效週只有 {report['weeks']}，少於 52。不把缺週補成 0。"
+        return report
+    report = yellow_threshold_backtest(rows)
+    report["rows"] = rows
+    report["ok"] = True
+    return report
 
 
 def _page5_view() -> dict:
