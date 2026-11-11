@@ -140,8 +140,12 @@ class SourceTests(unittest.TestCase):
     def test_missing_fmp_key_does_not_invent_events(self):
         model = cal.build_calendar([], "", {}, None, date(2026, 11, 7), FETCHED)
         blob = " ".join(event["title"] for event in model["events"])
-        self.assertNotIn("FOMC", blob)
         self.assertNotIn("M7", blob)
+        self.assertFalse(any(event.get("source") == "FMP 經濟行事曆" and "FOMC" in event["title"] for event in model["events"]))
+        fomc = [event for event in model["events"] if "FOMC" in event["title"]]
+        self.assertTrue(fomc)
+        self.assertTrue(all(event["certainty"] == "官方日期待確認" for event in fomc))
+        self.assertTrue(all(event["estimate"] is None and event["actual"] is None for event in fomc))
         self.assertTrue(any("FMP_API_KEY" in note for note in model["notes"]))
         self.assertTrue(any(event["kind"] == "settlement" for event in model["events"]))
 
@@ -254,7 +258,7 @@ class ImpactTests(unittest.TestCase):
         self.assertIn("台積電", joined)
         self.assertIn("台指期", joined)
         self.assertNotIn("蘋果", joined)
-        cpi = next(event for event in model["events"] if event["kind"] == "us_macro")
+        cpi = next(event for event in model["events"] if event["title"] == "CPI")
         self.assertIn("蘋果", cpi["impacts"][0])
         self.assertNotIn("台積電", cpi["impacts"][0])
         self.assertIsNone(cpi["actual"])
@@ -645,6 +649,52 @@ calendar_page.render_calendar(
             self.assertIn("行事曆戰術建議：財報 AAPL", title)
             self.assertEqual(body, "建議只談這一則")
             self.assertNotIn("2330", title)
+
+
+class OfficialDateTests(unittest.TestCase):
+    def test_window_uses_table_and_does_not_shift_settlement(self):
+        import calendar_view
+
+        model = cal.build_calendar([], "", {}, None, date(2026, 11, 7), FETCHED, official_confirmed=set())
+
+        def on(title, day):
+            return any(event["title"] == title and event["date"] == day for event in model["events"])
+
+        self.assertTrue(on("聯準會 FOMC 決策", date(2026, 12, 9)))
+        self.assertTrue(on("台灣央行理監事會", date(2026, 12, 17)))
+        self.assertTrue(on("美國 CPI（2026年11月）", date(2026, 12, 10)))
+        self.assertTrue(on("美國非農就業（2026年11月）", date(2026, 12, 4)))
+        self.assertTrue(on("美國 GDP（2026年第3季第二次估計）", date(2026, 11, 25)))
+        self.assertTrue(on("台灣 GDP（2026年第3季初步統計）", date(2026, 11, 30)))
+        self.assertTrue(on("MSCI 2026年11月指數檢討生效", date(2026, 12, 1)))
+        self.assertTrue(all(event["certainty"] == "官方日期待確認" for event in model["events"] if event["kind"] in {"rate", "index"} or "GDP" in event["title"] or "CPI" in event["title"] or "非農" in event["title"] or "央行" in event["title"]))
+        view = calendar_view.shape_calendar(model, date(2026, 11, 7))
+        badge = next(row for row in view["rows"] if row["事件"] == "聯準會 FOMC 決策")
+        self.assertEqual(badge["確定度"], "待確認")
+        self.assertNotEqual(badge["確定度"], "官方")
+        feb = cal.monthly_settlement(2026, 2)
+        self.assertIsNone(feb["date"])
+        self.assertEqual(feb["anchor"], date(2026, 2, 18))
+
+    def test_confirmed_page_is_official_and_fetch_failure_keeps_table(self):
+        from official_dates import confirm_official_dates
+
+        class Response:
+            status_code = 200
+            text = "December 8-9 and nothing else"
+
+        confirmed = confirm_official_dates(get=lambda url, timeout=8: Response())
+        self.assertEqual(confirmed, {"fomc"})
+        model = cal.build_calendar([], "", {}, None, date(2026, 11, 7), FETCHED, official_confirmed=confirmed)
+        fomc = next(event for event in model["events"] if event["title"] == "聯準會 FOMC 決策")
+        cbc = next(event for event in model["events"] if event["title"] == "台灣央行理監事會")
+        self.assertEqual(fomc["certainty"], "官方")
+        self.assertEqual(cbc["certainty"], "官方日期待確認")
+
+        def broken(url, timeout=8):
+            raise TimeoutError("down")
+
+        self.assertEqual(confirm_official_dates(get=broken), set())
 
 
 if __name__ == "__main__":

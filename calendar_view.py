@@ -14,8 +14,9 @@ KIND_LABEL = {
     "us_macro": "總經",
     "rate": "總經",
     "fx": "總經",
+    "index": "總經",
 }
-MARKET_LABEL = {"TW": "台", "US": "美", "FX": "匯率"}
+MARKET_LABEL = {"TW": "台", "US": "美", "FX": "匯率", "BOTH": "台美"}
 TYPE_NOTES = {
     "結算": "結算與週選是規則推估或未知，沒有逐月核對期交所公告，也沒有標成官方確認。",
     "財報": "財報日是估計。有時區才換算成台北，並標美股原來的盤前或盤後。",
@@ -45,6 +46,8 @@ def market_label(event: dict) -> str:
 
 def certainty_badge(event: dict) -> str:
     text = str(event.get("certainty") or "")
+    if "待確認" in text:
+        return "待確認"
     if "官方" in text:
         return "官方"
     if not text or "未知" in text:
