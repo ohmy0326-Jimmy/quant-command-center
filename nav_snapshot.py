@@ -17,9 +17,12 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime, timedelta
 
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 from sheet_dates import parse_sheet_date, taipei_today
 
@@ -198,6 +201,92 @@ def _live_market(positions: pd.DataFrame):
     return prices, betas, sectors, extras
 
 
+def macro_candidate_from_sheet(spreadsheet, today: str) -> dict:
+    """只採用試算表裡齊全的九項分數。缺任何一項就留空，不用倉庫示例補。"""
+    from macro_cycle import CANONICAL_IDS, regime_for_score
+    from macro_cycle_live import read_macro_tabs
+    from macro_cycle_sheet import parse_score_rows
+
+    tabs = read_macro_tabs(spreadsheet)
+    parsed, _warnings = parse_score_rows(tabs.get("scores") or [])
+    if set(parsed) != set(CANONICAL_IDS):
+        return {"week": today, "total": None, "regime": None}
+    total = sum(int(parsed[item_id]["score"]) for item_id in CANONICAL_IDS)
+    return {"week": today, "total": total, "regime": regime_for_score(total)}
+
+
+def _history_rows(spreadsheet) -> list[dict]:
+    from macro_cycle_sheet import HISTORY_TAB
+
+    try:
+        from gspread.exceptions import WorksheetNotFound
+    except ImportError:  # pragma: no cover
+        WorksheetNotFound = KeyError
+    try:
+        worksheet = spreadsheet.worksheet(HISTORY_TAB)
+    except (WorksheetNotFound, KeyError):
+        return []
+    try:
+        return list(worksheet.get_all_records())
+    except Exception:
+        return []
+
+
+def _cell(value):
+    return "" if value is None else value
+
+
+def record_macro_history(spreadsheet, today: str, candidate: dict | None = None) -> dict:
+    """把台北當天的總分寫進 Macro_Score_History。同一天只有一列。"""
+    from macro_cycle_sheet import HISTORY_HEADERS, HISTORY_TAB
+    from macro_score_trend import plan_history_upsert
+
+    chosen = candidate if candidate is not None else macro_candidate_from_sheet(spreadsheet, today)
+    plan = plan_history_upsert(_history_rows(spreadsheet), chosen, today, replace_same_day=True)
+    summary = {
+        "status": {"insert": "written", "update": "written", "keep": "kept", "reject": "skipped"}.get(plan["action"], "skipped"),
+        "action": plan["action"],
+        "sheet": HISTORY_TAB,
+        "date": plan.get("week") or today,
+        "total": plan.get("total"),
+        "regime": plan.get("regime"),
+        "detail": plan["reason"],
+    }
+    if plan["action"] not in {"insert", "update"}:
+        return summary
+    worksheet, _created, _migrated = _ensure_worksheet(spreadsheet, HISTORY_TAB, list(HISTORY_HEADERS))
+    values = [_cell(plan.get("week")), _cell(plan.get("total")), _cell(plan.get("regime"))]
+    existing = worksheet.col_values(1)
+    target = None
+    for index, raw in enumerate(existing[1:], start=2):
+        if parse_sheet_date(raw) == parse_sheet_date(plan.get("week")):
+            target = index
+            break
+    if target is None:
+        target = max(len(existing), 1) + 1
+    worksheet.update(range_name=f"A{target}:C{target}", values=[values], value_input_option="USER_ENTERED")
+    summary["sheet_created"] = _created
+    return summary
+
+
+def attach_macro_history(payload: dict, spreadsheet, today: str) -> dict:
+    """分數寫入失敗只記在摘要裡，不推翻已經寫好的淨值快照。"""
+    try:
+        payload["macro_history"] = record_macro_history(spreadsheet, today)
+    except Exception:
+        logger.exception("macro history accumulation failed")
+        payload["macro_history"] = {
+            "status": "failed",
+            "action": "failed",
+            "sheet": "Macro_Score_History",
+            "date": str(today),
+            "total": None,
+            "regime": None,
+            "detail": "分數累積失敗，淨值快照已寫入。",
+        }
+    return payload
+
+
 def take_snapshot(now: datetime | None = None, spreadsheet=None, usdtwd: float | None = None, market=None) -> dict:
     """算出今天（台北）的淨值並寫入 NAV_Snapshots。回傳寫入的那一列與摘要。"""
     from futures_ledger import FUTURES_LEDGER_SHEET, ledger_cash_flows
@@ -242,7 +331,7 @@ def take_snapshot(now: datetime | None = None, spreadsheet=None, usdtwd: float |
         fx_warnings.append(f"{fx.warning()} 這一列已標記「匯率來源＝{fx.source}」，匯率恢復後同一天重跑會覆蓋。")
     if result["header_migrated"]:
         fx_warnings.append("NAV_Snapshots 舊表頭已在右邊補上 USDTWD、匯率來源兩欄（舊資料未變動）。")
-    return {
+    payload = {
         "date": row["日期"],
         "action": result["action"],
         "sheet": SNAPSHOT_SHEET,
@@ -258,6 +347,7 @@ def take_snapshot(now: datetime | None = None, spreadsheet=None, usdtwd: float |
         "usdtwd_source": fx.source,
         "warnings": [str(w) for w in fx_warnings + list(row_warnings) + flow_warnings],
     }
+    return attach_macro_history(payload, book, row["日期"])
 
 
 # ---------------------------------------------------------------- 捕獲率

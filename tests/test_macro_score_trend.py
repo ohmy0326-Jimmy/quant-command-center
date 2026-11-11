@@ -140,6 +140,14 @@ class AlignmentTests(unittest.TestCase):
         self.assertEqual(view["score_trend"]["light"], "未達黃燈")
         self.assertEqual(view["history"][0]["total"], 2)
         self.assertNotEqual(view["history"], base["history"])
+        blank = dict(sheet)
+        blank["history"] = [{"week": "2026-02-02", "total": "", "regime": ""}]
+        unused = compose_macro_view(base, blank, {}, today="2026-02-02")
+        self.assertEqual(unused["history_origin"], "sheet")
+        self.assertEqual(unused["history"], [])
+        self.assertFalse(unused["history_example"])
+        self.assertEqual(unused["score_trend"]["count"], 0)
+        self.assertEqual(unused["score_trend"]["light"], "未知")
 
     def test_upsert_does_not_overwrite_and_is_not_enabled(self):
         existing = [{"week": "2026-02-02", "total": 4, "regime": "偏多"}]
@@ -155,6 +163,25 @@ class AlignmentTests(unittest.TestCase):
         self.assertEqual(len(existing), 1)
         future = plan_history_upsert(existing, {"week": "2026-03-01", "total": 1, "regime": "中性"}, "2026-02-09")
         self.assertEqual(future["action"], "reject")
+
+    def test_missing_score_is_null_and_same_day_rerun_updates_one_row(self):
+        blank = plan_history_upsert([], {"week": "2026-02-02", "total": None, "regime": None}, "2026-02-02")
+        self.assertEqual(blank["action"], "insert")
+        self.assertIsNone(blank["rows"][0]["total"])
+        self.assertIsNone(blank["rows"][0]["regime"])
+        self.assertNotEqual(blank["rows"][0]["total"], 0)
+        kept = plan_history_upsert(blank["rows"], {"week": "2026-02-02", "total": None}, "2026-02-02")
+        self.assertEqual(kept["action"], "keep")
+        self.assertEqual(len(kept["rows"]), 1)
+        filled = plan_history_upsert(blank["rows"], {"week": "2026-02-02", "total": 4, "regime": "偏多"}, "2026-02-02", replace_same_day=True)
+        self.assertEqual(filled["action"], "update")
+        self.assertEqual(filled["rows"], [{"week": "2026-02-02", "total": 4, "regime": "偏多"}])
+        again = plan_history_upsert(filled["rows"], {"week": "2026-02-02", "total": 4, "regime": "偏多"}, "2026-02-02", replace_same_day=True)
+        self.assertEqual(again["action"], "keep")
+        self.assertEqual(len(again["rows"]), 1)
+        preserve = plan_history_upsert(filled["rows"], {"week": "2026-02-02", "total": None}, "2026-02-02", replace_same_day=True)
+        self.assertEqual(preserve["action"], "keep")
+        self.assertEqual(preserve["total"], 4)
 
     def test_brake_and_page3_buttons_stay(self):
         self.assertEqual(BRAKE_PAUSE_PCT, -8)

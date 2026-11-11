@@ -3,6 +3,7 @@ import os
 import sys
 import textwrap
 import unittest
+import unittest.mock
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
@@ -319,6 +320,61 @@ class SnapshotApiTests(unittest.TestCase):
         self.assertEqual(r.status_code, 502)
         self.assertEqual(r.json()["detail"], "snapshot failed")
         self.assertNotIn("SENTINEL", r.text)
+
+    def test_macro_history_is_idempotent_and_does_not_invent_scores(self):
+        from macro_cycle import CANONICAL_IDS
+
+        book = FakeBook({})
+        missing = ns.macro_candidate_from_sheet(book, "2026-11-04")
+        self.assertIsNone(missing["total"])
+        self.assertIsNone(missing["regime"])
+        first = ns.record_macro_history(book, "2026-11-04", missing)
+        self.assertEqual(first["status"], "written")
+        self.assertIsNone(first["total"])
+        sheet = book.worksheet("Macro_Score_History")
+        self.assertEqual(sheet.rows[1][1], "")
+        self.assertNotEqual(sheet.rows[1][1], 0)
+        second = ns.record_macro_history(book, "2026-11-04", missing)
+        self.assertEqual(second["status"], "kept")
+        self.assertEqual(len(sheet.rows), 2)
+
+        partial = FakeBook({
+            "Macro_Score": [["indicator_id", "name", "score", "source", "value", "trend", "note", "updated_at"],
+                            ["vix", "VIX", 1, "manual", "", "", "", "2026-11-04"]],
+        })
+        self.assertIsNone(ns.macro_candidate_from_sheet(partial, "2026-11-04")["total"])
+
+        scores = [["indicator_id", "name", "score", "source", "value", "trend", "note", "updated_at"]]
+        scores.extend([[item_id, item_id, 0, "manual", "", "", "", "2026-11-04"] for item_id in CANONICAL_IDS])
+        scored = FakeBook({"Macro_Score": scores})
+        candidate = ns.macro_candidate_from_sheet(scored, "2026-11-04")
+        self.assertEqual(candidate["total"], 0)
+        self.assertEqual(candidate["regime"], "中性")
+        written = ns.record_macro_history(scored, "2026-11-04", candidate)
+        self.assertEqual(written["status"], "written")
+        changed = dict(candidate, total=4, regime="偏多")
+        updated = ns.record_macro_history(scored, "2026-11-04", changed)
+        self.assertEqual(updated["status"], "written")
+        self.assertEqual(updated["action"], "update")
+        history = scored.worksheet("Macro_Score_History")
+        self.assertEqual(len(history.rows), 2)
+        self.assertEqual(history.rows[1][1], 4)
+        kept = ns.record_macro_history(scored, "2026-11-04", {"week": "2026-11-04", "total": None, "regime": None})
+        self.assertEqual(kept["status"], "kept")
+        self.assertEqual(history.rows[1][1], 4)
+
+    def test_macro_failure_does_not_fail_snapshot_summary(self):
+        def boom(_spreadsheet, _today):
+            raise RuntimeError("history down")
+
+        payload = {"date": "2026-11-04", "action": "inserted", "sheet": "NAV_Snapshots"}
+        with unittest.mock.patch.object(ns, "record_macro_history", boom):
+            out = ns.attach_macro_history(payload, object(), "2026-11-04")
+        self.assertEqual(out["action"], "inserted")
+        self.assertEqual(out["sheet"], "NAV_Snapshots")
+        self.assertEqual(out["macro_history"]["status"], "failed")
+        self.assertIsNone(out["macro_history"]["total"])
+        self.assertNotIn("history down", out["macro_history"]["detail"])
 
     def test_snapshot_key_is_redacted(self):
         from api.auth import redact_secrets
