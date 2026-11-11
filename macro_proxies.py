@@ -105,16 +105,21 @@ def _as_date(value) -> date | None:
         return None
 
 
-def manual_override_fresh(source: str | None, updated_at, today, days: int = OVERRIDE_DAYS) -> bool:
-    """source 必須是手動，而且 updated_at 落在今天往回 days 天以內（含當天與第 days 天）。"""
-    if str(source or "").strip().lower() not in {"manual", "手動"}:
-        return False
+def updated_within(updated_at, today, days: int = OVERRIDE_DAYS) -> bool:
+    """updated_at 落在今天往回 days 天以內（含當天與第 days 天）。未來日期不算。"""
     updated = _as_date(updated_at)
     current = _as_date(today)
     if updated is None or current is None:
         return False
     age = (current - updated).days
     return 0 <= age <= days
+
+
+def manual_override_fresh(source: str | None, updated_at, today, days: int = OVERRIDE_DAYS) -> bool:
+    """Macro_Score 的覆寫：source 必須是 manual 或手動，而且日期還在期限內。"""
+    if str(source or "").strip().lower() not in {"manual", "手動"}:
+        return False
+    return updated_within(updated_at, today, days)
 
 
 def score_pmi_level(mean: float, direction: str) -> int:

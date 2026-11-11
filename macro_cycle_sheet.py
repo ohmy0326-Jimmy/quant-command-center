@@ -272,17 +272,17 @@ def split_tickers(value) -> list[str]:
 
 
 def parse_sheet_date(value) -> str | None:
-    if value is None or value == "":
-        return None
-    if hasattr(value, "isoformat"):
-        text = value.isoformat()[:10]
-    else:
-        text = str(value).strip().replace("/", "-")[:10]
-    from macro_cycle import _parse_iso_date
+    """試算表日期一律收成 YYYY-MM-DD。
 
-    if _parse_iso_date(text) is None:
+    Google 試算表常把日期存成序號，或依語系顯示成 2026/11/7。
+    只認 YYYY-MM-DD 會把整列丟掉，第五頁就退回倉庫示例。
+    """
+    from sheet_dates import parse_sheet_date as parse_any_sheet_date
+
+    parsed = parse_any_sheet_date(value)
+    if parsed is None:
         return None
-    return text
+    return parsed.isoformat()
 
 
 def compose_macro_view(json_view: dict, sheet: dict | None, auto: dict | None, today: str | None = None) -> dict:
@@ -644,13 +644,14 @@ def _apply_proxies(view: dict, auto: dict, warnings: list[str], today: str) -> N
 
 
 def _apply_industry_prices(industries: list[dict], auto: dict, today: str) -> None:
-    from macro_proxies import PRICE_CYCLE_LABEL, manual_override_fresh
+    from macro_proxies import PRICE_CYCLE_LABEL, updated_within
 
     if not isinstance(auto, dict) or "industry_rs" not in auto:
         return
     quotes = auto.get("industry_rs") or {}
     for item in industries:
-        if manual_override_fresh(item.get("source"), item.get("updated_at"), today):
+        # Industry_Cycle 沒有 source 欄。試算表上 45 日內的列就是手動覆寫。
+        if item.get("origin") == "sheet" and updated_within(item.get("updated_at"), today):
             item["cycle_layer"] = "手動"
             item["cycle_note"] = ""
             continue
@@ -670,7 +671,7 @@ def _apply_industry_prices(industries: list[dict], auto: dict, today: str) -> No
         if item.get("origin") == "sheet":
             item["cycle"] = None
             item["cycle_layer"] = "未知"
-            item["cycle_note"] = "沒有 45 日內的手動覆寫，也沒有價格推估"
+            item["cycle_note"] = "試算表這列已超過 45 日，也沒有價格推估"
 
 
 def _refresh_totals(view: dict, today: str | None = None) -> dict:

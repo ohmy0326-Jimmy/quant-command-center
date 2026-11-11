@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from macro_cycle import REGIME_RISK, load_macro_cycle
 from macro_cycle_live import fetch_auto_results
-from macro_cycle_sheet import compose_macro_view
+from macro_cycle_sheet import compose_macro_view, parse_score_row, parse_sheet_date
 from macro_proxies import (
     EMPIRE_HEADLINE,
     EMPIRE_IDS_NOT_ON_FRED,
@@ -255,6 +255,83 @@ class OverrideAndFetchTests(unittest.TestCase):
         row = next(item for item in replaced["industries"] if item["name"] == "金融")
         self.assertEqual(row["cycle"], "成長")
         self.assertEqual(row["cycle_note"], "價格推估，非基本面")
+
+    def test_sheet_dates_are_not_dropped(self):
+        # 2026-11-07 的試算表序號，以及沒有補零的 2026/11/7。
+        self.assertEqual(parse_sheet_date(46333), "2026-11-07")
+        self.assertEqual(parse_sheet_date("2026/11/7"), "2026-11-07")
+        self.assertEqual(parse_sheet_date("2026-11-07"), "2026-11-07")
+        self.assertEqual(parse_sheet_date(20261107), "2026-11-07")
+
+    def test_live_macro_score_rows_override_and_autos_stay_live(self):
+        today = "2026-11-11"
+        rows = []
+        for item_id, source, score in (
+            ("us_real_yield", "manual", 2),
+            ("hy_spread", "auto", 2),
+            ("vix", "manual", 2),
+            ("equity_ma", "auto", 2),
+            ("sox_trend", "manual", 2),
+            ("pmi", "manual", 1),
+            ("earnings_revisions", "手動", 0),
+            ("valuation", "manual", -1),
+            ("tw_activity", "manual", 1),
+        ):
+            rows.append(
+                {
+                    "indicator_id": item_id,
+                    "name": "",
+                    "score": score,
+                    "source": source,
+                    "value": "表",
+                    "trend": "",
+                    "note": "",
+                    "updated_at": "2026-11-07",
+                }
+            )
+        parsed, error = parse_score_row(rows[-1])
+        self.assertIsNone(error)
+        self.assertEqual(parsed["source"], "manual")
+        self.assertEqual(parsed["updated_at"], "2026-11-07")
+        sheet = {"ok": True, "scores": rows, "industries": [], "score_error": None, "industry_error": "略過產業"}
+        live = {
+            "us_real_yield": {"ok": True, "score": -2, "value": "即時", "updated_at": today},
+            "hy_spread": {"ok": True, "score": -2, "value": "即時", "updated_at": today},
+            "vix": {"ok": True, "score": -2, "value": "即時", "updated_at": today},
+            "equity_ma": {"ok": True, "score": -2, "value": "即時", "updated_at": today},
+            "sox_trend": {"ok": True, "score": -2, "value": "即時", "updated_at": today},
+            "pmi": {"ok": True, "score": -2, "value": "代理", "data_date": "2026-10-01"},
+        }
+        view = compose_macro_view(load_macro_cycle(), sheet, live, today=today)
+        by_id = {item["id"]: item for item in view["indicators"]}
+        for item_id in ("us_real_yield", "hy_spread", "vix", "equity_ma", "sox_trend"):
+            self.assertEqual(by_id[item_id]["score"], -2, item_id)
+            self.assertEqual(by_id[item_id]["layer"], "自動", item_id)
+        self.assertEqual(by_id["pmi"]["score"], 1)
+        self.assertEqual(by_id["pmi"]["layer"], "手動")
+        self.assertEqual(by_id["earnings_revisions"]["score"], 0)
+        self.assertEqual(by_id["earnings_revisions"]["layer"], "手動")
+        self.assertEqual(by_id["valuation"]["layer"], "手動")
+        self.assertEqual(by_id["tw_activity"]["layer"], "手動")
+        self.assertNotEqual(view["data_origin"], "json")
+        self.assertTrue(all(not item["example"] for item in view["indicators"]))
+
+    def test_industry_row_without_source_is_override_while_fresh(self):
+        industries = [{
+            "industry": "金融",
+            "cycle": "復甦",
+            "direction": "上行",
+            "stance": "中性",
+            "tickers": "2881",
+            "updated_at": "2026-10-29",
+        }]
+        sheet = {"ok": True, "scores": [], "industries": industries, "score_error": "略過分數", "industry_error": None}
+        auto = {"industry_rs": {"金融": {"ok": True, "cycle": "衰退", "direction": "下行"}}}
+        view = compose_macro_view(load_macro_cycle(), sheet, auto, today="2026-11-11")
+        row = next(item for item in view["industries"] if item["name"] == "金融")
+        self.assertEqual(row["cycle"], "復甦")
+        self.assertEqual(row["cycle_layer"], "手動")
+        self.assertNotIn("source", industries[0])
 
 
 if __name__ == "__main__":
