@@ -49,6 +49,7 @@ import page1_lights
 import sector_board
 import chart_history
 import calendar_events
+import official_dates
 import calendar_actions
 import calendar_page
 
@@ -390,6 +391,10 @@ def load_calendar_model(watchlist: str):
         except Exception:
             fmp_items = []
             fmp_error = "FMP 來源失敗，這一段缺漏。其餘事件仍顯示。不會改用寫死日期。"
+    try:
+        official_confirmed = official_dates.confirm_official_dates()
+    except Exception:
+        official_confirmed = set()
     return calendar_events.build_calendar(
         rows,
         watchlist,
@@ -398,6 +403,7 @@ def load_calendar_model(watchlist: str):
         today,
         fetched_at,
         fmp_error=fmp_error,
+        official_confirmed=official_confirmed,
     )
 
 
