@@ -854,6 +854,10 @@ elif page == "第四頁：部位監控與量化風控":
                     st.markdown("---")
 
             # 風險與績效：Beta／槓桿三列表、現金、借款、最大回撤、回撤煞車燈合併成一張卡
+            try:
+                metrics["tw_index"] = float(cached_twii())
+            except Exception:
+                metrics["tw_index"] = None
             render_risk_performance_card(st, metrics, nav_series, capture, nav_flows)
             if not df.empty:
                 known_exposure = pd.to_numeric(df['實質曝險(台幣)'], errors="coerce")

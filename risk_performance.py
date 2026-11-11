@@ -157,6 +157,80 @@ def capture_table(capture: dict | None) -> pd.DataFrame | None:
     )
 
 
+def _fmt(value, digits=0):
+    if value is None:
+        return "—"
+    return f"{float(value):,.{digits}f}"
+
+
+def _render_greeks_and_beta(st, metrics: dict) -> None:
+    from portfolio_greeks import DEFAULT_BETA_BANDS, DEFAULT_NOTE, REGIMES, apply_indexes, beta_targets, trusted_regime
+    from macro_cycle_live import macro_view_for_orders
+
+    greeks = apply_indexes(metrics.get("portfolio_greeks") or {"tw": {}, "us": {}}, metrics.get("tw_index"), metrics.get("us_index"))
+    st.markdown("**全組合 Delta／Theta**")
+    st.caption("台股與美股分開，不加總。缺希臘值顯示 —，沒有當成 0。點數是原生貨幣名目 ÷ 指數價。")
+    rows = []
+    for key, label in (("tw", "台股"), ("us", "美股")):
+        book = greeks.get(key) or {}
+        rows.append({
+            "市場": label,
+            "幣別": book.get("currency") or "",
+            "Delta 點數": _fmt(book.get("delta_points"), 1),
+            "Delta 名目": _fmt(book.get("delta_notional"), 0),
+            "Theta／日": _fmt(book.get("theta_per_day"), 0),
+            "完整": "是" if book.get("delta_complete") and book.get("theta_complete") and book.get("points_complete") else "否",
+        })
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    overrides = {"TW": {}, "US": {}}
+    with st.expander("目標 Beta 區間（程式預設）", expanded=False):
+        st.caption(DEFAULT_NOTE + " 改動只留在這次工作階段。")
+        for market in ("TW", "US"):
+            for regime in REGIMES:
+                low_default, high_default = DEFAULT_BETA_BANDS[market][regime]
+                left, right = st.columns(2)
+                low = left.number_input(f"{market} {regime} 下限", value=float(low_default), step=0.05, key=f"beta_band_{market}_{regime}_low")
+                high = right.number_input(f"{market} {regime} 上限", value=float(high_default), step=0.05, key=f"beta_band_{market}_{regime}_high")
+                overrides[market][regime] = (float(low), float(high))
+    try:
+        regime = trusted_regime(macro_view_for_orders())
+    except Exception:
+        regime = None
+    targets = beta_targets(
+        regime,
+        metrics.get("tw_beta"),
+        metrics.get("us_beta"),
+        metrics.get("tw_nav"),
+        metrics.get("us_nav"),
+        tw_index=metrics.get("tw_index"),
+        us_index=metrics.get("us_index"),
+        usdtwd=metrics.get("usdtwd"),
+        beta_complete=bool(metrics.get("exposure_complete", True)),
+        overrides=overrides,
+    )
+    if targets.get("regime") is None:
+        st.caption("沒有試算表上的多空狀態，不設目標 Beta，也不估算避險口數。")
+        return
+    st.caption(f"狀態 {targets['regime']}。{targets['note']} 台股只用台指期、小台或 TXO；美股只用 SPX、XSP 或 SPY。")
+    for key, label in (("tw", "台股"), ("us", "美股")):
+        item = targets.get(key)
+        if not item:
+            st.caption(f"{label}：沒有目標。")
+            continue
+        if not item.get("complete"):
+            st.caption(f"{label} Beta 不完整，區間 {item['low']:.2f}～{item['high']:.2f}，不估算缺口。")
+            continue
+        gap = item.get("gap")
+        hedge = item.get("hedge_notional")
+        extra = ""
+        if item.get("tx_lots") is not None:
+            extra = f"；約當台指期 {item['tx_lots']:.2f} 口、小台 {item['mtx_lots']:.2f} 口"
+        st.caption(
+            f"{label} 目前 {item['current']:.2f}，區間 {item['low']:.2f}～{item['high']:.2f}，"
+            f"缺口 {gap:+.2f}，同市場避險名目 {_fmt(hedge, 0)} {item.get('instruments')}{extra}。"
+        )
+
+
 def render_risk_performance_card(
     st, metrics: dict, nav_series: pd.Series | None = None, capture: dict | None = None, flows: dict | None = None
 ) -> dict:
@@ -201,6 +275,7 @@ def render_risk_performance_card(
         else:
             st.caption(HISTORY_UNAVAILABLE)
 
+        _render_greeks_and_beta(st, metrics)
         table = capture_table(capture)
         if table is None:
             st.caption(f"📐 {capture_status_text(capture)}")

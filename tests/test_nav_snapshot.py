@@ -405,7 +405,7 @@ def test_card_shows_insufficient_sample():
     assert not at.exception
     captions = " ".join(str(c.value) for c in at.caption)
     assert "樣本不足（目前 12 個交易日，需 60）" in captions
-    assert len(at.dataframe) == 1
+    assert len(at.dataframe) == 2
 
 
 def test_card_shows_capture_table():
@@ -416,8 +416,8 @@ def test_card_shows_capture_table():
            '{"基準": "美股 ^GSPC", "上檔捕獲": None, "下檔捕獲": 90.0, "月數": 4, "上漲月": 0, "下跌月": 4}]}')
     at = AppTest.from_string(_card_script(cap), default_timeout=60).run()
     assert not at.exception
-    assert len(at.dataframe) == 2
-    table = at.dataframe[1].value
+    assert len(at.dataframe) == 3
+    table = at.dataframe[2].value
     assert table["上檔捕獲"].tolist() == ["120%", "—"]
     assert table["下檔捕獲"].tolist() == ["85%", "90%"]
 

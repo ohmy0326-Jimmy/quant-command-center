@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.6.0",
+  "schema_version": "1.7.0",
   "header": "X-API-Key",
   "models": {
     "health": {
@@ -7,7 +7,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.6.0"
+            "1.7.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -454,7 +454,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.6.0"
+            "1.7.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -592,6 +592,18 @@
         },
         "yuanta_futures": {
           "$ref": "#/$defs/YuantaFuturesResponse"
+        },
+        "greeks": {
+          "additionalProperties": true,
+          "description": "1.7.0 新增。台股與美股分開的 Delta／Theta。缺值是 null，合計不完整時 delta_complete 或 theta_complete 為 false，缺的部位沒有當成 0。兩市場不加總。",
+          "title": "Greeks",
+          "type": "object"
+        },
+        "beta_targets": {
+          "additionalProperties": true,
+          "description": "1.7.0 新增。依第五頁多空狀態的目標 Beta 區間。區間是程式預設。狀態未知時 tw 與 us 是 null。避險只建議同市場工具。",
+          "title": "Beta Targets",
+          "type": "object"
         }
       },
       "required": [
@@ -623,7 +635,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.6.0"
+            "1.7.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -670,7 +682,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.6.0"
+            "1.7.0"
           ],
           "title": "Schema Version",
           "type": "string"
