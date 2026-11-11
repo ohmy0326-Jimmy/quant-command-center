@@ -15,6 +15,7 @@ from plotly.subplots import make_subplots
 from oauth2client.service_account import ServiceAccountCredentials
 from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
 from app_secrets import read_secret
+from strategy_lab import STRATEGY_LAB_URL
 from macro_cycle_ui import render_macro_cycle_page
 from order_assistant_ui import render_order_assistant
 from beta_rules import BETA_FALLBACK_STATE_KEY
@@ -48,6 +49,7 @@ import page1_lights
 import sector_board
 import chart_history
 import calendar_events
+import official_dates
 import calendar_actions
 import calendar_page
 
@@ -389,6 +391,10 @@ def load_calendar_model(watchlist: str):
         except Exception:
             fmp_items = []
             fmp_error = "FMP 來源失敗，這一段缺漏。其餘事件仍顯示。不會改用寫死日期。"
+    try:
+        official_confirmed = official_dates.confirm_official_dates()
+    except Exception:
+        official_confirmed = set()
     return calendar_events.build_calendar(
         rows,
         watchlist,
@@ -397,6 +403,7 @@ def load_calendar_model(watchlist: str):
         today,
         fetched_at,
         fmp_error=fmp_error,
+        official_confirmed=official_confirmed,
     )
 
 
@@ -497,9 +504,10 @@ with st.sidebar:
     if page == "第六頁：下單輔助系統":
         st.caption("風控規則在第六頁最上方，會留在這次工作階段。")
     st.markdown("---")
-    st.subheader("📝 後端資料庫 (Notion)")
-    st.markdown("[📊 Notion 交易與覆盤日誌](https://www.notion.so/)")
-    st.markdown("[🧪 Notion 策略實驗室](https://www.notion.so/)")
+    st.subheader("試算表")
+    st.markdown("[交易與覆盤（Trade_Log）](https://docs.google.com/spreadsheets/d/1nMpEaNcIqymaTHiqJDhMxm5gLzCWrlfk5wkpCMJMjGM)")
+    st.caption("成交時間在「時間」欄，覆盤在「覆盤筆記」。")
+    st.markdown(f"[交易策略實驗室]({STRATEGY_LAB_URL})")
 
 # ==========================================
 # 第一頁：總經與風險鬧鐘
@@ -763,10 +771,7 @@ elif page == "第三頁：重大行事曆與會展":
             cached_fmp_raw.clear()
             st.rerun()
     st.markdown("---")
-    watchlist = st.text_input(
-        "觀察清單（選填，逗號分隔。只留在這次工作階段，不寫入試算表）",
-        key="calendar_watchlist",
-    )
+    watchlist = st.text_input("觀察清單（選填）", key="calendar_watchlist", placeholder="2330, AAPL")
     try:
         calendar_model = load_calendar_model(watchlist)
     except Exception as exc:
@@ -804,7 +809,7 @@ elif page == "第四頁：部位監控與量化風控":
             clear_market_caches()
             st.rerun()
             
-    st.write("數據來源：Notion 交易日誌 ➔ Make.com ➔ Google Sheets (基礎計價幣別：TWD 台幣)")
+    st.write("數據來源：Google 試算表 Quant_Database 的持倉與 Trade_Log（基礎計價幣別：TWD 台幣）")
     st.markdown("---")
 
     with st.spinner('📡 正在穿透雲端，即時連線抓取各個持股報價與計算動態風險...'):
@@ -854,6 +859,10 @@ elif page == "第四頁：部位監控與量化風控":
                     st.markdown("---")
 
             # 風險與績效：Beta／槓桿三列表、現金、借款、最大回撤、回撤煞車燈合併成一張卡
+            try:
+                metrics["tw_index"] = float(cached_twii())
+            except Exception:
+                metrics["tw_index"] = None
             render_risk_performance_card(st, metrics, nav_series, capture, nav_flows)
             if not df.empty:
                 known_exposure = pd.to_numeric(df['實質曝險(台幣)'], errors="coerce")

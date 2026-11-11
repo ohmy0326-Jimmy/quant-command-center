@@ -190,34 +190,73 @@ def chart_rows(rows: list[dict], today: str | date | None = None) -> list[dict]:
     return found
 
 
-def plan_history_upsert(existing: list[dict], candidate: dict, today: str | date | None = None) -> dict:
-    """日期 upsert 的純函式。不寫試算表。既有週若總分不同，保留原列。"""
+def _blank_history_row(key: str) -> dict:
+    return {"week": key, "total": None, "regime": None}
+
+
+def _plan_result(action: str, reason: str, rows: list[dict], week: str, total, regime) -> dict:
+    return {
+        "action": action,
+        "reason": reason,
+        "rows": rows,
+        "week": week,
+        "total": total,
+        "regime": regime,
+        "enabled": False,
+    }
+
+
+def plan_history_upsert(existing: list[dict], candidate: dict, today: str | date | None = None, replace_same_day: bool = False) -> dict:
+    """排出當天要不要寫一列。這個函式自己不寫試算表。
+
+    總分缺值是 None，不當 0，也不推多空狀態。
+    同一天已有不同總分時，預設保留原列。replace_same_day 只更新候選日當天那一列。
+    """
     cutoff = _as_date(today)
     day = _as_date(candidate.get("week") if isinstance(candidate, dict) else None)
-    total = _as_total(candidate.get("total") if isinstance(candidate, dict) else None)
+    raw_total = None if not isinstance(candidate, dict) else candidate.get("total")
+    missing_total = raw_total is None or (isinstance(raw_total, str) and not raw_total.strip())
+    total = None if missing_total else _as_total(raw_total)
     regime = str((candidate or {}).get("regime") or "").strip() if isinstance(candidate, dict) else ""
     rows = [dict(row) for row in existing or []]
-    if day is None or total is None:
-        return {"action": "reject", "reason": "日期或總分無效，不新增。", "rows": rows, "enabled": False}
+    if day is None:
+        return _plan_result("reject", "日期無效，不新增。", rows, "", None, None)
+    if not missing_total and total is None:
+        return _plan_result("reject", "總分不是 -18 到 18 的整數，不把缺值寫成 0。", rows, day.isoformat(), None, None)
     if cutoff is not None and day > cutoff:
-        return {"action": "reject", "reason": "未來日期不寫入。", "rows": rows, "enabled": False}
+        return _plan_result("reject", "未來日期不寫入。", rows, day.isoformat(), total, None)
+    key = day.isoformat()
+    if total is None:
+        for row in rows:
+            if str(row.get("week") or "")[:10] != key:
+                continue
+            if _as_total(row.get("total")) is None:
+                return _plan_result("keep", "這一週已經是空白總分，不另加一列。", rows, key, None, None)
+            return _plan_result("keep", "這次沒有總分，保留原列，不把已記錄的分數清成空白。", rows, key, _as_total(row.get("total")), row.get("regime"))
+        rows.append(_blank_history_row(key))
+        rows.sort(key=lambda item: str(item.get("week")))
+        return _plan_result("insert", "沒有總分，這一列總分與狀態留空。", rows, key, None, None)
     try:
         expected = regime_for_score(total)
     except (TypeError, ValueError):
-        return {"action": "reject", "reason": "總分不在 -18 到 18。", "rows": rows, "enabled": False}
+        return _plan_result("reject", "總分不在 -18 到 18。", rows, key, None, None)
     if regime and regime != expected:
-        return {"action": "reject", "reason": "狀態與總分不一致，不寫入。", "rows": rows, "enabled": False}
-    key = day.isoformat()
+        return _plan_result("reject", "狀態與總分不一致，不寫入。", rows, key, total, None)
     for row in rows:
         if str(row.get("week") or "")[:10] != key:
             continue
         current = _as_total(row.get("total"))
-        if current == total:
-            return {"action": "keep", "reason": "這一週已有相同總分，不覆寫。", "rows": rows, "enabled": False}
-        return {"action": "keep", "reason": "這一週已有不同總分，保留原記錄，不用今天的重算覆蓋。", "rows": rows, "enabled": False}
+        current_regime = str(row.get("regime") or "").strip()
+        if current == total and current_regime in {"", expected}:
+            return _plan_result("keep", "這一週已有相同總分，不另加一列。", rows, key, total, expected)
+        if replace_same_day and cutoff is not None and day == cutoff:
+            row["total"] = total
+            row["regime"] = expected
+            return _plan_result("update", "同一天重跑，只更新這一列。", rows, key, total, expected)
+        return _plan_result("keep", "這一週已有不同總分，保留原記錄。", rows, key, current, current_regime or None)
     rows.append({"week": key, "total": total, "regime": expected})
     rows.sort(key=lambda item: str(item.get("week")))
-    return {"action": "insert", "reason": "純函式只排出可新增的一列。沒有排程，也沒有寫入試算表。", "rows": rows, "enabled": False}
+    return _plan_result("insert", "新增這一週的總分。", rows, key, total, expected)
 
 
 def arrow_symbol(arrow: str) -> str:

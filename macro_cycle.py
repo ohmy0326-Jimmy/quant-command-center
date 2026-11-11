@@ -244,6 +244,8 @@ def industry_quadrant_points(industries: list[dict]) -> list[dict]:
     points: list[dict] = []
     for (cycle, direction), items in grouped.items():
         ordered = sorted(items, key=lambda row: str(row.get("name", "")))
+        if cycle not in _QUADRANTS or direction not in _DIRECTION_SHIFT:
+            continue
         cx, cy = _QUADRANTS[cycle]
         dx, dy = _CLOCKWISE[cycle]
         px, py = -dy, dx
@@ -303,10 +305,14 @@ def quadrant_change_text(item: dict) -> str:
     return f"{previous}→{current}"
 
 
-# 手動指標的公布時程。只寫有固定規則的；沒有固定時程就是「未知」。
+# 公布時程。沒有固定時程就是「未知」。製造業改看費城與紐約調查，不再用 ISM 第一個工作日。
 MANUAL_RELEASE_SCHEDULE: dict[str, dict] = {
-    "pmi": {"rule": "first_business_day", "label": "ISM 製造業 PMI：每月第一個工作日"},
+    "pmi": {
+        "rule": "philly_empire",
+        "label": "費城聯準會（第三個星期四）與紐約聯準會（每月 15 日或下一個工作日），取較早的下一次",
+    },
     "tw_activity": {"rule": "day_of_month", "day": 27, "label": "國發會景氣對策信號：約每月 27 日"},
+    "valuation": {"rule": "next_business_day", "label": "標普本益比與 FRED DFII10，每個交易日"},
 }
 
 
@@ -320,15 +326,25 @@ def next_release_date(indicator_id: str, today=None) -> str:
     today = today or date.today()
 
     def candidate(year: int, month: int) -> date:
-        if spec["rule"] == "first_business_day":
+        rule = spec["rule"]
+        if rule == "first_business_day":
             day = date(year, month, 1)
             while day.weekday() >= 5:
                 day += timedelta(days=1)
             return day
+        if rule == "next_business_day":
+            day = today + timedelta(days=1)
+            while day.weekday() >= 5:
+                day += timedelta(days=1)
+            return day
+        if rule == "philly_empire":
+            return _sooner_survey_date(year, month, today)
         return date(year, month, int(spec["day"]))
 
+    if spec["rule"] == "next_business_day":
+        return candidate(today.year, today.month).isoformat()
     year, month = today.year, today.month
-    for _ in range(3):
+    for _ in range(4):
         day = candidate(year, month)
         if day > today:
             return day.isoformat()
@@ -336,6 +352,28 @@ def next_release_date(indicator_id: str, today=None) -> str:
         if month > 12:
             year, month = year + 1, 1
     return "未知"
+
+
+def _nth_weekday(year: int, month: int, weekday: int, n: int):
+    from datetime import date, timedelta
+
+    first = date(year, month, 1)
+    shift = (weekday - first.weekday()) % 7
+    return first + timedelta(days=shift + 7 * (n - 1))
+
+
+def _sooner_survey_date(year: int, month: int, today):
+    """這個月費城第三個星期四、紐約 15 日（碰到週末就往後）裡，晚於今天的較早一天。沒有就丟回今天，讓外層改看下個月。"""
+    from datetime import date, timedelta
+
+    empire = date(year, month, 15)
+    while empire.weekday() >= 5:
+        empire += timedelta(days=1)
+    philly = _nth_weekday(year, month, 3, 3)
+    upcoming = [day for day in (empire, philly) if day > today]
+    if not upcoming:
+        return today
+    return min(upcoming)
 
 
 def manual_indicator_schedule(indicators: list[dict], today=None) -> list[dict]:
@@ -359,18 +397,35 @@ def decorate_indicator(item: dict, updated_default: str, origin: str) -> dict:
     if source not in {"auto", "manual"}:
         source = "manual"
     updated = str(item.get("updated_at") or updated_default or "")
+    example = bool(item.get("example"))
+    raw_score = item.get("score")
+    score = None if raw_score is None or raw_score == "" else int(raw_score)
+    scored = bool(item.get("scored", score is not None and not example))
+    if example:
+        layer = item.get("layer") or "示例"
+    elif item.get("layer"):
+        layer = item["layer"]
+    elif source == "auto":
+        layer = "自動"
+    else:
+        layer = "手動"
     return {
         "id": item.get("id"),
         "name": item.get("name") or CANONICAL_NAMES.get(item.get("id"), ""),
-        "score": int(item["score"]),
-        "example": bool(item.get("example")),
+        "score": score,
+        "example": example,
+        "scored": scored,
+        "layer": layer,
         "source": source,
         "source_label": "自動" if source == "auto" else "手動",
         "value": str(item.get("value") or ""),
         "trend": str(item.get("trend") or ""),
         "note": str(item.get("note") or ""),
         "updated_at": updated,
+        "data_date": str(item.get("data_date") or (updated if scored else "") or ""),
+        "next_release": str(item.get("next_release") or next_release_date(item.get("id")) or ""),
         "origin": origin,
+        "weight": float(item["weight"]) if item.get("weight") is not None else None,
     }
 
 
@@ -391,20 +446,18 @@ def assemble_view(
         failed["data_origin"] = "neutral"
         failed["warnings"] = list(warnings or failed["errors"])
         return failed
-    total = sum(int(item["score"]) for item in indicators)
-    try:
-        regime = regime_for_score(total)
-    except (TypeError, ValueError) as exc:
-        failed = _fallback([str(exc)])
-        failed["data_origin"] = "neutral"
-        failed["warnings"] = list(warnings or []) + [str(exc)]
-        return failed
+    from macro_proxies import aggregate_scores
+
+    summary = aggregate_scores(indicators)
     dates = [str(item.get("updated_at") or "") for item in indicators if item.get("updated_at")]
+    warnings = list(warnings or [])
+    if summary.get("coverage_note"):
+        warnings.append(summary["coverage_note"])
     return {
         "ok": True,
         "fallback": origin == "neutral",
         "errors": [],
-        "warnings": list(warnings or []),
+        "warnings": warnings,
         "data_origin": origin,
         "schema_version": "1.0.0",
         "score_updated_at": score_updated_at or (max(dates) if dates else None),
@@ -414,9 +467,13 @@ def assemble_view(
         "industry_as_of_day": industry_as_of_day,
         "indicators": indicators,
         "industries": industries,
-        "total": total,
-        "regime": regime,
-        "risk": risk_params_for_regime(regime),
+        "total": summary["total"],
+        "raw_regime": summary["raw_regime"],
+        "regime": summary["regime"],
+        "risk": summary["risk"],
+        "coverage": summary["coverage"],
+        "coverage_status": summary["coverage_status"],
+        "coverage_note": summary["coverage_note"],
         "ticker_index": _ticker_index(industries),
         "commentary": dict(commentary or {}),
         "history": [],
@@ -427,7 +484,10 @@ def assemble_view(
 def _view_from_valid(raw: dict) -> dict:
     updated = raw["score"]["updated_at"]
     indicators = [decorate_indicator(item, updated, "json") for item in raw["score"]["indicators"]]
-    industries = [dict(item, origin="json") for item in raw["industries"]["items"]]
+    industries = [
+        dict(item, origin="json", cycle_layer="示例", cycle_note="倉庫示例，不是價格推估")
+        for item in raw["industries"]["items"]
+    ]
     view = assemble_view(
         indicators,
         industries,
@@ -439,7 +499,7 @@ def _view_from_valid(raw: dict) -> dict:
         industry_as_of_day=int(raw["industries"]["as_of_day"]),
     )
     view["history"] = list(raw.get("history") or [])
-    view["week_change"] = week_change(view["total"], view["history"], updated)
+    view["week_change"] = None if view["total"] is None else week_change(view["total"], view["history"], updated)
     return view
 
 

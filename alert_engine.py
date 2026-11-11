@@ -453,7 +453,8 @@ class SheetAlertStore:
     def __init__(self, spreadsheet):
         from nav_snapshot import _ensure_worksheet
 
-        self.worksheet, _created = _ensure_worksheet(spreadsheet, ALERT_STATE_SHEET, ALERT_STATE_HEADERS)
+        # nav_snapshot._ensure_worksheet 回傳 (worksheet, created, migrated)。
+        self.worksheet, _created, _migrated = _ensure_worksheet(spreadsheet, ALERT_STATE_SHEET, ALERT_STATE_HEADERS)
 
     def load(self) -> dict:
         out = {}

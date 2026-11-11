@@ -47,6 +47,7 @@ INDUSTRY_CYCLE_HEADERS = (
 )
 HISTORY_TAB = "Macro_Score_History"
 HISTORY_HEADERS = ("week", "total", "regime")
+HISTORY_WRITE_HEADERS = ("week", "total", "regime", "coverage")
 HEAVY_UNDERWEIGHT_PCT = 10.0
 
 CYCLES = ("復甦", "成長", "趨緩", "衰退")
@@ -171,6 +172,7 @@ def parse_industry_row(row: dict) -> tuple[dict | None, str | None]:
         "rationale": str(row.get("rationale") or "").strip(),
         "prev_cycle": previous,
         "updated_at": updated,
+        "source": _parse_source(row.get("source")) or "",
         "origin": "sheet",
     }, None
 
@@ -270,17 +272,17 @@ def split_tickers(value) -> list[str]:
 
 
 def parse_sheet_date(value) -> str | None:
-    if value is None or value == "":
-        return None
-    if hasattr(value, "isoformat"):
-        text = value.isoformat()[:10]
-    else:
-        text = str(value).strip().replace("/", "-")[:10]
-    from macro_cycle import _parse_iso_date
+    """試算表日期一律收成 YYYY-MM-DD。
 
-    if _parse_iso_date(text) is None:
+    Google 試算表常把日期存成序號，或依語系顯示成 2026/11/7。
+    只認 YYYY-MM-DD 會把整列丟掉，第五頁就退回倉庫示例。
+    """
+    from sheet_dates import parse_sheet_date as parse_any_sheet_date
+
+    parsed = parse_any_sheet_date(value)
+    if parsed is None:
         return None
-    return text
+    return parsed.isoformat()
 
 
 def compose_macro_view(json_view: dict, sheet: dict | None, auto: dict | None, today: str | None = None) -> dict:
@@ -305,7 +307,10 @@ def compose_macro_view(json_view: dict, sheet: dict | None, auto: dict | None, t
         view = copy.deepcopy(json_view)
         view["data_origin"] = "json"
         view["warnings"] = warnings
+        _clear_example_scores(view)
         _apply_auto(view, auto, warnings, today)
+        _apply_proxies(view, auto, warnings, today)
+        _apply_industry_prices(view.get("industries") or [], auto, today)
         view["warnings"] = warnings
         view["history_origin"] = "json"
         view["history_example"] = True
@@ -334,14 +339,17 @@ def compose_macro_view(json_view: dict, sheet: dict | None, auto: dict | None, t
         view = copy.deepcopy(json_view)
         view["data_origin"] = "json"
         view["warnings"] = warnings
+        _clear_example_scores(view)
         _apply_auto(view, auto, warnings, today)
+        _apply_proxies(view, auto, warnings, today)
+        _apply_industry_prices(view.get("industries") or [], auto, today)
         view["warnings"] = warnings
         view["history_origin"] = "json"
         view["history_example"] = True
         view["history_note"] = "試算表沒有可用的列，歷史改用倉庫示例。這不是已核對的真實週報。"
         return _refresh_totals(view, today)
 
-    indicators = _merge_indicators(json_indicators, score_rows if use_sheet_scores else {}, warnings)
+    indicators = _merge_indicators(json_indicators, score_rows if use_sheet_scores else {}, warnings, today)
     industries, industry_updated = _merge_industries(
         json_industries,
         industry_rows if use_sheet_industries else [],
@@ -363,6 +371,8 @@ def compose_macro_view(json_view: dict, sheet: dict | None, auto: dict | None, t
     if not view.get("ok"):
         return view
     _apply_auto(view, auto, view["warnings"], today)
+    _apply_proxies(view, auto, view["warnings"], today)
+    _apply_industry_prices(view.get("industries") or [], auto, today)
     _attach_history(view, sheet, json_view)
     return _refresh_totals(view, today)
 
@@ -376,13 +386,20 @@ def _attach_history(view: dict, sheet: dict, json_view: dict) -> None:
         view["history_example"] = True
         view["history_note"] = "Macro_Score_History 讀不到，改用倉庫示例。頁面不會改寫這一頁。"
         return
-    rows, extra = parse_history_rows(sheet.get("history") or [])
+    raw_history = list(sheet.get("history") or [])
+    rows, extra = parse_history_rows(raw_history)
     warnings.extend(extra)
     if rows:
         view["history"] = rows
         view["history_origin"] = "sheet"
         view["history_example"] = False
-        view["history_note"] = "來源是試算表 Macro_Score_History。程式只讀，不會用今天重算的分數覆蓋舊週。"
+        view["history_note"] = "來源是試算表 Macro_Score_History。第五頁不寫入。每日淨值快照只會更新台北當天那一列。"
+        return
+    if raw_history:
+        view["history"] = []
+        view["history_origin"] = "sheet"
+        view["history_example"] = False
+        view["history_note"] = "Macro_Score_History 有列，但沒有可用總分。不改用倉庫示例，缺值也不當 0。"
         return
     view["history"] = list(json_view.get("history") or [])
     view["history_origin"] = "json"
@@ -473,18 +490,61 @@ def score_auto_from_markets(markets: dict, today: str) -> dict:
     return found
 
 
-def _merge_indicators(json_indicators: list[dict], sheet_by_id: dict[str, dict], warnings: list[str]) -> list[dict]:
-    json_by_id = {item.get("id"): item for item in json_indicators}
+def _merge_indicators(json_indicators: list[dict], sheet_by_id: dict[str, dict], warnings: list[str], today: str) -> list[dict]:
+    from macro_proxies import PROXY_IDS, manual_override_fresh
+
     merged = []
     for indicator_id in CANONICAL_IDS:
-        if indicator_id in sheet_by_id:
-            row = sheet_by_id[indicator_id]
-            merged.append(decorate_indicator(row, row["updated_at"], "sheet"))
+        row = sheet_by_id.get(indicator_id)
+        name = CANONICAL_NAMES[indicator_id]
+        if row and indicator_id in PROXY_IDS:
+            if manual_override_fresh(row.get("source"), row.get("updated_at"), today):
+                item = decorate_indicator(row, row["updated_at"], "sheet")
+                item["scored"] = True
+                item["example"] = False
+                item["layer"] = "手動"
+                item["data_date"] = row["updated_at"]
+                merged.append(item)
+                continue
+            if row.get("source") == "manual":
+                warnings.append(f"{name} 的手動分數已超過 45 日，改看代理或不計分。")
+        elif row:
+            item = decorate_indicator(row, row["updated_at"], "sheet")
+            item["layer"] = "試算表"
+            merged.append(item)
             continue
-        if indicator_id in json_by_id:
-            warnings.append(f"{CANONICAL_NAMES[indicator_id]} 試算表沒有可用列，沿用倉庫備援。")
-            merged.append(decorate_indicator(json_by_id[indicator_id], json_by_id[indicator_id].get("updated_at", ""), "json"))
+        if indicator_id in {item.get("id") for item in json_indicators}:
+            warnings.append(f"{name} 不採用倉庫示例分數。")
+        merged.append(_unscored_indicator(indicator_id, "試算表沒有可用列，倉庫示例不計分。"))
     return merged
+
+
+def _unscored_indicator(indicator_id: str, note: str) -> dict:
+    return decorate_indicator(
+        {
+            "id": indicator_id,
+            "score": None,
+            "example": False,
+            "scored": False,
+            "source": "manual",
+            "layer": "未知",
+            "note": note,
+            "value": "",
+        },
+        "",
+        "missing",
+    )
+
+
+def _clear_example_scores(view: dict) -> None:
+    """倉庫示例可以留在檔案裡，但不進入總分。"""
+    for item in view.get("indicators") or []:
+        if not item.get("example"):
+            continue
+        item["score"] = None
+        item["scored"] = False
+        item["layer"] = "示例"
+        item["note"] = (item.get("note") or "倉庫示例") + "。示例分數不計入總分。"
 
 
 def _merge_industries(json_industries, sheet_rows: list[dict], warnings: list[str], json_updated: str | None):
@@ -530,14 +590,88 @@ def _apply_auto(view: dict, auto: dict, warnings: list[str], today: str) -> None
             item["source_label"] = "自動"
             item["updated_at"] = str(result.get("updated_at") or today)
             item["example"] = False
+            item["scored"] = True
+            item["layer"] = "自動"
             item["origin"] = "auto"
+            item["data_date"] = str(result.get("data_date") or result.get("updated_at") or today)
             if result.get("note"):
                 item["note"] = str(result["note"])
             continue
-        if item.get("origin") == "sheet":
+        if item.get("origin") == "sheet" and item.get("scored"):
+            item["layer"] = "試算表"
             warnings.append(f"{item['name']} 自動抓取失敗，沿用試算表。")
         else:
-            warnings.append(f"{item['name']} 自動抓取失敗，沿用倉庫備援。")
+            item["score"] = None
+            item["scored"] = False
+            item["example"] = False
+            item["layer"] = "未知"
+            warnings.append(f"{item['name']} 自動抓取失敗，不採用倉庫示例，缺值也不當 0。")
+
+
+def _apply_proxies(view: dict, auto: dict, warnings: list[str], today: str) -> None:
+    from macro_proxies import PROXY_IDS, indicator_weight
+
+    for item in view.get("indicators") or []:
+        if item.get("id") not in PROXY_IDS:
+            continue
+        if item.get("layer") == "手動" and item.get("scored"):
+            item["weight"] = indicator_weight(item["id"])
+            continue
+        result = (auto or {}).get(item["id"]) or {}
+        if result.get("ok") and result.get("score") is not None:
+            item["score"] = int(result["score"])
+            item["scored"] = True
+            item["example"] = False
+            item["layer"] = "代理"
+            item["source"] = "auto"
+            item["source_label"] = "代理"
+            item["value"] = str(result.get("value") or "")
+            if result.get("trend"):
+                item["trend"] = str(result["trend"])
+            item["note"] = str(result.get("note") or "")
+            item["data_date"] = str(result.get("data_date") or today)
+            item["updated_at"] = item["data_date"]
+            item["origin"] = "proxy"
+            item["weight"] = indicator_weight(item["id"])
+            continue
+        item["score"] = None
+        item["scored"] = False
+        item["example"] = False
+        item["layer"] = "未知"
+        item["weight"] = indicator_weight(item["id"])
+        reason = result.get("reason") or "沒有代理分數"
+        warnings.append(f"{item['name']}：{reason}。缺值不當 0。")
+
+
+def _apply_industry_prices(industries: list[dict], auto: dict, today: str) -> None:
+    from macro_proxies import PRICE_CYCLE_LABEL, updated_within
+
+    if not isinstance(auto, dict) or "industry_rs" not in auto:
+        return
+    quotes = auto.get("industry_rs") or {}
+    for item in industries:
+        # Industry_Cycle 沒有 source 欄。試算表上 45 日內的列就是手動覆寫。
+        if item.get("origin") == "sheet" and updated_within(item.get("updated_at"), today):
+            item["cycle_layer"] = "手動"
+            item["cycle_note"] = ""
+            continue
+        quote = quotes.get(item.get("name")) or {}
+        if quote.get("ok") and quote.get("cycle") and quote.get("direction"):
+            item["cycle"] = quote["cycle"]
+            item["direction"] = quote["direction"]
+            item["cycle_layer"] = "價格推估"
+            item["cycle_note"] = PRICE_CYCLE_LABEL
+            item["example"] = False
+            item["prev_cycle"] = ""
+            continue
+        if item.get("origin") == "json" or item.get("cycle_layer") == "示例":
+            item["cycle_layer"] = "示例"
+            item["cycle_note"] = "倉庫示例，不是價格推估"
+            continue
+        if item.get("origin") == "sheet":
+            item["cycle"] = None
+            item["cycle_layer"] = "未知"
+            item["cycle_note"] = "試算表這列已超過 45 日，也沒有價格推估"
 
 
 def _refresh_totals(view: dict, today: str | None = None) -> dict:
@@ -559,7 +693,11 @@ def _refresh_totals(view: dict, today: str | None = None) -> dict:
     refreshed["history_origin"] = view.get("history_origin") or "json"
     refreshed["history_example"] = bool(view.get("history_example", refreshed["history_origin"] != "sheet"))
     refreshed["history_note"] = view.get("history_note") or ""
-    refreshed["week_change"] = week_change(refreshed["total"], refreshed["history"], refreshed.get("score_updated_at"))
+    refreshed["week_change"] = (
+        None
+        if refreshed.get("total") is None
+        else week_change(refreshed["total"], refreshed["history"], refreshed.get("score_updated_at"))
+    )
     from macro_score_trend import assess_trend
 
     refreshed["score_trend"] = assess_trend(

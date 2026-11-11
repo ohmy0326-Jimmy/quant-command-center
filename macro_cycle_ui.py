@@ -12,7 +12,6 @@ import streamlit as st
 from macro_cycle import (
     industry_quadrant_points,
     load_macro_cycle,
-    manual_indicator_schedule,
     quadrant_change_text,
     regime_rows,
     regime_scale_text,
@@ -54,17 +53,132 @@ def render_macro_cycle_page(load_book=None, clear_caches=None):
     _show_warnings(view)
     if not view.get("ok"):
         st.warning("總經資料沒有套用。下單輔助暫用中性：1.5 倍、現金 15%。")
+    else:
+        _render_summary(view, book)
+        _render_history(view)
+        _render_indicators(view["indicators"])
+        _render_industries(view["industries"], book)
+        _render_framework(view["industries"], book)
+        with st.expander("四象限", expanded=False):
+            _render_quadrant(view["industries"], book)
+        with st.expander("制度對照"):
+            st.caption(regime_scale_text())
+            _render_risk_table(view["regime"])
+    _render_reference_panel()
+
+
+def _render_reference_panel() -> None:
+    """參考數據與黃燈次數。不改九項權重，按鈕按下才抓，也不寫試算表。"""
+    from reference_feeds import NOT_AVAILABLE, reference_rows
+
+    st.subheader("參考數據")
+    st.caption("這些不計入九項總分。抓不到是不完整，不是 0。寫入每週回補要另外執行 scripts/backfill_macro_history.py，這一頁不會自動寫。")
+    for item in NOT_AVAILABLE:
+        st.caption(f"{item['name']}：{item['why']}")
+    if st.button("讀參考數據", key="p5_reference"):
+        st.session_state["p5_reference_rows"] = reference_rows(_load_reference_values())
+    rows = st.session_state.get("p5_reference_rows")
+    if rows:
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+    if st.button("試算黃燈次數（不寫入）", key="p5_yellow_backtest"):
+        st.session_state["p5_yellow"] = _run_yellow_backtest()
+    report = st.session_state.get("p5_yellow")
+    if report:
+        if not report.get("ok"):
+            st.warning(report.get("note") or "資料不足")
+        else:
+            st.caption(
+                f"有效週 {report['weeks']}，完整 4 週窗口 {report['windows']}，"
+                f"黃燈 {report['yellow']}，樣本不足 {report['insufficient']}。沒有報酬數字。"
+            )
+    if st.button("寫入回補列", key="p5_backfill_write"):
+        _write_backfill(st.session_state.get("p5_yellow") or {})
+
+
+def _write_backfill(report: dict) -> None:
+    rows = report.get("rows") or []
+    if not rows:
+        st.warning("還沒有可寫的每週分數。先按試算黃燈次數。")
         return
-    _render_summary(view, book)
-    _render_history(view)
-    _render_indicators(view["indicators"])
-    _render_industries(view["industries"], book)
-    _render_framework(view["industries"], book)
-    with st.expander("四象限", expanded=False):
-        _render_quadrant(view["industries"], book)
-    with st.expander("制度對照"):
-        st.caption(regime_scale_text())
-        _render_risk_table(view["regime"])
+    try:
+        from macro_cycle_live import load_service_key, read_macro_tabs
+        from macro_history_backfill import append_backfill
+        from portfolio_risk import open_quant_spreadsheet
+
+        book = open_quant_spreadsheet(load_service_key())
+        existing = read_macro_tabs(book).get("history") or []
+        plan = append_backfill(book.worksheet("Macro_Score_History"), existing, rows)
+    except Exception:
+        st.warning("回補沒有寫入。已有的每日列不會被蓋過。")
+        return
+    st.caption(f"寫入 {len(plan['insert'])} 列，略過已有總分的 {len(plan['skipped'])} 週。")
+
+
+def _load_reference_values() -> dict:
+    import requests
+
+    from page1_lights import fetch_fred_observations
+    from reference_feeds import FRED_IDS, parse_institution_net, parse_margin_balance, parse_tsmc_revenue
+
+    found = {}
+    for key, series_id in FRED_IDS.items():
+        try:
+            points = fetch_fred_observations(series_id)
+        except Exception:
+            points = []
+        if points:
+            day, value = points[-1]
+            found[key] = {"value": value, "as_of": day.isoformat()}
+    try:
+        import yfinance as yf
+
+        frame = yf.Ticker("^MOVE").history(period="10d", auto_adjust=True)
+        closes = frame["Close"].dropna() if frame is not None else None
+        if closes is not None and len(closes):
+            found["move"] = {"value": float(closes.iloc[-1]), "as_of": closes.index[-1].date().isoformat()}
+    except Exception:
+        pass
+    _put(found, "tw_margin", "https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN?response=json&selectType=ALL", parse_margin_balance)
+    _put(found, "tw_institutions", "https://www.twse.com.tw/rwd/zh/fund/BFI82U?response=json", parse_institution_net)
+    try:
+        response = requests.get("https://openapi.twse.com.tw/v1/opendata/t187ap05_L", timeout=12, headers={"User-Agent": "quant-command-center/1.0"})
+        parsed = parse_tsmc_revenue(response.json())
+        if parsed:
+            found["tsmc_revenue"] = parsed
+    except Exception:
+        pass
+    return found
+
+
+def _put(found: dict, key: str, url: str, parser) -> None:
+    import requests
+
+    try:
+        response = requests.get(url, timeout=12, headers={"User-Agent": "quant-command-center/1.0"})
+        parsed = parser(response.json())
+    except Exception:
+        return
+    if parsed:
+        found[key] = parsed
+
+
+def _run_yellow_backtest() -> dict:
+    try:
+        from macro_history_backfill import reconstruct_fridays, yellow_threshold_backtest
+
+        rows = reconstruct_fridays(_load_auto_bundle())
+    except Exception:
+        return {"ok": False, "note": "自動歷史抓取失敗，資料不足。沒有把缺值當成 0。"}
+    if len([row for row in rows if row.get("total") is not None]) < 52:
+        report = yellow_threshold_backtest(rows)
+        report["rows"] = rows
+        report["ok"] = False
+        report["note"] = f"有效週只有 {report['weeks']}，少於 52。不把缺週補成 0。"
+        return report
+    report = yellow_threshold_backtest(rows)
+    report["rows"] = rows
+    report["ok"] = True
+    return report
 
 
 def _page5_view() -> dict:
@@ -97,7 +211,7 @@ def _page5_view() -> dict:
             st.session_state["macro_sheet_cache"] = {"t": now, "v": sheet}
         if auto_job is not None:
             try:
-                auto = auto_job.result(timeout=12)
+                auto = auto_job.result(timeout=22)
             except Exception:
                 auto = {}
             st.session_state["macro_auto_cache"] = {"t": now, "v": auto}
@@ -144,13 +258,20 @@ def _cached_book(load_book):
 
 def _render_summary(view: dict, book: dict):
     regime = view["regime"]
-    total = int(view["total"])
+    total = view.get("total")
     risk = view["risk"]
     change = view.get("week_change")
     change_text = "尚無上週" if change is None else f"{change:+d}"
+    total_text = "—" if total is None else f"{int(total):+d}"
     st.header(regime)
+    coverage = view.get("coverage")
+    status = view.get("coverage_status") or ""
+    if coverage is not None:
+        st.caption(f"覆蓋率 {coverage:.0%}，{status}。缺的指標不當 0，也不用倉庫示例補。")
+    if view.get("coverage_note"):
+        st.warning(view["coverage_note"])
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("總分", f"{total:+d}", change_text)
+    c1.metric("總分", total_text, change_text)
     c2.metric("槓桿上限", f"{risk['target_leverage']:.1f}x")
     c3.metric("現金下限", f"{risk['min_cash_pct']:.0f}%")
     if book.get("ok"):
@@ -180,23 +301,32 @@ def _render_indicators(indicators: list[dict]):
             {
                 "指標": item["name"],
                 "讀數": item.get("value") or "—",
-                "分數": int(item["score"]),
+                "分數": _score_text(item),
+                "權重": item.get("weight") if item.get("weight") is not None else "",
+                "層": item.get("layer") or "—",
+                "資料日": item.get("data_date") or "—",
+                "下次公布": item.get("next_release") or "未知",
                 "趨勢": item.get("trend") or "—",
-                "來源": item.get("source_label") or ("自動" if item.get("source") == "auto" else "手動"),
-                "更新": item.get("updated_at") or "",
             }
             for item in indicators
         ]
     )
     st.dataframe(frame, width="stretch", hide_index=True)
-    schedule = manual_indicator_schedule(indicators)
-    if schedule:
-        st.caption("手動指標的最近更新與下次公布。下次公布依固定時程推算，不含假日；沒有固定時程寫「未知」。")
-        st.dataframe(pd.DataFrame(schedule), width="stretch", hide_index=True)
+    st.caption("層是這一列實際採用的來源：手動是 45 日內的試算表覆寫，代理是自動推估，未知不計分。下次公布不含假日。")
+
+
+def _score_text(item: dict) -> str:
+    if not item.get("scored") or item.get("score") is None:
+        return "示例" if item.get("layer") == "示例" else "—"
+    return f"{int(item['score']):+d}"
 
 
 def _render_industries(industries: list[dict], book: dict):
     st.subheader("二十個產業")
+    if any(item.get("cycle_layer") == "價格推估" for item in industries):
+        st.caption("價格推估，非基本面。3 個月與 6 個月相對強弱來自產業 ETF，台股對加權指數、其餘對 SPY。")
+    elif any(item.get("cycle_layer") == "示例" for item in industries):
+        st.caption("沒有價格推估或 45 日內的手動覆寫時，產業位置是倉庫示例，不是基本面。")
     positions = book.get("positions") or [] if book.get("ok") else []
     exposure, _grand = exposure_by_industry(positions, industries)
     choice = st.radio("立場", ["全部", "加碼", "中性", "減碼"], horizontal=True, key="macro_stance_filter")
@@ -211,7 +341,8 @@ def _render_industries(industries: list[dict], book: dict):
                 "上期": item.get("prev_cycle") or "—",
                 "本期": item.get("cycle") or "—",
                 "換象限": quadrant_change_text(item),
-                "方向": item["direction"],
+                "依據": item.get("cycle_note") or item.get("cycle_layer") or "—",
+                "方向": item.get("direction") or "—",
                 "立場": item["stance"],
                 "一句話": item.get("rationale") or "—",
                 "你的持股": held.get("mv", 0.0),

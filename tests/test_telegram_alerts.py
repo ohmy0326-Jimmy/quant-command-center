@@ -396,6 +396,49 @@ class AlertEndpointTests(unittest.TestCase):
         os.environ["QCC_PUSH_KEY"] = "k"
         self.assertEqual(self.client.post("/v1/alert-check", headers={"X-Push-Key": "k"}).status_code, 503)
 
+    def test_sheet_store_creates_missing_and_reuses_existing(self):
+        class FakeSheet:
+            def __init__(self, header=None):
+                self.header = list(header or [])
+                self.updates = []
+
+            def row_values(self, _index):
+                return list(self.header)
+
+            def update(self, range_name, values, value_input_option=None):
+                self.updates.append((range_name, values, value_input_option))
+                if range_name == "A1":
+                    self.header = list(values[0])
+
+        class FakeBook:
+            def __init__(self, sheets=None):
+                self.sheets = dict(sheets or {})
+                self.added = []
+
+            def worksheet(self, title):
+                if title not in self.sheets:
+                    raise KeyError(title)
+                return self.sheets[title]
+
+            def add_worksheet(self, title, rows, cols):
+                sheet = FakeSheet()
+                self.sheets[title] = sheet
+                self.added.append((title, rows, cols))
+                return sheet
+
+        missing = FakeBook()
+        created = ae.SheetAlertStore(missing)
+        self.assertEqual(missing.added[0][0], ae.ALERT_STATE_SHEET)
+        self.assertEqual(created.worksheet.header, ae.ALERT_STATE_HEADERS)
+        self.assertEqual(created.worksheet.updates[0][0], "A1")
+
+        existing_sheet = FakeSheet(ae.ALERT_STATE_HEADERS)
+        existing = FakeBook({ae.ALERT_STATE_SHEET: existing_sheet})
+        reused = ae.SheetAlertStore(existing)
+        self.assertEqual(existing.added, [])
+        self.assertIs(reused.worksheet, existing_sheet)
+        self.assertEqual(existing_sheet.updates, [])
+
     def test_sheet_store_roundtrip(self):
         ws = MagicMock()
         ws.get_all_records.return_value = [{"key": "cash", "state": "low", "value": 38.5, "last_sent_at": "", "updated_at": "t"}]

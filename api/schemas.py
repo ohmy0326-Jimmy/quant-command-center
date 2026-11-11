@@ -38,8 +38,8 @@ class PositionResponse(BaseModel):
     beta: float | None = Field(default=None, description="1.3.0 新增。套在名目曝險上的 Beta＝beta_exposure ÷ notional_exposure。槓桿 ETF＝標的一年 Beta；現股＝自身一年 Beta；臺指期＝1。")
     effective_beta: float | None = Field(default=None, description="1.3.0 新增。套在市值上的 Beta＝leverage × beta（槓桿 ETF＝槓桿 × 標的 Beta）。")
     beta_exposure: float | None = Field(default=None, description="1.3.0 新增。Beta 曝險，台幣＝notional_exposure × beta＝market_value × effective_beta（現股）。槓桿只乘一次。空單為負。")
-    beta_source: str = Field(default="", description="1.3.0 新增。Beta 來源說明。1.7.0 起，資料不足會寫「Beta 未計入」，不會把缺資料顯示成 Beta＝1。")
-    beta_quality: Literal["estimated", "fallback", "definition", "missing"] = Field(default="missing", description="1.7.0 新增。estimated＝這次回歸；fallback＝已標示的預設或手動值；definition＝臺指或加權定義 1；missing＝沒有計入。")
+    beta_source: str = Field(default="", description="1.3.0 新增。Beta 來源說明。1.8.0 起，資料不足會寫「Beta 未計入」，不會把缺資料顯示成 Beta＝1。")
+    beta_quality: Literal["estimated", "fallback", "definition", "missing"] = Field(default="missing", description="1.8.0 新增。estimated＝這次回歸；fallback＝已標示的預設或手動值；definition＝臺指或加權定義 1；missing＝沒有計入。")
     product: str = Field(default="", description="1.5.0 新增。可轉債為 cb、可轉債資產交換為 cbas，其餘空字串。")
     delta: float | None = Field(default=None, description="1.5.0 新增。可轉債／CBAS 的股權 Delta（轉換股數的比例）。試算表有填就用試算表；可轉債否則用轉換價值／市價或債底估算。沒有資料時為 null。")
     delta_source: str = Field(default="", description="1.5.0 新增。Delta 來源：試算表、估算(轉換價值/市價)、估算(債底)、估算(Black-Scholes)。")
@@ -104,17 +104,19 @@ class PortfolioResponse(BaseModel):
     total_beta: float = Field(description="同 beta。本地基準敏感度合計，不是單一指數 Beta。")
     tw_nav: float = Field(description="只含整戶都是台股的帳戶淨值（含該戶現金與元大期貨）。混合帳戶不拆進來。")
     us_nav: float = Field(description="只含整戶都是美股的帳戶淨值（含該戶現金）。混合帳戶不拆進來。")
-    sleeve_nav_complete: bool = Field(default=True, description="1.7.0 新增。false 表示有帳戶同時含台股與美股，現金沒有歸屬，tw_nav + us_nav 小於總淨值。")
-    unallocated_nav: float = Field(default=0.0, description="1.7.0 新增。混合帳戶的淨值。tw_nav + us_nav + unallocated_nav＝net_value。")
-    beta_basis: Literal["sleeve_nav", "total_nav"] = Field(default="sleeve_nav", description="1.7.0 新增。sleeve_nav＝台股／美股各除以自己的淨值；total_nav＝因為現金拆不開，兩邊都除以總淨值。")
-    beta_label: str = Field(default="本地基準敏感度合計。台股對加權指數，美股對 S&P 500，不是單一指數 Beta。", description="1.7.0 新增。beta／total_beta 的讀法。")
-    beta_complete: bool = Field(default=True, description="1.7.0 新增。false 表示有部位 Beta 沒估到。那些部位的名目仍可計入槓桿，但 Beta 不是 1，也沒有算進 beta。")
-    unknown_beta_symbols: list[str] = Field(default_factory=list, description="1.7.0 新增。名目已知、Beta 未計入的代號。")
+    sleeve_nav_complete: bool = Field(default=True, description="1.8.0 新增。false 表示有帳戶同時含台股與美股，現金沒有歸屬，tw_nav + us_nav 小於總淨值。")
+    unallocated_nav: float = Field(default=0.0, description="1.8.0 新增。混合帳戶的淨值。tw_nav + us_nav + unallocated_nav＝net_value。")
+    beta_basis: Literal["sleeve_nav", "total_nav"] = Field(default="sleeve_nav", description="1.8.0 新增。sleeve_nav＝台股／美股各除以自己的淨值；total_nav＝因為現金拆不開，兩邊都除以總淨值。")
+    beta_label: str = Field(default="本地基準敏感度合計。台股對加權指數，美股對 S&P 500，不是單一指數 Beta。", description="1.8.0 新增。beta／total_beta 的讀法。")
+    beta_complete: bool = Field(default=True, description="1.8.0 新增。false 表示有部位 Beta 沒估到。那些部位的名目仍可計入槓桿，但 Beta 不是 1，也沒有算進 beta。")
+    unknown_beta_symbols: list[str] = Field(default_factory=list, description="1.8.0 新增。名目已知、Beta 未計入的代號。")
     tw_exposure: float = Field(description="舊欄位，保留相容。台股 **Beta 曝險** Σ(名目曝險 × Beta)，台幣；不是名目曝險，所以 tw_exposure + us_exposure ≠ exposure。名目曝險請用 beta_leverage.tw.notional_exposure。")
     us_exposure: float = Field(description="舊欄位，保留相容。美股 **Beta 曝險**，台幣；同上。")
     beta_leverage: BetaLeverageResponse = Field(description="1.3.0 新增。台股／美股／合計的槓桿、部位平均 Beta、帳戶 Beta。")
     positions: list[PositionResponse]
     yuanta_futures: YuantaFuturesResponse
+    greeks: dict = Field(default_factory=dict, description="1.7.0 新增。台股與美股分開的 Delta／Theta。缺值是 null，合計不完整時 delta_complete 或 theta_complete 為 false，缺的部位沒有當成 0。兩市場不加總。")
+    beta_targets: dict = Field(default_factory=dict, description="1.7.0 新增。依第五頁多空狀態的目標 Beta 區間。區間是程式預設。狀態未知時 tw 與 us 是 null。避險只建議同市場工具。")
 
 
 class AdviceResponse(BaseModel):
@@ -155,6 +157,7 @@ class NavSnapshotResponse(BaseModel):
     usdtwd: float
     usdtwd_source: Literal["live", "cached", "last_known", "fallback"] = Field(default="live", description="live＝即時；cached＝本程序最近一次成功值；last_known＝NAV_Snapshots 最後一筆即時匯率；fallback＝預設 32.5。非 live 時 warnings 會說明。")
     warnings: list[str]
+    macro_history: dict = Field(default_factory=dict, description="同一天寫入 Macro_Score_History 的結果。status 為 written、kept、skipped 或 failed。失敗不會讓淨值快照失敗。total 缺值是 null，不是 0。")
 
 
 def export_json_schema() -> dict:

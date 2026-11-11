@@ -21,12 +21,12 @@ from macro_cycle_sheet import (
     SHEET_CACHE_SECONDS,
     compose_macro_view,
     headers_missing,
-    parse_fred_csv,
     score_auto_from_markets,
 )
 
 _MEM = {"view": None, "at": 0.0}
 _FETCH_TIMEOUT = 8
+_POOL_TIMEOUT = 18
 
 
 def remember_live_view(view: dict, now: float | None = None) -> None:
@@ -118,12 +118,12 @@ def fetch_auto_results(today: str | None = None, fetchers: dict | None = None) -
     from datetime import date
 
     today = today or date.today().isoformat()
-    jobs = fetchers or _default_fetchers()
+    jobs = fetchers or {**_default_fetchers(), **_proxy_fetchers()}
     markets = {key: None for key in jobs}
     pool = ThreadPoolExecutor(max_workers=max(1, len(jobs)))
     future_map = {pool.submit(fn): key for key, fn in jobs.items()}
     try:
-        for future in as_completed(future_map, timeout=_FETCH_TIMEOUT + 2):
+        for future in as_completed(future_map, timeout=_POOL_TIMEOUT):
             key = future_map[future]
             try:
                 markets[key] = future.result()
@@ -136,8 +136,10 @@ def fetch_auto_results(today: str | None = None, fetchers: dict | None = None) -
                 markets[key] = None
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
+    dfii_raw = markets.get("dfii10") or []
+    dfii_values = [item[1] for item in dfii_raw] if dfii_raw and isinstance(dfii_raw[0], tuple) else list(dfii_raw or [])
     cleaned = {
-        "dfii10": markets.get("dfii10") or [],
+        "dfii10": dfii_values,
         "dgs10": markets.get("dgs10") or [],
         "hy": markets.get("hy") or [],
         "vix": markets.get("vix"),
@@ -145,7 +147,23 @@ def fetch_auto_results(today: str | None = None, fetchers: dict | None = None) -
         "twii": markets.get("twii") or [],
         "sox": markets.get("sox") or [],
     }
-    return score_auto_from_markets(cleaned, today)
+    from macro_proxies import proxies_from_payloads
+
+    found = score_auto_from_markets(cleaned, today)
+    found.update(
+        proxies_from_payloads(
+            {
+                "pmi": markets.get("pmi_bundle") or {},
+                "ndc_scores": markets.get("ndc_scores") or [],
+                "export": markets.get("export_yoy") or {},
+                "pe": markets.get("spx_pe") or {},
+                "dfii10": dfii_raw,
+                "closes": markets.get("sector_closes") or {},
+            },
+            today,
+        )
+    )
+    return found
 
 
 def load_service_key():
@@ -178,7 +196,7 @@ def _read_tab(spreadsheet, title: str, required: tuple[str, ...]):
 
 def _default_fetchers() -> dict:
     return {
-        "dfii10": lambda: _fred("DFII10"),
+        "dfii10": lambda: _fred_points("DFII10"),
         "dgs10": lambda: _fred("DGS10"),
         "hy": lambda: _fred("BAMLH0A0HYM2"),
         "vix": lambda: _last_close("^VIX"),
@@ -189,7 +207,13 @@ def _default_fetchers() -> dict:
 
 
 def _fred(series_id: str) -> list[float]:
+    return [value for _day, value in _fred_points(series_id)]
+
+
+def _fred_points(series_id: str) -> list[tuple[str, float]]:
     import requests
+
+    from macro_proxies import parse_fred_points
 
     response = requests.get(
         "https://fred.stlouisfed.org/graph/fredgraph.csv",
@@ -198,7 +222,99 @@ def _fred(series_id: str) -> list[float]:
         timeout=_FETCH_TIMEOUT,
     )
     response.raise_for_status()
-    return parse_fred_csv(response.text)
+    return parse_fred_points(response.text)
+
+
+def _proxy_fetchers() -> dict:
+    return {
+        "pmi_bundle": _fetch_pmi_bundle,
+        "ndc_scores": _fetch_ndc_scores,
+        "export_yoy": _fetch_export_yoy,
+        "spx_pe": _fetch_spx_pe,
+        "sector_closes": _fetch_sector_closes,
+    }
+
+
+def _fetch_pmi_bundle() -> dict:
+    from macro_proxies import (
+        EMPIRE_HEADLINE,
+        EMPIRE_INVENTORIES,
+        EMPIRE_NEW_ORDERS,
+        PHILLY_HEADLINE,
+        PHILLY_INVENTORIES,
+        PHILLY_NEW_ORDERS,
+    )
+
+    ids = {
+        "philly": PHILLY_HEADLINE,
+        "empire": EMPIRE_HEADLINE,
+        "philly_orders": PHILLY_NEW_ORDERS,
+        "philly_inventories": PHILLY_INVENTORIES,
+        "empire_orders": EMPIRE_NEW_ORDERS,
+        "empire_inventories": EMPIRE_INVENTORIES,
+    }
+    found = {key: [] for key in ids}
+    pool = ThreadPoolExecutor(max_workers=len(ids))
+    future_map = {pool.submit(_fred_points, series_id): key for key, series_id in ids.items()}
+    try:
+        for future in as_completed(future_map, timeout=_FETCH_TIMEOUT):
+            key = future_map[future]
+            try:
+                found[key] = future.result()
+            except Exception:
+                found[key] = []
+    except TimeoutError:
+        pass
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+    return found
+
+
+def _fetch_ndc_scores() -> list[dict]:
+    import io
+    import zipfile
+
+    import requests
+
+    from macro_proxies import NDC_DATASET_URL, NDC_SCORE_FILE, parse_ndc_scores
+
+    response = requests.get(NDC_DATASET_URL, headers={"User-Agent": "quant-command-center/1.0"}, timeout=_FETCH_TIMEOUT)
+    response.raise_for_status()
+    url = response.json()["result"]["distribution"][0]["resourceDownloadUrl"]
+    blob = requests.get(url, headers={"User-Agent": "quant-command-center/1.0"}, timeout=_FETCH_TIMEOUT)
+    blob.raise_for_status()
+    archive = zipfile.ZipFile(io.BytesIO(blob.content))
+    return parse_ndc_scores(archive.read(NDC_SCORE_FILE).decode("utf-8-sig"))
+
+
+def _fetch_export_yoy() -> dict:
+    import requests
+
+    from macro_proxies import CUSTOMS_EXPORT_URL, parse_export_yoy
+
+    response = requests.get(CUSTOMS_EXPORT_URL, headers={"User-Agent": "quant-command-center/1.0"}, timeout=_FETCH_TIMEOUT)
+    response.raise_for_status()
+    return parse_export_yoy(response.content.decode("utf-8-sig"))
+
+
+def _fetch_spx_pe() -> dict:
+    import yfinance as yf
+
+    info = yf.Ticker("^GSPC").info or {}
+    return {"forward": info.get("forwardPE"), "trailing": info.get("trailingPE")}
+
+
+def _fetch_sector_closes() -> dict:
+    from macro_proxies import INDUSTRY_ETFS
+
+    symbols = sorted({symbol for pair in INDUSTRY_ETFS.values() for symbol in pair})
+    found = {}
+    for symbol in symbols:
+        try:
+            found[symbol] = _closes(symbol)
+        except Exception:
+            found[symbol] = []
+    return found
 
 
 def _closes(symbol: str) -> list[float]:

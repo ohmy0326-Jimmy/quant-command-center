@@ -161,13 +161,16 @@ with mock.patch.object(hedge_sim_ui, "load_taiex_history", return_value=fake_px)
     assert len(at.dataframe) >= 1
 
 
-def test_hedge_sim_lives_in_option_hedge_tab_not_strategy_simulator():
+def test_hedge_sim_lives_in_combined_panel_not_strategy_simulator():
     ui = (ROOT / "nav_scenario_sim_ui.py").read_text(encoding="utf-8")
     assert "模擬工具" not in ui and "render_hedge_strategy_sim" not in ui
     page = (ROOT / "order_assistant_ui.py").read_text(encoding="utf-8")
-    assert "render_nav_scenario_simulator(snapshot, float(rules.target_leverage))" in page
+    panel = (ROOT / "sim_panel_ui.py").read_text(encoding="utf-8")
+    assert "render_combined_sim_panel(snapshot, view, float(rules.target_leverage))" in page
+    assert "render_hedge_strategy_sim" in panel
+    assert "render_nav_scenario_simulator" in panel
     tab = page[page.index("with tab_hedge:"):page.index("with tab_stress:")]
-    assert "render_hedge_strategy_sim(snapshot, view)" in tab
+    assert "render_hedge_strategy_sim" not in tab
 
 
 def test_futures_hedge_uses_tw_beta_exposure_only():

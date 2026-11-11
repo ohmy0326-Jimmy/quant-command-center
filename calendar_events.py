@@ -60,8 +60,6 @@ MAX_EARNINGS_LOOKUPS = 40
 
 NOT_DONE = (
     {"name": "台積電月營收、合約負債", "why": "使用者後來限定只放財模，不進行事曆。"},
-    {"name": "央行理監事會、主計總處 GDP", "why": "沒有固定月規則，也沒有接上官方行程檔，不硬編日期。"},
-    {"name": "MSCI 等指數調整", "why": "沒有免費且可核對的官方調整日來源，不加事件型標籤。"},
     {"name": "財報前自動 AI 解析", "why": "第三頁保留手動按鈕。載入頁面不會呼叫，也不排程。"},
     {"name": "全球經濟事件全集", "why": "沒有 FMP_API_KEY 時不顯示；有金鑰也只留與利率、美國總經、匯率有關的項目。"},
 )
@@ -517,6 +515,69 @@ def institutional_events(start: date, end: date) -> tuple[list[dict], list[str]]
     return events, notes
 
 
+def official_macro_events(start: date, end: date, confirmed: set[str] | None = None) -> list[dict]:
+    """年度日期表。confirmed 是官方頁面仍含對照字串的來源；其餘標官方日期待確認。"""
+    from official_dates import (
+        CBC_MEETINGS,
+        FOMC_DECISIONS,
+        MSCI_REVIEWS,
+        PENDING,
+        SOURCES,
+        TW_GDP,
+        US_CPI,
+        US_GDP,
+        US_PAYROLLS,
+        VERIFIED_ON,
+    )
+
+    confirmed = confirmed or set()
+
+    def stamp(key: str) -> tuple[str, str]:
+        url = SOURCES[key]["url"]
+        if key in confirmed:
+            return "官方", f"官方頁面仍含對照日期。{url}。表上次核對 {VERIFIED_ON}。"
+        return PENDING, f"官方日期待確認。沿用 {VERIFIED_ON} 核對的日期表，這次沒有從頁面確認。{url}"
+
+    found = []
+
+    def add(day: date, key: str, title: str, market: str, kind: str):
+        if day < start or day > end:
+            return
+        certainty, note = stamp(key)
+        found.append({
+            "date": day,
+            "when_text": day.isoformat(),
+            "session": "公布日",
+            "source": SOURCES[key]["url"],
+            "certainty": certainty,
+            "title": title,
+            "symbol": "",
+            "market": market,
+            "estimate": None,
+            "previous": None,
+            "actual": None,
+            "note": note,
+            "kind": kind,
+        })
+
+    for day in FOMC_DECISIONS:
+        add(day, "fomc", "聯準會 FOMC 決策", "US", "rate")
+    for day in CBC_MEETINGS:
+        add(day, "cbc", "台灣央行理監事會", "TW", "tw_macro")
+    for day, label in US_CPI:
+        add(day, "us_cpi", f"美國 CPI（{label}）", "US", "us_macro")
+    for day, label in US_PAYROLLS:
+        add(day, "us_payrolls", f"美國非農就業（{label}）", "US", "us_macro")
+    for day, label in US_GDP:
+        add(day, "us_gdp", f"美國 GDP（{label}）", "US", "us_macro")
+    for day, label in TW_GDP:
+        add(day, "tw_gdp", f"台灣 GDP（{label}）", "TW", "tw_macro")
+    for item in MSCI_REVIEWS:
+        add(item["announce"], "msci", f"MSCI {item['name']}指數檢討公布", "BOTH", "index")
+        add(item["effective"], "msci", f"MSCI {item['name']}指數檢討生效", "BOTH", "index")
+    return found
+
+
 def parse_fmp_event(item: dict) -> dict | None:
     name = str(item.get("event") or "").strip()
     country = str(item.get("country") or "")
@@ -613,6 +674,13 @@ def impacts_for(event: dict, items: list[dict]) -> list[str]:
         lines.append("台股：" + (_names(tw) if tw else "沒有"))
         lines.append("美股：" + (_names(us) if us else "沒有"))
         return lines
+    if kind == "index":
+        tw = [item for item in holdings if item.get("market") == "TW"]
+        us = [item for item in holdings if item.get("market") == "US"]
+        lines = ["指數調整可能影響成分股（推論，不是預測）。台股與美股分開看。"]
+        lines.append("台股：" + (_names(tw) if tw else "沒有"))
+        lines.append("美股：" + (_names(us) if us else "沒有"))
+        return lines
     return ["沒有自動對到的部位。"]
 
 
@@ -667,7 +735,7 @@ def _http_get(url: str, timeout: int = 10):
     return requests.get(url, timeout=timeout)
 
 
-def build_calendar(rows, watchlist: str, earnings_by_symbol: dict, fmp_items, today: date, fetched_at: datetime, horizon_days: int = 90, fmp_error: str = "") -> dict:
+def build_calendar(rows, watchlist: str, earnings_by_symbol: dict, fmp_items, today: date, fetched_at: datetime, horizon_days: int = 90, fmp_error: str = "", official_confirmed: set[str] | None = None) -> dict:
     """組第三頁用的事件。earnings_by_symbol 的值可以是日曆，或含 error 的 dict。"""
     end = today + timedelta(days=horizon_days)
     notes: list[str] = []
@@ -690,6 +758,7 @@ def build_calendar(rows, watchlist: str, earnings_by_symbol: dict, fmp_items, to
     institutional, institutional_notes = institutional_events(today, end)
     notes.extend(institutional_notes)
     events.extend(institutional)
+    events.extend(official_macro_events(today, end, official_confirmed))
     for symbol in symbols:
         payload = (earnings_by_symbol or {}).get(symbol)
         market = next((item["market"] for item in items if item.get("key") == symbol), "")

@@ -121,6 +121,102 @@ def _card_panel(row: dict, ui: dict, fields: dict) -> None:
             st.caption(" ".join(row["reasons"]))
         if row["mode"] == "manual":
             _light_picker(card["card_id"], ui)
+        if card.get("card_id") == "S7":
+            _s7_panel()
+
+
+def _s7_panel() -> None:
+    st.caption("近 10 日 VIX 最高 > 35，且當天從該高點回落至少 15%。按按鈕才抓資料。")
+    if st.button("列出 S7 歷史事件", key="s7_list_events"):
+        st.session_state["s7_report"] = _load_s7_report()
+    report = st.session_state.get("s7_report")
+    if not report:
+        return
+    for block in report:
+        st.markdown(f"**{block['market']}**")
+        if not block.get("ok"):
+            st.warning(block.get("note") or "資料不足")
+            continue
+        if block.get("note"):
+            st.caption(block["note"])
+        rows = []
+        for event in block["events"]:
+            row = {"日期": event["date"], "VIX": event["vix"], "高點": event["peak"]}
+            for horizon, result in event["horizons"].items():
+                row[f"{horizon}日報酬"] = result["return"]
+                row[f"{horizon}日最大回撤"] = result["max_drawdown"]
+                if result.get("note"):
+                    row[f"{horizon}日"] = result["note"]
+            rows.append(row)
+        if not rows:
+            st.caption(block.get("note") or "沒有符合條件的事件。")
+        else:
+            import pandas as pd
+
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+            st.caption("報酬與最大回撤是事件日收盤之後的交易日。不夠長的欄是空的，不當 0。")
+
+
+def _load_s7_report() -> list[dict]:
+    from s7_backtest import s7_events
+
+    blocks = []
+    us_vix, us_price, us_note = _yahoo_pair("^VIX", "^GSPC")
+    us = s7_events(us_vix or [], us_price or [], market="美股 VIX / 標普")
+    if us_note and not us["ok"]:
+        us["note"] = us_note
+    blocks.append(us)
+    tw_vix, tw_note = _taiex_vix_rows()
+    tw_price, price_note = _yahoo_rows("^TWII")
+    tw = s7_events(tw_vix or [], tw_price or [], market="台指 VIX / 加權")
+    if not tw["ok"]:
+        tw["note"] = tw_note or price_note or tw["note"]
+    blocks.append(tw)
+    return blocks
+
+
+def _yahoo_pair(vix_symbol: str, price_symbol: str):
+    vix, vix_note = _yahoo_rows(vix_symbol)
+    price, price_note = _yahoo_rows(price_symbol)
+    note = vix_note or price_note or ""
+    return vix, price, note
+
+
+def _yahoo_rows(symbol: str):
+    try:
+        import yfinance as yf
+
+        frame = yf.Ticker(symbol).history(period="10y", auto_adjust=True)
+    except Exception:
+        return None, f"{symbol} 抓取失敗，資料不足。"
+    if frame is None or getattr(frame, "empty", True) or "Close" not in getattr(frame, "columns", []):
+        return None, f"{symbol} 沒有收盤，資料不足。"
+    rows = []
+    for stamp, value in frame["Close"].dropna().items():
+        day = getattr(stamp, "date", lambda: None)()
+        if day is None or value != value:
+            continue
+        rows.append({"date": day, "close": float(value)})
+    if not rows:
+        return None, f"{symbol} 沒有收盤，資料不足。"
+    return rows, ""
+
+
+def _taiex_vix_rows():
+    try:
+        from datetime import date
+
+        from taiex_vix import _fetch_month, _http_get, month_stamps
+
+        found = {}
+        for stamp in month_stamps(date.today(), 24):
+            for day, _clock, value in _fetch_month(_http_get, stamp):
+                found[day] = float(value)
+    except Exception:
+        return None, "台指 VIX 抓取失敗，資料不足。"
+    if len(found) < 10:
+        return None, "台指 VIX 不足 10 個交易日，資料不足。"
+    return [{"date": day, "close": found[day]} for day in sorted(found)], ""
 
 
 def _light_picker(card_id: str, ui: dict) -> None:

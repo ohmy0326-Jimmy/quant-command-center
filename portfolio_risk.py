@@ -1580,6 +1580,9 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
     metrics["unknown_delta_symbols"] = list(dict.fromkeys(unknown_symbols))
     metrics["exposure_complete"] = not metrics["unknown_delta_symbols"]
     metrics["exposure_scope"] = "complete" if metrics["exposure_complete"] else "partial"
+    from portfolio_greeks import aggregate_greeks
+
+    metrics["portfolio_greeks"] = aggregate_greeks(df, metrics.get("tw_index"), metrics.get("us_index"))
     
     if not df.empty and "Beta來源" in df.columns:
         fallbacks = []

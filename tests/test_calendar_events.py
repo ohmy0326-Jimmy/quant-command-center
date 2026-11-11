@@ -140,8 +140,12 @@ class SourceTests(unittest.TestCase):
     def test_missing_fmp_key_does_not_invent_events(self):
         model = cal.build_calendar([], "", {}, None, date(2026, 11, 7), FETCHED)
         blob = " ".join(event["title"] for event in model["events"])
-        self.assertNotIn("FOMC", blob)
         self.assertNotIn("M7", blob)
+        self.assertFalse(any(event.get("source") == "FMP 經濟行事曆" and "FOMC" in event["title"] for event in model["events"]))
+        fomc = [event for event in model["events"] if "FOMC" in event["title"]]
+        self.assertTrue(fomc)
+        self.assertTrue(all(event["certainty"] == "官方日期待確認" for event in fomc))
+        self.assertTrue(all(event["estimate"] is None and event["actual"] is None for event in fomc))
         self.assertTrue(any("FMP_API_KEY" in note for note in model["notes"]))
         self.assertTrue(any(event["kind"] == "settlement" for event in model["events"]))
 
@@ -254,7 +258,7 @@ class ImpactTests(unittest.TestCase):
         self.assertIn("台積電", joined)
         self.assertIn("台指期", joined)
         self.assertNotIn("蘋果", joined)
-        cpi = next(event for event in model["events"] if event["kind"] == "us_macro")
+        cpi = next(event for event in model["events"] if event["title"] == "CPI")
         self.assertIn("蘋果", cpi["impacts"][0])
         self.assertNotIn("台積電", cpi["impacts"][0])
         self.assertIsNone(cpi["actual"])
@@ -344,6 +348,83 @@ calendar_page.render_calendar(st, json.loads({payload!r}))
         self.assertIn("不寫入", blob)
         self.assertNotIn("利多", blob)
         self.assertNotIn("利空", blob)
+
+
+class CalendarViewTests(unittest.TestCase):
+    def test_table_is_compact_and_caveats_are_deduped(self):
+        import calendar_view
+
+        model = cal.build_calendar(
+            [_row(標的="2330", 名稱="台積電"), _row(種類="美股", 標的="AAPL", 名稱="蘋果")],
+            "",
+            {
+                "AAPL": {"Earnings Date": date(2026, 11, 12)},
+                "2330.TW": {"error": "來源失敗"},
+            },
+            [{
+                "event": "CPI",
+                "country": "US",
+                "date": "2026-11-20",
+                "estimate": 0.2,
+                "previous": None,
+                "actual": None,
+            }],
+            date(2026, 11, 7),
+            FETCHED,
+        )
+        model["notes"] = model["notes"] + [model["notes"][0]] if model["notes"] else ["重複說明"]
+        view = calendar_view.shape_calendar(model, date(2026, 11, 7), horizon_days=90)
+        titles = [row["事件"] for row in view["rows"]]
+        self.assertTrue(any("財報 AAPL" in title for title in titles))
+        earnings = next(row for row in view["rows"] if "AAPL" in row["事件"])
+        self.assertEqual(earnings["市場"], "美")
+        self.assertEqual(earnings["類型"], "財報")
+        self.assertEqual(earnings["確定度"], "推估")
+        self.assertIn("（四）", earnings["日期"])
+        self.assertEqual(earnings["相關持股"], "蘋果")
+        self.assertEqual(earnings["數字"], "")
+        self.assertNotIn("這不是漲跌預測", earnings["相關持股"])
+        settlement = next(row for row in view["rows"] if row["類型"] == "結算")
+        self.assertEqual(settlement["確定度"], "推估")
+        self.assertEqual(settlement["數字"], "")
+        self.assertNotIn("推論", settlement["相關持股"])
+        cpi = next(row for row in view["rows"] if row["事件"] == "CPI")
+        self.assertEqual(cpi["類型"], "總經")
+        self.assertEqual(cpi["市場"], "美")
+        self.assertEqual(cpi["數字"], "預估 0.2")
+        self.assertNotIn("前值", cpi["數字"])
+        soon = [row for row in view["rows"] if row["近7日"]]
+        self.assertTrue(any("AAPL" in row["事件"] for row in soon))
+        later = calendar_view.shape_calendar(model, date(2026, 11, 7), horizon_days=10)
+        self.assertFalse(any(row["事件"] == "CPI" for row in later["rows"]))
+        only_us = calendar_view.shape_calendar(model, date(2026, 11, 7), market="美")
+        self.assertTrue(all(row["市場"] == "美" for row in only_us["rows"]))
+        texts = [item for group in view["caveats"]["groups"] for item in group["items"]]
+        self.assertEqual(len(texts), len(set(texts)))
+        self.assertTrue(any("2330.TW" in item for item in texts))
+        self.assertEqual(view["caveats"]["count"], len(texts))
+        self.assertEqual(len(view["type_notes"]), 3)
+
+    def test_unknown_certainty_and_empty_holdings(self):
+        import calendar_view
+
+        event = {
+            "date": date(2026, 11, 18),
+            "title": "週選",
+            "kind": "weekly",
+            "market": "TW",
+            "certainty": "未知",
+            "impacts": ["沒有台股持倉。觀察清單與美股部位不併入台股制度事件。"],
+            "estimate": None,
+            "previous": None,
+            "actual": None,
+        }
+        view = calendar_view.shape_calendar({"events": [event], "notes": [], "gaps": [], "symbols": ["X"]}, date(2026, 11, 12))
+        row = view["rows"][0]
+        self.assertEqual(row["確定度"], "未知")
+        self.assertEqual(row["相關持股"], "—")
+        self.assertEqual(row["數字"], "")
+        self.assertTrue(row["近7日"])
 
 
 class DataFrameTests(unittest.TestCase):
@@ -505,7 +586,10 @@ calendar_page.render_calendar(
             self.assertNotIn("📤 推播此事件建議到 TG", labels)
             self.assertEqual(at.session_state["log"], [])
 
-            at = at.button(key=calendar_page.widget_key("ai", aapl["id"])).click().run()
+            self.assertEqual(labels.count("🧠 AI 解析"), 1)
+            self.assertEqual(labels.count("📲 推播TG"), 1)
+            at.selectbox(key="p3_event").set_value(aapl["id"])
+            at = at.button(key="p3_ai").click().run()
             self.assertFalse(at.exception)
             warnings = "\n".join(str(item.value) for item in at.warning)
             self.assertIn("沒有 GEMINI_API_KEY", warnings)
@@ -513,21 +597,24 @@ calendar_page.render_calendar(
 
             at.session_state["gkey"] = "fake-key"
             at.session_state["mode"] = "empty"
-            at = at.button(key=calendar_page.widget_key("ai", aapl["id"])).click().run()
+            at.selectbox(key="p3_event").set_value(aapl["id"])
+            at = at.button(key="p3_ai").click().run()
             self.assertFalse(at.exception)
             warnings = "\n".join(str(item.value) for item in at.warning)
             self.assertIn("解析未完成", warnings)
             self.assertNotIn(aapl["id"], at.session_state["memos"])
 
             at.session_state["mode"] = "fail"
-            at = at.button(key=calendar_page.widget_key("ai", aapl["id"])).click().run()
+            at.selectbox(key="p3_event").set_value(aapl["id"])
+            at = at.button(key="p3_ai").click().run()
             self.assertFalse(at.exception)
             errors = "\n".join(str(item.value) for item in at.error)
             self.assertIn("生成失敗", errors)
             self.assertNotIn(aapl["id"], at.session_state["memos"])
 
             at.session_state["mode"] = "ok"
-            at = at.button(key=calendar_page.widget_key("ai", aapl["id"])).click().run()
+            at.selectbox(key="p3_event").set_value(aapl["id"])
+            at = at.button(key="p3_ai").click().run()
             self.assertFalse(at.exception)
             self.assertEqual(at.session_state["memos"][aapl["id"]]["text"], "建議只談這一則")
             self.assertEqual(at.session_state["log"][-1][0], "ai")
@@ -535,7 +622,8 @@ calendar_page.render_calendar(
             self.assertNotIn("2330.TW", at.session_state["log"][-1][2])
             self.assertIn("📤 推播此事件建議到 TG", [button.label for button in at.button])
 
-            at = at.button(key=calendar_page.widget_key("tg", tw["id"])).click().run()
+            at.selectbox(key="p3_event").set_value(tw["id"])
+            at = at.button(key="p3_tg").click().run()
             self.assertFalse(at.exception)
             kind, title, body = at.session_state["log"][-1]
             self.assertEqual(kind, "tg")
@@ -545,20 +633,68 @@ calendar_page.render_calendar(
             self.assertNotIn("AAPL", title)
 
             at.session_state["memos"][aapl["id"]]["fingerprint"] = "別列舊解析"
+            at.selectbox(key="p3_event").set_value(aapl["id"])
             at = at.run()
             self.assertFalse(at.exception)
             warnings = "\n".join(str(item.value) for item in at.warning)
             self.assertIn("較早的事件內容", warnings)
-            self.assertNotIn(calendar_page.widget_key("advice", aapl["id"]), [button.key for button in at.button])
+            self.assertNotIn("p3_advice", [button.key for button in at.button])
 
-            at = at.button(key=calendar_page.widget_key("ai", aapl["id"])).click().run()
-            at = at.button(key=calendar_page.widget_key("advice", aapl["id"])).click().run()
+            at.selectbox(key="p3_event").set_value(aapl["id"])
+            at = at.button(key="p3_ai").click().run()
+            at = at.button(key="p3_advice").click().run()
             self.assertFalse(at.exception)
             kind, title, body = at.session_state["log"][-1]
             self.assertEqual(kind, "tg")
             self.assertIn("行事曆戰術建議：財報 AAPL", title)
             self.assertEqual(body, "建議只談這一則")
             self.assertNotIn("2330", title)
+
+
+class OfficialDateTests(unittest.TestCase):
+    def test_window_uses_table_and_does_not_shift_settlement(self):
+        import calendar_view
+
+        model = cal.build_calendar([], "", {}, None, date(2026, 11, 7), FETCHED, official_confirmed=set())
+
+        def on(title, day):
+            return any(event["title"] == title and event["date"] == day for event in model["events"])
+
+        self.assertTrue(on("聯準會 FOMC 決策", date(2026, 12, 9)))
+        self.assertTrue(on("台灣央行理監事會", date(2026, 12, 17)))
+        self.assertTrue(on("美國 CPI（2026年11月）", date(2026, 12, 10)))
+        self.assertTrue(on("美國非農就業（2026年11月）", date(2026, 12, 4)))
+        self.assertTrue(on("美國 GDP（2026年第3季第二次估計）", date(2026, 11, 25)))
+        self.assertTrue(on("台灣 GDP（2026年第3季初步統計）", date(2026, 11, 30)))
+        self.assertTrue(on("MSCI 2026年11月指數檢討生效", date(2026, 12, 1)))
+        self.assertTrue(all(event["certainty"] == "官方日期待確認" for event in model["events"] if event["kind"] in {"rate", "index"} or "GDP" in event["title"] or "CPI" in event["title"] or "非農" in event["title"] or "央行" in event["title"]))
+        view = calendar_view.shape_calendar(model, date(2026, 11, 7))
+        badge = next(row for row in view["rows"] if row["事件"] == "聯準會 FOMC 決策")
+        self.assertEqual(badge["確定度"], "待確認")
+        self.assertNotEqual(badge["確定度"], "官方")
+        feb = cal.monthly_settlement(2026, 2)
+        self.assertIsNone(feb["date"])
+        self.assertEqual(feb["anchor"], date(2026, 2, 18))
+
+    def test_confirmed_page_is_official_and_fetch_failure_keeps_table(self):
+        from official_dates import confirm_official_dates
+
+        class Response:
+            status_code = 200
+            text = "December 8-9 and nothing else"
+
+        confirmed = confirm_official_dates(get=lambda url, timeout=8: Response())
+        self.assertEqual(confirmed, {"fomc"})
+        model = cal.build_calendar([], "", {}, None, date(2026, 11, 7), FETCHED, official_confirmed=confirmed)
+        fomc = next(event for event in model["events"] if event["title"] == "聯準會 FOMC 決策")
+        cbc = next(event for event in model["events"] if event["title"] == "台灣央行理監事會")
+        self.assertEqual(fomc["certainty"], "官方")
+        self.assertEqual(cbc["certainty"], "官方日期待確認")
+
+        def broken(url, timeout=8):
+            raise TimeoutError("down")
+
+        self.assertEqual(confirm_official_dates(get=broken), set())
 
 
 if __name__ == "__main__":
