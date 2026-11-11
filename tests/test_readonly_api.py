@@ -149,7 +149,8 @@ class AdvicePromptTests(unittest.TestCase):
         self.assertNotIn("請給予 3 點風控建議。", page6)
         self.assertIn("請給予 3 點風控建議。", advice)
         # 第一頁、第二頁的按鈕仍寫在 Dashboard。第三頁改由 calendar_actions 用同一個模型，且只在按下後呼叫。
-        self.assertEqual(dashboard.count("gemini-3.8-flash"), 2)
+        self.assertGreaterEqual(dashboard.count("run_ai_report"), 2)
+        self.assertNotIn("generate_content", dashboard)
         with open(os.path.join(ROOT, "calendar_actions.py"), encoding="utf-8") as handle:
             actions = handle.read()
         self.assertIn("RISK_MANAGER_MODEL", actions)
