@@ -52,7 +52,6 @@ from order_calculators import (
     stock_risk_quantity,
 )
 from taiex_vix import fetch_taiex_vix
-from nav_scenario_sim_ui import render_nav_scenario_simulator
 from order_insights import (
     account_kind_warnings,
     account_options,
@@ -1839,11 +1838,7 @@ def render_order_assistant(send_to_telegram, load_sheets, beta_fn, load_market=N
         us_hedge_note = _render_us_hedge(snapshot, rules, beta_fn=beta_fn)
         if us_hedge_note:
             hedge_note = "\n".join(n for n in (hedge_note, us_hedge_note) if n)
-        st.divider()
-        st.subheader("避險預算與效果模擬（台指期／TXO，只避台股）")
-        from hedge_sim_ui import render_hedge_strategy_sim
-
-        render_hedge_strategy_sim(snapshot, view)
+        st.caption("台股避險回測與淨值劇本在頁面下方同一個面板，用選擇器切換。")
 
     with tab_stress:
         st.subheader("壓力測試")
@@ -1898,4 +1893,6 @@ def render_order_assistant(send_to_telegram, load_sheets, beta_fn, load_market=N
             payload = text if len(text) <= 3500 else text[:3500] + "\n…（後段省略）"
             send_to_telegram("下單輔助試算", payload)
 
-    render_nav_scenario_simulator(snapshot, float(rules.target_leverage))
+    from sim_panel_ui import render_combined_sim_panel
+
+    render_combined_sim_panel(snapshot, view, float(rules.target_leverage))
