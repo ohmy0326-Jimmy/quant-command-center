@@ -103,7 +103,9 @@ class AlignmentTests(unittest.TestCase):
         self.assertEqual(trend["backtest"]["label"], "不可回測")
         self.assertIsNone(trend["backtest"]["performance"])
         self.assertTrue(any("52" in item for item in trend["backtest"]["missing"]))
-        self.assertEqual(week_change(view["total"], view["history"], view["score_updated_at"]), 1)
+        self.assertIsNone(view["total"])
+        self.assertIsNone(view["week_change"])
+        self.assertEqual(week_change(1, view["history"], view["score_updated_at"]), 1)
 
     def test_sheet_history_stays_separate_from_example(self):
         base = load_macro_cycle()

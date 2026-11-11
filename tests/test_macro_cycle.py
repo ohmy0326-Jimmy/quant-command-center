@@ -111,10 +111,13 @@ class SchemaTests(unittest.TestCase):
         self.assertEqual(view["industry_updated_at"], "2026-10-12")
         self.assertEqual(view["industry_cadence"], "monthly")
         self.assertEqual(view["industry_as_of_day"], 12)
-        self.assertEqual(view["total"], 1)
+        self.assertIsNone(view["total"])
         self.assertEqual(view["regime"], "中性")
+        self.assertEqual(view["coverage_status"], "不完整")
+        self.assertLess(view["coverage"], 0.5)
         self.assertEqual(view["risk"]["target_leverage"], 1.5)
         self.assertEqual(view["risk"]["min_cash_pct"], 15.0)
+        self.assertTrue(all(item["example"] and not item["scored"] for item in view["indicators"]))
         self.assertEqual(len(view["indicators"]), 9)
         self.assertEqual([item["id"] for item in view["indicators"]], [
             "us_real_yield",
@@ -297,7 +300,8 @@ class SheetAndAutoTests(unittest.TestCase):
         self.assertEqual(by_id["vix"]["origin"], "sheet")
         self.assertEqual(by_id["valuation"]["score"], 1)
         self.assertEqual(by_id["valuation"]["source"], "manual")
-        self.assertEqual(by_id["pmi"]["origin"], "json")
+        self.assertFalse(by_id["pmi"]["scored"])
+        self.assertIsNone(by_id["pmi"]["score"])
         self.assertTrue(any("pmi" in message and "略過" in message for message in view["warnings"]))
         self.assertTrue(any("未知指標" in message for message in view["warnings"]))
 
@@ -322,8 +326,9 @@ class SheetAndAutoTests(unittest.TestCase):
     def test_missing_sheet_uses_json_then_neutral(self):
         view = compose_macro_view(load_macro_cycle(), {"ok": False, "error": "讀不到分頁 Macro_Score"}, {}, today="2026-10-29")
         self.assertEqual(view["data_origin"], "json")
-        self.assertEqual(view["total"], 1)
+        self.assertIsNone(view["total"])
         self.assertEqual(view["regime"], "中性")
+        self.assertTrue(all(not item.get("scored") for item in view["indicators"]))
         neutral = compose_macro_view(
             {"ok": False, "errors": ["壞掉"], "regime": "中性", "indicators": [], "industries": []},
             {"ok": False, "error": "讀不到"},
@@ -391,7 +396,9 @@ class SheetAndAutoTests(unittest.TestCase):
     def test_orders_page_never_fetches(self):
         view = macro_view_for_orders()
         self.assertEqual(view["data_origin"], "json")
-        self.assertEqual(view["total"], 1)
+        self.assertIsNone(view["total"])
+        self.assertEqual(view["regime"], "中性")
+        self.assertEqual(view["risk"]["target_leverage"], 1.5)
         remember_live_view({"ok": True, "data_origin": "sheet", "regime": "牛"}, now=1_000)
         self.assertEqual(macro_view_for_orders(now=1_100)["data_origin"], "sheet")
         self.assertEqual(macro_view_for_orders(now=1_000 + 15 * 60 + 1)["data_origin"], "json")
@@ -411,7 +418,7 @@ class SheetAndAutoTests(unittest.TestCase):
         self.assertEqual(quadrant_shift({"cycle": "成長", "prev_cycle": "成長"}), "")
         self.assertEqual(quadrant_shift({"cycle": "成長"}), "")
         view = load_macro_cycle()
-        self.assertEqual(view["week_change"], 1)
+        self.assertIsNone(view["week_change"])
         exposure, grand = exposure_by_industry(
             [{"ticker": "2330", "mv": 80}, {"ticker": "2408.TW", "mv": 20}, {"ticker": "SOXL", "mv": 50}],
             view["industries"],
