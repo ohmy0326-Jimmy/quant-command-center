@@ -15,6 +15,7 @@ from plotly.subplots import make_subplots
 from oauth2client.service_account import ServiceAccountCredentials
 from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
 from app_secrets import read_secret
+from ai_report import bind_streamlit_cache, format_ai_error, run_ai_report
 from strategy_lab import STRATEGY_LAB_URL
 from macro_cycle_ui import render_macro_cycle_page
 from order_assistant_ui import render_order_assistant
@@ -52,6 +53,8 @@ import calendar_events
 import official_dates
 import calendar_actions
 import calendar_page
+
+cached_ai_report = bind_streamlit_cache(st.cache_data)
 
 # ==========================================
 # 網頁基本設定與密碼驗證防護（支援環境變數與 Secret）
@@ -603,11 +606,11 @@ if page == "第一頁：總經與風險鬧鐘":
                             2. 今日操作提醒（應對當前環境的現金水位或避險方針）。
                             請給出專業、直擊重點的繁體中文建議。
                             """
-                            res = client.models.generate_content(model='gemini-3.8-flash', contents=p_text)
-                            st.session_state.ai_memo_p1["text"] = res.text
+                            text = run_ai_report(gemini_key, p_text, cached_func=cached_ai_report)
+                            st.session_state.ai_memo_p1["text"] = text
                             st.session_state.ai_memo_p1["time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         except Exception as e:
-                            st.error(f"晨報生成失敗: {e}")
+                            st.error(format_ai_error(e))
                 
                 if st.session_state.ai_memo_p1["text"]:
                     st.markdown("---")
@@ -743,11 +746,15 @@ elif page == "第二頁：板塊與主題資金輪動":
                         gemini_key = os.environ.get("GEMINI_API_KEY") or read_secret("", "GEMINI_API_KEY")
                         client = genai.Client(api_key=gemini_key)
                         summary_table = df_sectors.to_string(index=False)
-                        res_p2 = client.models.generate_content(model='gemini-3.8-flash', contents=f"身為對沖基金經理人，解析以下板塊與主題ETF數據：\n{summary_table}\n請提供資金流向與強勢/弱勢板塊解讀。")
-                        st.session_state.ai_memo_p2["text"] = res_p2.text
+                        text = run_ai_report(
+                            gemini_key,
+                            f"身為對沖基金經理人，解析以下板塊與主題ETF數據：\n{summary_table}\n請提供資金流向與強勢/弱勢板塊解讀。",
+                            cached_func=cached_ai_report,
+                        )
+                        st.session_state.ai_memo_p2["text"] = text
                         st.session_state.ai_memo_p2["time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     except Exception as e:
-                        st.error(f"生成失敗: {e}")
+                        st.error(format_ai_error(e))
             
             if st.session_state.ai_memo_p2["text"]:
                 st.info(f"📌 **分析結果（時間：{st.session_state.ai_memo_p2['time']}）**")
