@@ -4,6 +4,7 @@ import math
 import os
 import unittest
 from datetime import date
+from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
@@ -42,7 +43,7 @@ def _ledger(avg=46733):
     return frame
 
 
-def _notion_trade(**overrides):
+def _trade_log_row(**overrides):
     row = {
         "成交時間": "2026-11-04 01:30:00",
         "帳戶": "元大期貨",
@@ -87,6 +88,20 @@ class TradeLogTests(unittest.TestCase):
             ),
         )
         self.assertEqual(APPENDED_TRADE_HEADERS, EXISTING_TRADE_HEADERS[13:])
+        self.assertEqual(EXISTING_TRADE_HEADERS[0], "時間")
+
+    def test_dashboard_reads_sheet_not_notion_trade_log(self):
+        root = Path(__file__).resolve().parents[1]
+        dashboard = (root / "Dashboard.py").read_text(encoding="utf-8")
+        ledger = (root / "futures_ledger.py").read_text(encoding="utf-8")
+        self.assertNotIn("Notion 交易與覆盤", dashboard)
+        self.assertNotIn("Make.com", dashboard)
+        self.assertNotIn("Make.com", ledger)
+        self.assertIn("Trade_Log", dashboard)
+        self.assertIn("「時間」", ledger)
+        self.assertNotIn("https://www.notion.so/", dashboard)
+        self.assertIn("STRATEGY_LAB_URL", dashboard)
+        self.assertIn("交易策略實驗室", dashboard)
 
     def test_real_headers_count_micro_close_only_after_calibration(self):
         def row(**overrides):
@@ -155,7 +170,7 @@ class TradeLogTests(unittest.TestCase):
         self.assertAlmostEqual(quote.balance, 137094 + gross - 15 - tax, places=4)
 
     def test_blank_realized_column_uses_average_cost(self):
-        trades = pd.DataFrame([_notion_trade(已實現損益="")])
+        trades = pd.DataFrame([_trade_log_row(已實現損益="")])
         quote = quote_yuanta_ledger(_ledger(), trades, today=CAL_DAY)
         gross = (45027 - 46733) * 1 * 10
         tax = 45027 * 10 * 0.00002
@@ -166,14 +181,14 @@ class TradeLogTests(unittest.TestCase):
         self.assertAlmostEqual(quote.balance, 137094 + gross - 15 - tax, places=4)
 
     def test_missing_appended_columns_still_calculate(self):
-        trades = pd.DataFrame([_notion_trade()])
+        trades = pd.DataFrame([_trade_log_row()])
         self.assertNotIn("已實現損益", trades.columns)
         quote = quote_yuanta_ledger(_ledger(), trades, today=CAL_DAY)
         gross = (45027 - 46733) * 10
         self.assertAlmostEqual(quote.realized, gross, places=4)
 
     def test_column_q_overrides_the_formula_and_skips_default_fees(self):
-        trades = pd.DataFrame([_notion_trade(已實現損益=-16000, 類型="", 長短線="", 停損價="", 交易後帳戶槓桿="")])
+        trades = pd.DataFrame([_trade_log_row(已實現損益=-16000, 類型="", 長短線="", 停損價="", 交易後帳戶槓桿="")])
         quote = quote_yuanta_ledger(_ledger(), trades, today=CAL_DAY)
         self.assertAlmostEqual(quote.realized, -16000, places=4)
         self.assertEqual(quote.fees, 0)
@@ -182,16 +197,16 @@ class TradeLogTests(unittest.TestCase):
 
     def test_sheets_serial_trade_date_and_ignores_same_day_as_calibration(self):
         serial_next = (date(2026, 11, 4) - date(1899, 12, 30)).days
-        later = quote_yuanta_ledger(_ledger(), pd.DataFrame([_notion_trade(成交時間=serial_next, 已實現損益=-100)]), today=CAL_DAY)
-        same_day = quote_yuanta_ledger(_ledger(), pd.DataFrame([_notion_trade(成交時間=46329, 已實現損益=-100)]), today=CAL_DAY)
+        later = quote_yuanta_ledger(_ledger(), pd.DataFrame([_trade_log_row(成交時間=serial_next, 已實現損益=-100)]), today=CAL_DAY)
+        same_day = quote_yuanta_ledger(_ledger(), pd.DataFrame([_trade_log_row(成交時間=46329, 已實現損益=-100)]), today=CAL_DAY)
         self.assertAlmostEqual(later.realized, -100, places=4)
         self.assertEqual(same_day.realized, 0)
 
     def test_stock_rows_and_other_brokers_do_not_change_yuanta_cash(self):
         trades = pd.DataFrame(
             [
-                _notion_trade(帳戶="嘉信理財", 標的="SOXL", 商品種類="美股", 動作="賣出", 已實現損益=-999),
-                _notion_trade(成交時間="2026-10-30 11:36:00", 已實現損益=-999),
+                _trade_log_row(帳戶="嘉信理財", 標的="SOXL", 商品種類="美股", 動作="賣出", 已實現損益=-999),
+                _trade_log_row(成交時間="2026-10-30 11:36:00", 已實現損益=-999),
             ]
         )
         quote = quote_yuanta_ledger(_ledger(), trades, today=CAL_DAY)
@@ -202,8 +217,8 @@ class TradeLogTests(unittest.TestCase):
         self.assertEqual(contract_multiplier("2330"), 2000)
         trades = pd.DataFrame(
             [
-                _notion_trade(標的="2330", 名稱="個股期", 動作="買進", 數量=1, 成交價=100, 合約乘數=100, 成交時間="2026-11-04"),
-                _notion_trade(標的="2330", 名稱="個股期", 動作="賣出", 數量=1, 成交價=110, 合約乘數=100, 成交時間="2026-11-05", 手續費=0, 稅=0),
+                _trade_log_row(標的="2330", 名稱="個股期", 動作="買進", 數量=1, 成交價=100, 合約乘數=100, 成交時間="2026-11-04"),
+                _trade_log_row(標的="2330", 名稱="個股期", 動作="賣出", 數量=1, 成交價=110, 合約乘數=100, 成交時間="2026-11-05", 手續費=0, 稅=0),
             ]
         )
         quote = quote_yuanta_ledger(_ledger(), trades, today=CAL_DAY)
@@ -213,7 +228,7 @@ class TradeLogTests(unittest.TestCase):
         kept = apply_yuanta_ledger(_accounts(168308), None, None, today=CAL_DAY)
         self.assertEqual(float(kept.iloc[0]["現金餘額"]), 168308)
         self.assertEqual(kept.iloc[0]["_yuanta_source"], "b7")
-        adjusted = apply_yuanta_ledger(_accounts(168308), _ledger(), pd.DataFrame([_notion_trade(已實現損益=-500)]), today=CAL_DAY)
+        adjusted = apply_yuanta_ledger(_accounts(168308), _ledger(), pd.DataFrame([_trade_log_row(已實現損益=-500)]), today=CAL_DAY)
         _valued, accounts_out, metrics = finalize_valuation(pd.DataFrame(), adjusted, 32)
         self.assertAlmostEqual(metrics["futures_cash_ledger"], 137094 - 500, places=4)
         self.assertAlmostEqual(accounts_out.iloc[0]["現金餘額"], 137094 - 500, places=4)
@@ -338,7 +353,7 @@ class FetchSheetsTests(unittest.TestCase):
             "Daily_NAV": [{"日期": 46328, "總淨值": 500000}],
             "持倉統計": [],
             "Futures_Ledger": _ledger().to_dict(orient="records"),
-            "Trade_Log": [_notion_trade(已實現損益=-250)],
+            "Trade_Log": [_trade_log_row(已實現損益=-250)],
         }
 
         class Worksheet:
