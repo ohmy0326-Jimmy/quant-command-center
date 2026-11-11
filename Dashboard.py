@@ -763,10 +763,7 @@ elif page == "第三頁：重大行事曆與會展":
             cached_fmp_raw.clear()
             st.rerun()
     st.markdown("---")
-    watchlist = st.text_input(
-        "觀察清單（選填，逗號分隔。只留在這次工作階段，不寫入試算表）",
-        key="calendar_watchlist",
-    )
+    watchlist = st.text_input("觀察清單（選填）", key="calendar_watchlist", placeholder="2330, AAPL")
     try:
         calendar_model = load_calendar_model(watchlist)
     except Exception as exc:
