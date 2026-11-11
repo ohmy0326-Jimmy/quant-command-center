@@ -14,7 +14,7 @@ import pandas as pd
 
 from cb_holdings import product_kind
 
-SCHEMA_VERSION = "1.6.0"
+SCHEMA_VERSION = "1.7.0"
 TAIPEI = ZoneInfo("Asia/Taipei")
 
 
@@ -178,6 +178,7 @@ def portfolio_payload(
     as_of: datetime,
     usdtwd_source: str = "live",
     warnings: list[str] | None = None,
+    regime: str | None = None,
 ) -> dict:
     total_beta = float(metrics.get("total_beta", metrics.get("beta", 0.0)))
     complete = bool(metrics.get("exposure_complete", True))
@@ -214,9 +215,38 @@ def portfolio_payload(
         "tw_exposure": float(metrics.get("tw_exposure", 0.0)),
         "us_exposure": float(metrics.get("us_exposure", 0.0)),
         "beta_leverage": beta_leverage_block(metrics),
+        "greeks": greeks_block(positions, metrics),
+        "beta_targets": beta_target_block(metrics, regime),
         "positions": position_records(positions),
         "yuanta_futures": yuanta_from_metrics(metrics),
     }
+
+
+def greeks_block(positions: pd.DataFrame, metrics: dict) -> dict:
+    from portfolio_greeks import aggregate_greeks
+
+    stored = metrics.get("portfolio_greeks")
+    if isinstance(stored, dict) and "tw" in stored and "us" in stored:
+        from portfolio_greeks import apply_indexes
+
+        return apply_indexes(stored, metrics.get("tw_index"), metrics.get("us_index"))
+    return aggregate_greeks(positions, metrics.get("tw_index"), metrics.get("us_index"))
+
+
+def beta_target_block(metrics: dict, regime: str | None) -> dict:
+    from portfolio_greeks import beta_targets
+
+    return beta_targets(
+        regime,
+        metrics.get("tw_beta"),
+        metrics.get("us_beta"),
+        metrics.get("tw_nav"),
+        metrics.get("us_nav"),
+        tw_index=metrics.get("tw_index"),
+        us_index=metrics.get("us_index"),
+        usdtwd=metrics.get("usdtwd"),
+        beta_complete=bool(metrics.get("exposure_complete", True)),
+    )
 
 
 def load_live_book(as_of: datetime | None = None) -> LiveBook:
@@ -240,11 +270,27 @@ def load_live_book(as_of: datetime | None = None) -> LiveBook:
     usdtwd = fx.rate
     warnings = [fx.warning()] if fx.is_fallback else []
     positions = normalize_positions(quant_data)
+    tw_index = None
     if not positions.empty:
         extras = {}
-        prices, betas, sectors = populate_market_fields_parallel(positions, market_beta_and_sector, fetch_twii(), extras=extras)
+        tw_index = fetch_twii()
+        prices, betas, sectors = populate_market_fields_parallel(positions, market_beta_and_sector, tw_index, extras=extras)
         positions = attach_quotes(positions, prices, betas, sectors, extras=extras)
     valued, _accounts, metrics = finalize_valuation(positions, accounts, usdtwd)
+    if tw_index is not None:
+        metrics["tw_index"] = tw_index
+    metrics["usdtwd"] = usdtwd
+    from portfolio_greeks import trusted_regime
+    from macro_cycle_live import macro_view_for_orders
+
     moment = as_of or taipei_now()
-    payload = portfolio_payload(valued, metrics, usdtwd=usdtwd, as_of=moment, usdtwd_source=fx.source, warnings=warnings)
+    payload = portfolio_payload(
+        valued,
+        metrics,
+        usdtwd=usdtwd,
+        as_of=moment,
+        usdtwd_source=fx.source,
+        warnings=warnings,
+        regime=trusted_regime(macro_view_for_orders()),
+    )
     return LiveBook(payload, valued, metrics)

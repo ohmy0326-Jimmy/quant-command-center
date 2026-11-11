@@ -26,7 +26,7 @@ curl -fsS -X POST "${SERVICE_URL}/v1/nav-snapshot" \
 
 ```json
 {
-  "schema_version": "1.6.0",
+  "schema_version": "1.7.0",
   "as_of": "2026-11-04T14:30:05+08:00",
   "status": "written",
   "date": "2026-11-04",

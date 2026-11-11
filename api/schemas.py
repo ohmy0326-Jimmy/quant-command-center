@@ -108,6 +108,8 @@ class PortfolioResponse(BaseModel):
     beta_leverage: BetaLeverageResponse = Field(description="1.3.0 新增。台股／美股／合計的槓桿、部位平均 Beta、帳戶 Beta。")
     positions: list[PositionResponse]
     yuanta_futures: YuantaFuturesResponse
+    greeks: dict = Field(default_factory=dict, description="1.7.0 新增。台股與美股分開的 Delta／Theta。缺值是 null，合計不完整時 delta_complete 或 theta_complete 為 false，缺的部位沒有當成 0。兩市場不加總。")
+    beta_targets: dict = Field(default_factory=dict, description="1.7.0 新增。依第五頁多空狀態的目標 Beta 區間。區間是程式預設。狀態未知時 tw 與 us 是 null。避險只建議同市場工具。")
 
 
 class AdviceResponse(BaseModel):

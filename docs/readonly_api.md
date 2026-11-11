@@ -40,7 +40,7 @@ X-API-Key: <READONLY_API_KEY>
 
 每個 JSON 都有：
 
-- `schema_version`：目前 `1.6.0`（1.6.0 新增 `exposure_complete`、`exposure_scope`、`unknown_delta_symbols`，部位新增 `exposure_known`、`delta_status`。缺 Delta 時該筆 `notional_exposure` 是 null，合計數字只含已知部位。1.5.0 的可轉債欄位與更早的欄位都保留）
+- `schema_version`：目前 `1.7.0`。1.7.0 新增 `greeks` 與 `beta_targets`。台股與美股的 Delta／Theta 分開，缺值是 null，不加成 0。目標 Beta 區間是程式預設；第五頁狀態不是試算表來的時候，`beta_targets.tw` 與 `us` 是 null。1.6.0 的缺 Delta 規則仍在：`exposure_complete` 為 false 時合計只含已知部位。
 - `as_of`：`Asia/Taipei` 的 ISO 8601，例如 `2026-10-29T22:00:00+08:00`
 
 機器可讀的 JSON Schema 在 [`readonly_api.schema.json`](readonly_api.schema.json)，由 `api/schemas.py` 的 Pydantic 模型產生。
@@ -51,7 +51,7 @@ X-API-Key: <READONLY_API_KEY>
 
 ```json
 {
-  "schema_version": "1.6.0",
+  "schema_version": "1.7.0",
   "as_of": "2026-10-29T22:00:00+08:00",
   "status": "ok"
 }
@@ -95,6 +95,8 @@ X-API-Key: <READONLY_API_KEY>
 
 1.6.0：選擇權、可轉債、CBAS 沒有 Delta 時，`delta_status` 是 `missing`，`exposure_known` 是 false，`notional_exposure` 與 `beta_exposure` 是 null。Delta 剛好是 0 時 `delta_status` 是 `known`，名目曝險是 0。現股、ETF、期貨的 `delta_status` 是 `not_applicable`。`exposure`、`leverage`、`beta`、`beta_leverage` 只加總已知部位。`exposure_complete` 為 false、`exposure_scope` 為 `partial` 時，這些合計不完整，`warnings` 會寫明，不能把缺的部位當成沒有曝險。舊客戶仍讀得到同一個數字欄位。
 
+1.7.0：`greeks.tw` 與 `greeks.us` 分開。`delta_notional` 是原生貨幣的有號名目（台股 TWD、美股 USD）。`delta_points` 是這份名目 ÷ 該市場指數價；沒有指數價就是 null。`theta_per_day` 是每日時間價值；選擇權沒有 Theta 時整側是 null。`beta_targets` 的區間寫在 `portfolio_greeks.DEFAULT_BETA_BANDS`，是程式預設。狀態未知時不給目標，也不估算避險口數。台股口數只用台指期或小台，美股只用 SPX、XSP 或 SPY 的名目。
+
 `price` 是原幣報價（臺指期是指數點，美股是美元）。`market_value` 與 `pnl` 是台幣：分別對應第四頁的「即時市值(台幣)」與「淨未實現損益(原幣) × 換算匯率」。股票損益已含 0.3% 證交稅估算，不會再從淨值扣一次。1.3.0 起期貨 `market_value` 是名目市值（報價 × 乘數 × 口數），舊的「保證金加未實現損益」改放 `equity_value`。
 
 `yuanta_futures.equity` 是元大期貨權益數＝本日餘額（`cash_ledger`）＋期貨未實現損益（期交所即時／夜盤價）。本日餘額與第四頁同一條：有 `Futures_Ledger` 校正點就自動推算（校正餘額＋校正日之後的 `Trade_Log` 已實現損益−手續費−期交稅±出入金）；分頁或校正點缺少時退回 Active_Positions 元大期貨現金欄（目前是 B7）；現金欄也無效才用備援 168308。欄位格式見 [`futures_ledger.md`](futures_ledger.md)。
@@ -103,7 +105,7 @@ X-API-Key: <READONLY_API_KEY>
 
 ```json
 {
-  "schema_version": "1.6.0",
+  "schema_version": "1.7.0",
   "as_of": "2026-10-29T22:00:00+08:00",
   "currency": "TWD",
   "usdtwd": 30.0,
