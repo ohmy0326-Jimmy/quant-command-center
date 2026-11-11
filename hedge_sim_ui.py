@@ -216,7 +216,7 @@ def txo_expiry(tenor_days: int, today_iso: str) -> tuple[str | None, str | None]
         return None, None
 
 
-def render_hedge_strategy_sim(snapshot, macro_view: dict | None = None) -> None:
+def render_hedge_strategy_sim(snapshot, macro_view: dict | None = None, actual_beta: float | None = None) -> None:
     """在第六頁「選擇權避險」分頁渲染「避險策略模擬」面板。"""
     st.warning("歷史回測示意，非預測。這裡只給避險建議，不會下單。")
     with st.expander("模擬假設與限制", expanded=False):
@@ -339,7 +339,13 @@ def render_hedge_strategy_sim(snapshot, macro_view: dict | None = None) -> None:
             )
             tp_mult = st.number_input("獲利幾倍平半", value=3.0, step=0.5, key="hss_tp_mult")
         with c_adv3:
-            sim_beta = st.number_input("回測 β", value=2.0, step=0.1, key="hss_beta")
+            if "hss_beta" not in st.session_state:
+                st.session_state["hss_beta"] = float(actual_beta) if actual_beta is not None else 2.0
+            sim_beta = st.number_input("回測 β", step=0.1, key="hss_beta")
+            if actual_beta is None:
+                st.caption("實際 Beta 不完整。這格是假設值，不當成 0。")
+            else:
+                st.caption(f"預設用實際台股 Beta {float(actual_beta):.2f}。")
             sim_lev = st.number_input("回測槓桿", value=1.5, step=0.1, key="hss_leverage")
             nav0 = st.number_input("起始淨值 NT$", value=3450000.0, step=50000.0, key="hss_nav0")
 

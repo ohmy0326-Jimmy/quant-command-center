@@ -404,8 +404,9 @@ def test_simulator_is_on_page6_and_not_on_page4():
     assert "策略模擬" not in page4
     with open(os.path.join(ROOT, "order_assistant_ui.py"), encoding="utf-8") as handle:
         ui = handle.read()
-    assert "render_nav_scenario_simulator" in ui
-    assert ui.count("render_nav_scenario_simulator") >= 2
+    assert "render_combined_sim_panel" in ui
+    panel = open(os.path.join(ROOT, "sim_panel_ui.py"), encoding="utf-8").read()
+    assert panel.count("render_nav_scenario_simulator") >= 2
 
 
 def test_simulator_brake_defaults_match_page4_lights():
