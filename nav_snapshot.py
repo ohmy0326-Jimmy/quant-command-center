@@ -202,17 +202,21 @@ def _live_market(positions: pd.DataFrame):
 
 
 def macro_candidate_from_sheet(spreadsheet, today: str) -> dict:
-    """只採用試算表裡齊全的九項分數。缺任何一項就留空，不用倉庫示例補。"""
+    """試算表九項都在才寫總分。缺項留空，不用倉庫示例，也不把缺項當 0。覆蓋率仍寫下來。"""
     from macro_cycle import CANONICAL_IDS, regime_for_score
     from macro_cycle_live import read_macro_tabs
     from macro_cycle_sheet import parse_score_rows
+    from macro_proxies import coverage_from_ids, weighted_total
 
     tabs = read_macro_tabs(spreadsheet)
     parsed, _warnings = parse_score_rows(tabs.get("scores") or [])
+    present = [item_id for item_id in CANONICAL_IDS if item_id in parsed]
+    coverage = coverage_from_ids(present)
     if set(parsed) != set(CANONICAL_IDS):
-        return {"week": today, "total": None, "regime": None}
-    total = sum(int(parsed[item_id]["score"]) for item_id in CANONICAL_IDS)
-    return {"week": today, "total": total, "regime": regime_for_score(total)}
+        return {"week": today, "total": None, "regime": None, "coverage": coverage}
+    scores = {item_id: int(parsed[item_id]["score"]) for item_id in CANONICAL_IDS}
+    total = weighted_total(scores)
+    return {"week": today, "total": total, "regime": regime_for_score(total), "coverage": coverage}
 
 
 def _history_rows(spreadsheet) -> list[dict]:
@@ -250,12 +254,17 @@ def record_macro_history(spreadsheet, today: str, candidate: dict | None = None)
         "date": plan.get("week") or today,
         "total": plan.get("total"),
         "regime": plan.get("regime"),
+        "coverage": chosen.get("coverage"),
         "detail": plan["reason"],
     }
     if plan["action"] not in {"insert", "update"}:
         return summary
-    worksheet, _created, _migrated = _ensure_worksheet(spreadsheet, HISTORY_TAB, list(HISTORY_HEADERS))
-    values = [_cell(plan.get("week")), _cell(plan.get("total")), _cell(plan.get("regime"))]
+    from macro_cycle_sheet import HISTORY_WRITE_HEADERS
+
+    worksheet, _created, _migrated = _ensure_worksheet(
+        spreadsheet, HISTORY_TAB, list(HISTORY_WRITE_HEADERS), legacy=list(HISTORY_HEADERS)
+    )
+    values = [_cell(plan.get("week")), _cell(plan.get("total")), _cell(plan.get("regime")), _cell(chosen.get("coverage"))]
     existing = worksheet.col_values(1)
     target = None
     for index, raw in enumerate(existing[1:], start=2):
@@ -264,7 +273,7 @@ def record_macro_history(spreadsheet, today: str, candidate: dict | None = None)
             break
     if target is None:
         target = max(len(existing), 1) + 1
-    worksheet.update(range_name=f"A{target}:C{target}", values=[values], value_input_option="USER_ENTERED")
+    worksheet.update(range_name=f"A{target}:D{target}", values=[values], value_input_option="USER_ENTERED")
     summary["sheet_created"] = _created
     return summary
 

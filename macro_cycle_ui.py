@@ -12,7 +12,6 @@ import streamlit as st
 from macro_cycle import (
     industry_quadrant_points,
     load_macro_cycle,
-    manual_indicator_schedule,
     quadrant_change_text,
     regime_rows,
     regime_scale_text,
@@ -97,7 +96,7 @@ def _page5_view() -> dict:
             st.session_state["macro_sheet_cache"] = {"t": now, "v": sheet}
         if auto_job is not None:
             try:
-                auto = auto_job.result(timeout=12)
+                auto = auto_job.result(timeout=22)
             except Exception:
                 auto = {}
             st.session_state["macro_auto_cache"] = {"t": now, "v": auto}
@@ -144,13 +143,20 @@ def _cached_book(load_book):
 
 def _render_summary(view: dict, book: dict):
     regime = view["regime"]
-    total = int(view["total"])
+    total = view.get("total")
     risk = view["risk"]
     change = view.get("week_change")
     change_text = "尚無上週" if change is None else f"{change:+d}"
+    total_text = "—" if total is None else f"{int(total):+d}"
     st.header(regime)
+    coverage = view.get("coverage")
+    status = view.get("coverage_status") or ""
+    if coverage is not None:
+        st.caption(f"覆蓋率 {coverage:.0%}，{status}。缺的指標不當 0，也不用倉庫示例補。")
+    if view.get("coverage_note"):
+        st.warning(view["coverage_note"])
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("總分", f"{total:+d}", change_text)
+    c1.metric("總分", total_text, change_text)
     c2.metric("槓桿上限", f"{risk['target_leverage']:.1f}x")
     c3.metric("現金下限", f"{risk['min_cash_pct']:.0f}%")
     if book.get("ok"):
@@ -180,23 +186,32 @@ def _render_indicators(indicators: list[dict]):
             {
                 "指標": item["name"],
                 "讀數": item.get("value") or "—",
-                "分數": int(item["score"]),
+                "分數": _score_text(item),
+                "權重": item.get("weight") if item.get("weight") is not None else "",
+                "層": item.get("layer") or "—",
+                "資料日": item.get("data_date") or "—",
+                "下次公布": item.get("next_release") or "未知",
                 "趨勢": item.get("trend") or "—",
-                "來源": item.get("source_label") or ("自動" if item.get("source") == "auto" else "手動"),
-                "更新": item.get("updated_at") or "",
             }
             for item in indicators
         ]
     )
     st.dataframe(frame, width="stretch", hide_index=True)
-    schedule = manual_indicator_schedule(indicators)
-    if schedule:
-        st.caption("手動指標的最近更新與下次公布。下次公布依固定時程推算，不含假日；沒有固定時程寫「未知」。")
-        st.dataframe(pd.DataFrame(schedule), width="stretch", hide_index=True)
+    st.caption("層是這一列實際採用的來源：手動是 45 日內的試算表覆寫，代理是自動推估，未知不計分。下次公布不含假日。")
+
+
+def _score_text(item: dict) -> str:
+    if not item.get("scored") or item.get("score") is None:
+        return "示例" if item.get("layer") == "示例" else "—"
+    return f"{int(item['score']):+d}"
 
 
 def _render_industries(industries: list[dict], book: dict):
     st.subheader("二十個產業")
+    if any(item.get("cycle_layer") == "價格推估" for item in industries):
+        st.caption("價格推估，非基本面。3 個月與 6 個月相對強弱來自產業 ETF，台股對加權指數、其餘對 SPY。")
+    elif any(item.get("cycle_layer") == "示例" for item in industries):
+        st.caption("沒有價格推估或 45 日內的手動覆寫時，產業位置是倉庫示例，不是基本面。")
     positions = book.get("positions") or [] if book.get("ok") else []
     exposure, _grand = exposure_by_industry(positions, industries)
     choice = st.radio("立場", ["全部", "加碼", "中性", "減碼"], horizontal=True, key="macro_stance_filter")
@@ -211,7 +226,8 @@ def _render_industries(industries: list[dict], book: dict):
                 "上期": item.get("prev_cycle") or "—",
                 "本期": item.get("cycle") or "—",
                 "換象限": quadrant_change_text(item),
-                "方向": item["direction"],
+                "依據": item.get("cycle_note") or item.get("cycle_layer") or "—",
+                "方向": item.get("direction") or "—",
                 "立場": item["stance"],
                 "一句話": item.get("rationale") or "—",
                 "你的持股": held.get("mv", 0.0),

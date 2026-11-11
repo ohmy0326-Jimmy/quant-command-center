@@ -212,12 +212,19 @@ def _rules_from_state() -> Rules:
     )
 
 
+def _macro_total_text(view: dict) -> str:
+    total = view.get("total")
+    if total is None:
+        return "—"
+    return f"{int(total):+d}"
+
+
 def _render_rule_editor(view: dict):
     risk = view["risk"]
     with st.expander("風控規則設定（存在這次工作階段，重新整理仍會留著）", expanded=False):
         if view.get("ok"):
             st.caption(
-                f"多空狀態是{view['regime']}（分數 {view['total']:+d}，分數更新 {view['score_updated_at']}，產業圖 {view['industry_updated_at']}）。"
+                f"多空狀態是{view['regime']}（分數 {_macro_total_text(view)}，分數更新 {view['score_updated_at']}，產業圖 {view['industry_updated_at']}）。"
                 f"第一次進來會把目標槓桿上限設成 {risk['target_leverage']:.1f} 倍、最低現金水位設成 {risk['min_cash_pct']:.0f}%。"
                 "第二階段槓桿維持原來的設定。你之後改的數字會留在這次工作階段。"
             )
