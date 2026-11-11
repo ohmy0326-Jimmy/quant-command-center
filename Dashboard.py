@@ -497,9 +497,10 @@ with st.sidebar:
     if page == "第六頁：下單輔助系統":
         st.caption("風控規則在第六頁最上方，會留在這次工作階段。")
     st.markdown("---")
-    st.subheader("📝 後端資料庫 (Notion)")
-    st.markdown("[📊 Notion 交易與覆盤日誌](https://www.notion.so/)")
-    st.markdown("[🧪 Notion 策略實驗室](https://www.notion.so/)")
+    st.subheader("試算表")
+    st.markdown("[交易與覆盤（Trade_Log）](https://docs.google.com/spreadsheets/d/1nMpEaNcIqymaTHiqJDhMxm5gLzCWrlfk5wkpCMJMjGM)")
+    st.caption("成交時間在「時間」欄，覆盤在「覆盤筆記」。")
+    st.markdown("[Notion 策略實驗室](https://www.notion.so/)")
 
 # ==========================================
 # 第一頁：總經與風險鬧鐘
@@ -804,7 +805,7 @@ elif page == "第四頁：部位監控與量化風控":
             clear_market_caches()
             st.rerun()
             
-    st.write("數據來源：Notion 交易日誌 ➔ Make.com ➔ Google Sheets (基礎計價幣別：TWD 台幣)")
+    st.write("數據來源：Google 試算表 Quant_Database 的持倉與 Trade_Log（基礎計價幣別：TWD 台幣）")
     st.markdown("---")
 
     with st.spinner('📡 正在穿透雲端，即時連線抓取各個持股報價與計算動態風險...'):
