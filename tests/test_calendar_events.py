@@ -346,6 +346,83 @@ calendar_page.render_calendar(st, json.loads({payload!r}))
         self.assertNotIn("利空", blob)
 
 
+class CalendarViewTests(unittest.TestCase):
+    def test_table_is_compact_and_caveats_are_deduped(self):
+        import calendar_view
+
+        model = cal.build_calendar(
+            [_row(標的="2330", 名稱="台積電"), _row(種類="美股", 標的="AAPL", 名稱="蘋果")],
+            "",
+            {
+                "AAPL": {"Earnings Date": date(2026, 11, 12)},
+                "2330.TW": {"error": "來源失敗"},
+            },
+            [{
+                "event": "CPI",
+                "country": "US",
+                "date": "2026-11-20",
+                "estimate": 0.2,
+                "previous": None,
+                "actual": None,
+            }],
+            date(2026, 11, 7),
+            FETCHED,
+        )
+        model["notes"] = model["notes"] + [model["notes"][0]] if model["notes"] else ["重複說明"]
+        view = calendar_view.shape_calendar(model, date(2026, 11, 7), horizon_days=90)
+        titles = [row["事件"] for row in view["rows"]]
+        self.assertTrue(any("財報 AAPL" in title for title in titles))
+        earnings = next(row for row in view["rows"] if "AAPL" in row["事件"])
+        self.assertEqual(earnings["市場"], "美")
+        self.assertEqual(earnings["類型"], "財報")
+        self.assertEqual(earnings["確定度"], "推估")
+        self.assertIn("（四）", earnings["日期"])
+        self.assertEqual(earnings["相關持股"], "蘋果")
+        self.assertEqual(earnings["數字"], "")
+        self.assertNotIn("這不是漲跌預測", earnings["相關持股"])
+        settlement = next(row for row in view["rows"] if row["類型"] == "結算")
+        self.assertEqual(settlement["確定度"], "推估")
+        self.assertEqual(settlement["數字"], "")
+        self.assertNotIn("推論", settlement["相關持股"])
+        cpi = next(row for row in view["rows"] if row["事件"] == "CPI")
+        self.assertEqual(cpi["類型"], "總經")
+        self.assertEqual(cpi["市場"], "美")
+        self.assertEqual(cpi["數字"], "預估 0.2")
+        self.assertNotIn("前值", cpi["數字"])
+        soon = [row for row in view["rows"] if row["近7日"]]
+        self.assertTrue(any("AAPL" in row["事件"] for row in soon))
+        later = calendar_view.shape_calendar(model, date(2026, 11, 7), horizon_days=10)
+        self.assertFalse(any(row["事件"] == "CPI" for row in later["rows"]))
+        only_us = calendar_view.shape_calendar(model, date(2026, 11, 7), market="美")
+        self.assertTrue(all(row["市場"] == "美" for row in only_us["rows"]))
+        texts = [item for group in view["caveats"]["groups"] for item in group["items"]]
+        self.assertEqual(len(texts), len(set(texts)))
+        self.assertTrue(any("2330.TW" in item for item in texts))
+        self.assertEqual(view["caveats"]["count"], len(texts))
+        self.assertEqual(len(view["type_notes"]), 3)
+
+    def test_unknown_certainty_and_empty_holdings(self):
+        import calendar_view
+
+        event = {
+            "date": date(2026, 11, 18),
+            "title": "週選",
+            "kind": "weekly",
+            "market": "TW",
+            "certainty": "未知",
+            "impacts": ["沒有台股持倉。觀察清單與美股部位不併入台股制度事件。"],
+            "estimate": None,
+            "previous": None,
+            "actual": None,
+        }
+        view = calendar_view.shape_calendar({"events": [event], "notes": [], "gaps": [], "symbols": ["X"]}, date(2026, 11, 12))
+        row = view["rows"][0]
+        self.assertEqual(row["確定度"], "未知")
+        self.assertEqual(row["相關持股"], "—")
+        self.assertEqual(row["數字"], "")
+        self.assertTrue(row["近7日"])
+
+
 class DataFrameTests(unittest.TestCase):
     def test_nan_symbol_is_skipped(self):
         frame = pd.DataFrame([{"種類": "台股", "標的": float("nan"), "名稱": ""}])
@@ -505,7 +582,10 @@ calendar_page.render_calendar(
             self.assertNotIn("📤 推播此事件建議到 TG", labels)
             self.assertEqual(at.session_state["log"], [])
 
-            at = at.button(key=calendar_page.widget_key("ai", aapl["id"])).click().run()
+            self.assertEqual(labels.count("🧠 AI 解析"), 1)
+            self.assertEqual(labels.count("📲 推播TG"), 1)
+            at.selectbox(key="p3_event").set_value(aapl["id"])
+            at = at.button(key="p3_ai").click().run()
             self.assertFalse(at.exception)
             warnings = "\n".join(str(item.value) for item in at.warning)
             self.assertIn("沒有 GEMINI_API_KEY", warnings)
@@ -513,21 +593,24 @@ calendar_page.render_calendar(
 
             at.session_state["gkey"] = "fake-key"
             at.session_state["mode"] = "empty"
-            at = at.button(key=calendar_page.widget_key("ai", aapl["id"])).click().run()
+            at.selectbox(key="p3_event").set_value(aapl["id"])
+            at = at.button(key="p3_ai").click().run()
             self.assertFalse(at.exception)
             warnings = "\n".join(str(item.value) for item in at.warning)
             self.assertIn("解析未完成", warnings)
             self.assertNotIn(aapl["id"], at.session_state["memos"])
 
             at.session_state["mode"] = "fail"
-            at = at.button(key=calendar_page.widget_key("ai", aapl["id"])).click().run()
+            at.selectbox(key="p3_event").set_value(aapl["id"])
+            at = at.button(key="p3_ai").click().run()
             self.assertFalse(at.exception)
             errors = "\n".join(str(item.value) for item in at.error)
             self.assertIn("生成失敗", errors)
             self.assertNotIn(aapl["id"], at.session_state["memos"])
 
             at.session_state["mode"] = "ok"
-            at = at.button(key=calendar_page.widget_key("ai", aapl["id"])).click().run()
+            at.selectbox(key="p3_event").set_value(aapl["id"])
+            at = at.button(key="p3_ai").click().run()
             self.assertFalse(at.exception)
             self.assertEqual(at.session_state["memos"][aapl["id"]]["text"], "建議只談這一則")
             self.assertEqual(at.session_state["log"][-1][0], "ai")
@@ -535,7 +618,8 @@ calendar_page.render_calendar(
             self.assertNotIn("2330.TW", at.session_state["log"][-1][2])
             self.assertIn("📤 推播此事件建議到 TG", [button.label for button in at.button])
 
-            at = at.button(key=calendar_page.widget_key("tg", tw["id"])).click().run()
+            at.selectbox(key="p3_event").set_value(tw["id"])
+            at = at.button(key="p3_tg").click().run()
             self.assertFalse(at.exception)
             kind, title, body = at.session_state["log"][-1]
             self.assertEqual(kind, "tg")
@@ -545,14 +629,16 @@ calendar_page.render_calendar(
             self.assertNotIn("AAPL", title)
 
             at.session_state["memos"][aapl["id"]]["fingerprint"] = "別列舊解析"
+            at.selectbox(key="p3_event").set_value(aapl["id"])
             at = at.run()
             self.assertFalse(at.exception)
             warnings = "\n".join(str(item.value) for item in at.warning)
             self.assertIn("較早的事件內容", warnings)
-            self.assertNotIn(calendar_page.widget_key("advice", aapl["id"]), [button.key for button in at.button])
+            self.assertNotIn("p3_advice", [button.key for button in at.button])
 
-            at = at.button(key=calendar_page.widget_key("ai", aapl["id"])).click().run()
-            at = at.button(key=calendar_page.widget_key("advice", aapl["id"])).click().run()
+            at.selectbox(key="p3_event").set_value(aapl["id"])
+            at = at.button(key="p3_ai").click().run()
+            at = at.button(key="p3_advice").click().run()
             self.assertFalse(at.exception)
             kind, title, body = at.session_state["log"][-1]
             self.assertEqual(kind, "tg")
