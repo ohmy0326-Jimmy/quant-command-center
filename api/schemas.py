@@ -148,6 +148,7 @@ class NavSnapshotResponse(BaseModel):
     usdtwd: float
     usdtwd_source: Literal["live", "cached", "last_known", "fallback"] = Field(default="live", description="live＝即時；cached＝本程序最近一次成功值；last_known＝NAV_Snapshots 最後一筆即時匯率；fallback＝預設 32.5。非 live 時 warnings 會說明。")
     warnings: list[str]
+    macro_history: dict = Field(default_factory=dict, description="同一天寫入 Macro_Score_History 的結果。status 為 written、kept、skipped 或 failed。失敗不會讓淨值快照失敗。total 缺值是 null，不是 0。")
 
 
 def export_json_schema() -> dict:

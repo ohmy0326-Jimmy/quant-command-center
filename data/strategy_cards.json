@@ -102,7 +102,7 @@
       "status": "live",
       "trigger_rules": "TX/TSMC/0050_limit_down AND S4==open",
       "trigger_zh": "台指/台積/0050試搓或開盤跌停，且S4=會打開",
-      "actions": "優先小型台積期/小型0050期→0050期或現股→權證；掛跌停附近分批；先定出場",
+      "actions": "優先小型台積期/小型0050期→0050期或現股；掛跌停附近分批；先定出場",
       "max_loss_rule": "名目曝險計入總lev；單筆風險依帳戶1%規則",
       "data_sources": "期貨/現貨報價",
       "notes": "使用者主武器"

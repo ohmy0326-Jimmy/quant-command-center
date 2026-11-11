@@ -376,13 +376,20 @@ def _attach_history(view: dict, sheet: dict, json_view: dict) -> None:
         view["history_example"] = True
         view["history_note"] = "Macro_Score_History 讀不到，改用倉庫示例。頁面不會改寫這一頁。"
         return
-    rows, extra = parse_history_rows(sheet.get("history") or [])
+    raw_history = list(sheet.get("history") or [])
+    rows, extra = parse_history_rows(raw_history)
     warnings.extend(extra)
     if rows:
         view["history"] = rows
         view["history_origin"] = "sheet"
         view["history_example"] = False
-        view["history_note"] = "來源是試算表 Macro_Score_History。程式只讀，不會用今天重算的分數覆蓋舊週。"
+        view["history_note"] = "來源是試算表 Macro_Score_History。第五頁不寫入。每日淨值快照只會更新台北當天那一列。"
+        return
+    if raw_history:
+        view["history"] = []
+        view["history_origin"] = "sheet"
+        view["history_example"] = False
+        view["history_note"] = "Macro_Score_History 有列，但沒有可用總分。不改用倉庫示例，缺值也不當 0。"
         return
     view["history"] = list(json_view.get("history") or [])
     view["history_origin"] = "json"

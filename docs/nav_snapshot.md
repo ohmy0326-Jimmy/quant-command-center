@@ -57,6 +57,17 @@ curl -fsS -X POST "${SERVICE_URL}/v1/nav-snapshot" \
 
 `action` 是 `inserted`（新增）或 `updated`（同一天已有，覆蓋）。`warnings` 包含匯率不是即時值、表頭補欄、估價時被排除的壞列與 Cash_Flows 看不懂的列。
 
+`macro_history` 是同一天寫進 `Macro_Score_History` 的結果。淨值已經寫入之後才做；這一段失敗時快照仍回 200，`macro_history.status` 是 `failed`。
+
+| status | 意思 |
+| --- | --- |
+| `written` | 新增或更新台北當天那一列 |
+| `kept` | 當天已有相同總分，或這次沒有新分數所以保留原列 |
+| `skipped` | 日期或總分不合法，沒有寫 |
+| `failed` | 讀寫歷史時發生例外。細節在伺服器日誌，回應不帶例外原文 |
+
+總分只在試算表 `Macro_Score` 九項都有合法分數時才寫。缺項時 `total` 與 `regime` 是 null，儲存格留空，不當 0，也不用倉庫示例補。`regime` 由總分對應，不是產業四象限。同一天重跑只覆蓋當天那一列。分頁不存在時會建立並寫 `week`、`total`、`regime` 表頭。不新增排程，沿用既有的每日淨值呼叫。
+
 ### 匯率退回值
 
 匯率依序取 即時 → 本程序 3 天內最近成功值 → `NAV_Snapshots` 最後一筆即時匯率 → 預設 32.5（來源定義見 [readonly_api.md](readonly_api.md) 的「匯率來源（1.4.0）」）。不是即時值時**仍會寫入**，但：
