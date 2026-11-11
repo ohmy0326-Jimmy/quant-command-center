@@ -99,7 +99,9 @@ class TradeLogTests(unittest.TestCase):
         self.assertNotIn("Make.com", ledger)
         self.assertIn("Trade_Log", dashboard)
         self.assertIn("「時間」", ledger)
-        self.assertIn("Notion 策略實驗室", dashboard)
+        self.assertNotIn("https://www.notion.so/", dashboard)
+        self.assertIn("STRATEGY_LAB_URL", dashboard)
+        self.assertIn("交易策略實驗室", dashboard)
 
     def test_real_headers_count_micro_close_only_after_calibration(self):
         def row(**overrides):

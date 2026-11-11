@@ -15,6 +15,7 @@ from plotly.subplots import make_subplots
 from oauth2client.service_account import ServiceAccountCredentials
 from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
 from app_secrets import read_secret
+from strategy_lab import STRATEGY_LAB_URL
 from macro_cycle_ui import render_macro_cycle_page
 from order_assistant_ui import render_order_assistant
 from beta_rules import BETA_FALLBACK_STATE_KEY
@@ -500,7 +501,7 @@ with st.sidebar:
     st.subheader("試算表")
     st.markdown("[交易與覆盤（Trade_Log）](https://docs.google.com/spreadsheets/d/1nMpEaNcIqymaTHiqJDhMxm5gLzCWrlfk5wkpCMJMjGM)")
     st.caption("成交時間在「時間」欄，覆盤在「覆盤筆記」。")
-    st.markdown("[Notion 策略實驗室](https://www.notion.so/)")
+    st.markdown(f"[交易策略實驗室]({STRATEGY_LAB_URL})")
 
 # ==========================================
 # 第一頁：總經與風險鬧鐘
