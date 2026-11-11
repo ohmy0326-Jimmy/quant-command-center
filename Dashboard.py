@@ -994,7 +994,7 @@ elif page == "第四頁：部位監控與量化風控":
                 if metrics.get("beta_fallbacks_used"):
                     names = "、".join(f"{item.get('標的')}（{item.get('Beta來源')}）" for item in metrics["beta_fallbacks_used"])
                     st.warning(f"以下持倉抓不到標的即時一年 Beta，暫用預設值：{names}。預設值可在第六頁「下單輔助系統」→「新標的才需要改：Beta、槓桿、產業」修改。")
-                st.caption("Beta值＝這檔自己的一年 Beta；有效Beta＝套在市值上的 Beta（槓桿 ETF＝槓桿 × 標的一年 Beta，對 S&P 500 或加權指數）；曝險Beta＝套在名目曝險上的 Beta（槓桿 ETF＝標的一年 Beta）。Beta曝險＝名目曝險 × 曝險Beta＝市值 × 有效Beta，槓桿只乘一次。期貨的即時市值是名目市值（報價 × 乘數 × 口數），不是未實現損益。")
+                st.caption("Beta值是這檔自己的回歸，不先四捨五入；畫面才顯示兩位。有效Beta是契約倍數乘標的 Beta（反向為負），名目用倍數絕對值，所以槓桿只進一次。資料不足會寫未計入，不是 1。空單的淨值帶負號，名目仍是絕對值。期貨市值是報價乘乘數乘口數。")
                 if has_convertible:
                     st.caption("可轉債／CBAS：市值＝百元報價 × 面額／100 × 張數，計入淨值。名目曝險＝Delta × 轉換價值（不加標的槓桿）。轉換價值（百元）＝股價／轉換價格 × 100。不把 CB 與 CBAS 互抵，也不做跨市場對沖。")
 

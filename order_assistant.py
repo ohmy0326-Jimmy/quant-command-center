@@ -464,7 +464,10 @@ def taiex_dollar_delta(snapshot: Snapshot) -> float:
                 sens = eff
             else:
                 sens = effective_beta(pos["ticker"], pos["kind"], pos["lev"], pos["beta"])["sens"]
-            delta += pos["mv_twd"] * sens / twii
+            if sens is None or not math.isfinite(float(sens)):
+                continue
+            sign = 1.0 if pos["qty"] > 0 else (-1.0 if pos["qty"] < 0 else 0.0)
+            delta += abs(pos["mv_twd"]) * sens * sign / twii
     return delta
 
 
@@ -486,8 +489,13 @@ def split_betas(metrics: dict, tw_exposure_delta=0.0, us_exposure_delta=0.0, tw_
     us_nav = float(metrics.get("us_nav", 0.0)) + float(us_cash_delta)
     nav = float(metrics.get("nav", 0.0)) + float(tw_cash_delta) + float(us_cash_delta)
 
-    tw_beta = (tw_exp / tw_nav) if tw_nav > 0 else 0.0
-    us_beta = (us_exp / us_nav) if us_nav > 0 else 0.0
+    # 混合帳戶的現金拆不開時，與第四頁相同，台股／美股都除以總淨值。
+    if metrics.get("beta_basis") == "total_nav":
+        tw_beta = (tw_exp / nav) if nav > 0 else 0.0
+        us_beta = (us_exp / nav) if nav > 0 else 0.0
+    else:
+        tw_beta = (tw_exp / tw_nav) if tw_nav > 0 else 0.0
+        us_beta = (us_exp / us_nav) if us_nav > 0 else 0.0
     total_beta = ((tw_exp + us_exp) / nav) if nav > 0 else 0.0
 
     return {

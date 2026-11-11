@@ -640,7 +640,7 @@ def _render_order(snapshot, rules: Rules):
     lev_note = leveraged_beta_note(lev, beta)
     if lev_note:
         st.info(lev_note)
-    st.caption("槓桿 ETF 只用標的槓桿計一次（曝險 = 市值 × 槓桿），不再乘 Beta；曝險有正負號，空單／買賣權依 Delta 計。")
+    st.caption("已知槓桿或反向 ETF 用契約倍數乘標的 Beta 一次（反向為負）。名目用倍數絕對值。空單淨值帶負號。")
 
     rs_on = st.toggle("計算 RS Rating（抓 13 個月股價，約數秒）", value=True, key="oa_rs_on")
     rs_str = ""
@@ -995,7 +995,7 @@ def _render_hedge(snapshot, rules: Rules):
         plan_lines.append(text)
         st.write(text)
 
-    st.caption("TW Beta = TW 曝險 / TW 淨值 (TW 淨值 = 台股市值 + 元大期貨權益數 + 台股現金 − 融資/質押)、US Beta = US 曝險 / US 淨值、總 Beta = (TW 曝險 + US 曝險) / 總淨值；選擇權曝險 = Delta × 口數 × 乘數 × 指數；權利金從現金扣除。")
+    st.caption("台股敏感度對加權、美股敏感度對 S&P 500，合計不是單一指數。整戶都是同一市場時才各除以該戶淨值；混合帳戶的現金不拆，改除以總淨值。選擇權要用 Delta 與標的價，缺一就整筆不算。")
     return "\n".join(plan_lines)
 
 
@@ -1079,23 +1079,24 @@ def _render_us_hedge(snapshot, rules: Rules, beta_fn=None):
             "市值(NT$)": "NT$ {:,.0f}",
             "名目曝險(NT$)": "NT$ {:,.0f}",
             "S&P 曝險(NT$)": "NT$ {:,.0f}",
-        }),
+        }, na_rep="未計入"),
         width="stretch",
         hide_index=True,
     )
 
     if exp.get("fallback_rows"):
-        st.warning(f"{'、'.join(exp['fallback_rows'])} 抓不到標的即時一年 Beta，暫用預設值（可在上方「新標的才需要改」修改）。")
+        st.warning(f"{'、'.join(exp['fallback_rows'])} 抓不到標的即時一年 Beta，暫用已標示的預設值（可在上方修改）。")
+    if exp.get("incomplete_rows"):
+        st.warning(f"{'、'.join(exp['incomplete_rows'])} 缺少 Delta 或標的價格，沒有算進美股敏感度，也不是 0。")
 
     em1, em2, em3, em4 = st.columns(4)
     em1.metric("美股 S&P Beta 曝險", f"NT$ {exp['exposure_twd']:,.0f}", f"US$ {exp['exposure_usd']:,.0f}")
     em2.metric("美股槓桿（名目 ÷ 淨值）", f"{exp['us_leverage']:.2f}x", f"名目 NT$ {exp['notional_twd']:,.0f}", delta_color="off")
     em3.metric("美股部位平均 Beta", f"{exp['us_avg_beta']:.2f}")
-    em4.metric("美股帳戶 Beta（÷ 美股淨值）", f"{exp['us_beta_spx']:.2f}", f"第四頁 {snapshot.metrics.get('us_beta', 0.0):.2f}", delta_color="off")
+    em4.metric("美股對 S&P 500", f"{exp['us_beta_spx']:.2f}", f"第四頁 {snapshot.metrics.get('us_beta', 0.0):.2f}", delta_color="off")
     st.caption(
-        f"名目曝險＝市值 × 槓桿；Beta 曝險＝名目曝險 × 標的一年 Beta（對 S&P 500）＝市值 × 有效 Beta，槓桿只乘一次，與第四頁同一套算法。"
-        f"美股帳戶 Beta {exp['us_beta_spx']:.2f}＝槓桿 {exp['us_leverage']:.2f}x × 部位平均 Beta {exp['us_avg_beta']:.2f}"
-        f"（Beta 曝險 NT$ {exp['page4_us_exposure']:,.0f} ÷ 美股淨值 NT$ {exp['us_nav']:,.0f}）。"
+        f"名目用倍數絕對值，Beta 用契約倍數乘標的一年 Beta 一次，與第四頁同一套。"
+        f"美股對 S&P 500 為 {exp['us_beta_spx']:.2f}＝槓桿 {exp['us_leverage']:.2f}x × 部位平均 Beta {exp['us_avg_beta']:.2f}。"
     )
     render_beta_leverage_table(st, snapshot.metrics)
 
@@ -1299,7 +1300,7 @@ def _render_us_hedge(snapshot, rules: Rules, beta_fn=None):
         plan_lines.append(text)
         st.write(text)
 
-    st.caption("美股 Beta = 美股 S&P 曝險 ÷ 美股淨值；總 Beta = (台股曝險 + 美股 S&P 曝險) ÷ 總淨值；選擇權曝險 = Delta × 口數 × 100 × 價格 × 匯率；權利金從美股現金扣除。")
+    st.caption("美股敏感度對 S&P 500。合計把台股對加權的敏感度加進來，不是單一指數。選擇權缺 Delta 或標的價就整筆不算，不會用權利金代替標的價。")
 
     strat_summaries = []
     for s in summaries:

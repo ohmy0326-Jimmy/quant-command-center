@@ -19,7 +19,7 @@ import requests
 import yfinance as yf
 
 import taifex_quotes
-from beta_rules import beta_source_label, effective_beta, fetch_underlying_beta
+from beta_rules import beta_source_label, effective_beta, fetch_underlying_beta, occ_root
 from cb_holdings import (
     is_convertible_row,
     mark_convertible,
@@ -280,8 +280,69 @@ def fetch_twii(default: float = 23000.0) -> float:
         return float(default)
 
 
+# 全簿共用同一條基準的最近 N 個交易日。各檔只剔除自己對不齊的日期。
+# 少於 MIN 個重疊日報酬就不估，回傳空值，不當成 Beta＝1。
+BETA_LOOKBACK_SESSIONS = 252
+BETA_MIN_RETURNS = 60
+_BENCHMARK_CLOSES: dict[str, pd.Series] = {}
+
+
+def clear_beta_benchmark_cache() -> None:
+    """清掉這一輪下載的基準收盤。測試與手動重抓時用。"""
+    _BENCHMARK_CLOSES.clear()
+
+
+def estimate_beta_from_closes(asset_close, bench_close, lookback: int = BETA_LOOKBACK_SESSIONS, min_returns: int = BETA_MIN_RETURNS) -> dict:
+    """一條資產對一條已經決定好的基準。
+
+    基準取最後 ``lookback`` 個交易日，資產對齊這段日期。共變異與變異都用 ddof=1，
+    等於有截距的 OLS 斜率。這裡不四捨五入。重疊報酬不足、或基準沒有波動時，
+    beta 是 None、status 是 insufficient。缺日會使下一筆報酬跨過那個缺口，
+    所以用筆數門檻，不用「看起來像一年」的價格根數。
+    """
+    bench = pd.Series(bench_close).dropna().sort_index()
+    asset = pd.Series(asset_close).dropna().sort_index()
+    if bench.empty or asset.empty:
+        return {"beta": None, "n": 0, "status": "insufficient"}
+    window = bench.iloc[-int(lookback):]
+    joined = pd.concat([asset.rename("asset"), window.rename("bench")], axis=1, sort=True).dropna()
+    returns = joined.pct_change().dropna()
+    n = int(len(returns))
+    if n < int(min_returns):
+        return {"beta": None, "n": n, "status": "insufficient"}
+    bench_ret = returns["bench"].to_numpy(dtype=float)
+    asset_ret = returns["asset"].to_numpy(dtype=float)
+    variance = float(np.var(bench_ret, ddof=1))
+    if not math.isfinite(variance) or variance == 0.0:
+        return {"beta": None, "n": n, "status": "insufficient"}
+    covariance = float(np.cov(asset_ret, bench_ret, ddof=1)[0, 1])
+    beta = covariance / variance
+    if not math.isfinite(beta):
+        return {"beta": None, "n": n, "status": "insufficient"}
+    return {"beta": float(beta), "n": n, "status": "estimated"}
+
+
+def _download_close(symbol: str) -> pd.Series:
+    """日線調整收盤。^GSPC 與 ^TWII 是價格指數，不含股利，所以這不是完整的總報酬 Beta。"""
+    frame = yf.Ticker(symbol).history(period="2y", interval="1d", auto_adjust=True, actions=False)
+    if frame is None or frame.empty or "Close" not in frame.columns:
+        return pd.Series(dtype=float)
+    return pd.to_numeric(frame["Close"], errors="coerce").dropna()
+
+
+def benchmark_close(symbol: str) -> pd.Series:
+    """同一程序裡 ^GSPC／^TWII 只抓一次，避免每檔各抓一段不一樣的一年。"""
+    key = str(symbol)
+    if key not in _BENCHMARK_CLOSES:
+        _BENCHMARK_CLOSES[key] = _download_close(key)
+    return _BENCHMARK_CLOSES[key]
+
+
 def market_beta_info(ticker, is_tw: bool) -> tuple[float, str, bool]:
-    """一年期回歸 Beta。共變異數與變異數的 ddof 與第四頁相同，不另做修正。"""
+    """對加權或 S&P 500 的 Beta。估得出回傳 (beta, 產業, True)，否則 (nan, 產業, False)。
+
+    臺指期是定義 1，不是回歸。數字不在這裡四捨五入。
+    """
     t_upper = str(ticker).upper()
     mapped_sector = sector_for_ticker(ticker)
     if mapped_sector is not None:
@@ -298,19 +359,14 @@ def market_beta_info(ticker, is_tw: bool) -> tuple[float, str, bool]:
 
     try:
         benchmark = "^TWII" if is_tw else "^GSPC"
-        df_asset = yf.Ticker(ticker).history(period="1y")["Close"]
-        df_bench = yf.Ticker(benchmark).history(period="1y")["Close"]
-        combined = pd.concat([df_asset, df_bench], axis=1).dropna()
-        if len(combined) > 30:
-            returns = combined.pct_change().dropna()
-            cov = np.cov(returns.iloc[:, 0], returns.iloc[:, 1])[0][1]
-            var_bench = np.var(returns.iloc[:, 1])
-            beta = cov / var_bench if var_bench != 0 else 1.0
-            return float(round(beta, 2)), str(refined_sector), True
-        else:
-            return 1.0, str(refined_sector), False
+        asset = _download_close(ticker)
+        bench = benchmark_close(benchmark)
+        estimated = estimate_beta_from_closes(asset, bench)
+        if estimated["status"] != "estimated":
+            return float("nan"), str(refined_sector), False
+        return float(estimated["beta"]), str(refined_sector), True
     except Exception:
-        return 1.0, str(refined_sector), False
+        return float("nan"), str(refined_sector), False
 
 def market_beta_and_sector(ticker, is_tw: bool) -> tuple[float, str]:
     return market_beta_info(ticker, is_tw)[:2]
@@ -439,10 +495,26 @@ def normalize_positions(quant_data: pd.DataFrame, today: date | None = None) -> 
     return df
 
 
-def _page4_is_tw_market(ticker: str) -> bool:
-    """第四頁決定報價來源的條件，原樣保留。"""
-    t_upper = str(ticker).upper()
-    return (t_upper in ["TE", "TF"]) or (".TW" in t_upper) or (".TWO" in t_upper) or (len(t_upper) == 3 and t_upper.isalpha())
+def market_is_tw(kind: str, ticker: str) -> bool | None:
+    """這檔是不是台股。只看種類、後綴、數字代號與已知期貨，不用「三個英文字母」猜測。
+
+    種類寫美股就一定是美股，即使代號剛好三碼（SPY、TSM、AMD）。
+    沒有這些依據時回 None，呼叫端不得假設它對加權指數。
+    """
+    text = str(kind or "")
+    symbol = str(ticker or "").strip().upper()
+    if "美" in text:
+        return False
+    if "台" in text or "臺" in text:
+        return True
+    if symbol.endswith(".TW") or symbol.endswith(".TWO"):
+        return True
+    if symbol in TAIEX_FUTURES or symbol in {"TE", "TF"}:
+        return True
+    base = symbol.split(".")[0]
+    if base.isdigit() and len(base) in {4, 5, 6}:
+        return True
+    return None
 
 
 def _fetch_yahoo_price(ticker: str, is_tw_market: bool) -> float:
@@ -473,7 +545,7 @@ def _quote_convertible(ticker: str, beta_fn, underlying: str, extras: dict):
     extras["報價來源"] = "持倉統計報價"
     if not und:
         return ticker, np.nan, np.nan, "其他", extras
-    is_tw = _page4_is_tw_market(und) or und.endswith(".TW") or und.endswith(".TWO")
+    is_tw = market_is_tw("", und) is True
     try:
         px = _fetch_yahoo_price(und, is_tw)
     except Exception:
@@ -494,6 +566,80 @@ def _quote_convertible(ticker: str, beta_fn, underlying: str, extras: dict):
         extras["標的Beta"] = b_val
         extras["標的Beta來源"] = extras["Beta來源"]
     return ticker, np.nan, b_val, sector, extras
+
+
+def _call_beta(beta_fn, ticker: str, is_tw: bool):
+    """beta_fn 回 (beta, 產業) 或 info 回 (beta, 產業, 是否估成)。不是有限數字就當沒估到。"""
+    try:
+        if getattr(beta_fn, "info", None):
+            b_val, s_val, ok = beta_fn.info(ticker, is_tw)
+        else:
+            b_val, s_val = beta_fn(ticker, is_tw)
+            ok = True
+    except Exception:
+        return float("nan"), "其他", False
+    try:
+        number = float(b_val)
+    except (TypeError, ValueError):
+        number = float("nan")
+    if not math.isfinite(number):
+        return float("nan"), s_val or "其他", False
+    return number, s_val or "其他", bool(ok)
+
+
+def _quote_listed(ticker: str, beta_fn, kind: str, extras: dict, backup: bool = False):
+    """現股或找不到期交所報價的期貨。市場看種類與代號後綴，不看字母長度。"""
+    market = market_is_tw(kind, ticker)
+    if market is None:
+        b_val, s_val, ok = float("nan"), (sector_for_ticker(ticker, "其他") or "其他"), False
+        px = _fetch_yahoo_price(ticker, False)
+    else:
+        b_val, s_val, ok = _call_beta(beta_fn, ticker, market)
+        px = _fetch_yahoo_price(ticker, market)
+    label = "TW Yahoo" if market is True else "Yahoo"
+    if backup:
+        label += "(備援)"
+    extras["報價來源"] = label if pd.notna(px) else "無報價，暫用成本價"
+    if "期" in str(kind):
+        extras["合約乘數"] = futures_multiplier(ticker)
+    extras["Beta來源"] = beta_source_label(kind, ok)
+    if market is False:
+        extras.update(fetch_underlying_beta(ticker, beta_fn))
+    return ticker, px, b_val, s_val, extras
+
+
+def _quote_us_option(ticker: str, beta_fn, kind: str, underlying: str, extras: dict):
+    """美股選擇權的權利金可以是合約報價；標的價只採用標的本身，不用權利金代替。"""
+    px = _fetch_yahoo_price(ticker, False)
+    extras["報價來源"] = "Yahoo" if pd.notna(px) else "無報價，暫用成本價"
+    extras["合約乘數"] = 100.0
+    root = occ_root(ticker) or str(underlying or "").strip().upper()
+    if not root:
+        extras["Beta來源"] = beta_source_label(kind, False)
+        return ticker, px, float("nan"), "美股選擇權", extras
+    extras["標的代號"] = root
+    und_px = _fetch_yahoo_price(root, False)
+    if pd.notna(und_px):
+        try:
+            und_num = float(und_px)
+        except (TypeError, ValueError):
+            und_num = float("nan")
+        if math.isfinite(und_num) and und_num > 0:
+            extras["標的現價"] = und_num
+    info = fetch_underlying_beta(root, beta_fn)
+    if info:
+        extras.update(info)
+        ok = math.isfinite(_row_float(info.get("標的Beta"), float("nan"))) and _row_float(info.get("標的Beta"), 0.0) > 0
+        extras["Beta來源"] = str(info.get("標的Beta來源") or "") or beta_source_label("美股", ok)
+        sector = sector_for_ticker(root, "美股選擇權") or "美股選擇權"
+    else:
+        b_val, s_val, ok = _call_beta(beta_fn, root, False)
+        extras["Beta來源"] = f"{root} " + beta_source_label("美股", ok)
+        if ok:
+            extras["標的Beta"] = b_val
+            extras["標的Beta來源"] = extras["Beta來源"]
+        sector = s_val or sector_for_ticker(root, "美股選擇權") or "美股選擇權"
+    return ticker, px, float("nan"), sector, extras
 
 
 def _quote_one_ex(ticker: str, twii_price: float, beta_fn, kind: str = "", underlying: str = ""):
@@ -570,32 +716,15 @@ def _quote_one_ex(ticker: str, twii_price: float, beta_fn, kind: str = "", under
                 extras["Beta來源"] = beta_source_label(kind_str, ok)
                 return ticker, fut_q.price, b_val, s_val, extras
 
-            is_tw_market = _page4_is_tw_market(ticker)
-            if getattr(beta_fn, "info", None):
-                b_val, s_val, ok = beta_fn.info(ticker, is_tw_market)
-            else:
-                b_val, s_val = beta_fn(ticker, is_tw_market)
-                ok = True
-            px = _fetch_yahoo_price(ticker, is_tw_market)
-            extras["報價來源"] = ("TW Yahoo(備援)" if is_tw_market else "Yahoo(備援)") if pd.notna(px) else "無報價，暫用成本價"
-            extras["合約乘數"] = futures_multiplier(ticker)
-            extras["Beta來源"] = beta_source_label(kind_str, ok)
-            return ticker, px, b_val, s_val, extras
+            return _quote_listed(ticker, beta_fn, kind_str, extras, backup=True)
 
-        is_tw_market = _page4_is_tw_market(ticker)
-        if getattr(beta_fn, "info", None):
-            b_val, s_val, ok = beta_fn.info(ticker, is_tw_market)
-        else:
-            b_val, s_val = beta_fn(ticker, is_tw_market)
-            ok = True
-        px = _fetch_yahoo_price(ticker, is_tw_market)
-        extras["報價來源"] = ("TW Yahoo" if is_tw_market else "Yahoo") if pd.notna(px) else "無報價，暫用成本價"
-        extras["Beta來源"] = beta_source_label(kind_str, ok)
-        extras.update(fetch_underlying_beta(ticker, beta_fn))
-        return ticker, px, b_val, s_val, extras
+        if is_opt and "美" in kind_str:
+            return _quote_us_option(ticker, beta_fn, kind_str, underlying, extras)
+
+        return _quote_listed(ticker, beta_fn, kind_str, extras, backup=False)
 
     except Exception:
-        return ticker, np.nan, 1.0, "其他", {"報價來源": "無報價，暫用成本價"}
+        return ticker, np.nan, float("nan"), "其他", {"報價來源": "無報價，暫用成本價", "Beta來源": beta_source_label(kind, False)}
 
 
 def _quote_one(ticker, twii_price: float, beta_fn, kind: str = ""):
@@ -766,7 +895,7 @@ def attach_quotes(df: pd.DataFrame, prices: dict, betas: dict, sectors: dict, ex
     out["Beta值"] = mapped_beta
     restore_beta = conv & ~np.isfinite(mapped_beta) & np.isfinite(prior_beta)
     out.loc[restore_beta, "Beta值"] = prior_beta[restore_beta]
-    out["Beta值"] = pd.to_numeric(out["Beta值"], errors="coerce").fillna(1.0)
+    out["Beta值"] = pd.to_numeric(out["Beta值"], errors="coerce")
     mapped_sector = out["標的"].map(sectors)
     out["產業別"] = mapped_sector.astype("object").where(mapped_sector.notna(), "其他")
     if extras:
@@ -894,6 +1023,11 @@ def _empty_metrics() -> dict:
         "exposure_complete": True,
         "exposure_scope": "complete",
         "unknown_delta_symbols": [],
+        "beta_complete": True,
+        "unknown_beta_symbols": [],
+        "unallocated_nav": 0.0,
+        "sleeve_nav_complete": True,
+        "beta_basis": "sleeve_nav",
     }
 
 
@@ -978,9 +1112,9 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
         else:
             df["即時報價"] = pd.to_numeric(df["即時報價"], errors="coerce").fillna(df["平均成本"])
         if "Beta值" not in df.columns:
-            df["Beta值"] = 1.0
+            df["Beta值"] = np.nan
         else:
-            df["Beta值"] = pd.to_numeric(df["Beta值"], errors="coerce").fillna(1.0)
+            df["Beta值"] = pd.to_numeric(df["Beta值"], errors="coerce")
         if "產業別" not in df.columns:
             df["產業別"] = "其他"
         else:
@@ -1075,7 +1209,8 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
 
         # 權益市值：期貨＝保證金＋未實現損益，只用來算帳戶淨值（舊的「即時市值」口徑）。
         df["權益市值(原幣)"] = df.apply(calc_display_mv, axis=1).astype(float)
-        df["權益市值(台幣)"] = (df["權益市值(原幣)"].abs() * df["換算匯率"]).astype(float)
+        # 淨值用有號市值。空單是負債，價格上漲時淨值下降。名目曝險另外取絕對值。
+        df["權益市值(台幣)"] = (df["權益市值(原幣)"] * df["換算匯率"]).astype(float)
 
         def calc_market_value(row):
             # 持倉表顯示的市值：期貨列顯示名目市值（報價 × 乘數 × 口數），不是未實現損益。
@@ -1149,14 +1284,18 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
                             break
 
                 df.at[idx, "有效Beta"] = np.nan
-                if delta_val is None:
-                    if ticker_str not in options_missing_delta:
+                und_px = _row_float(row.get("標的現價"), float("nan")) if "標的現價" in df.columns else float("nan")
+                has_underlying_price = math.isfinite(und_px) and und_px > 0
+                if delta_val is None or not has_underlying_price:
+                    if delta_val is None and ticker_str not in options_missing_delta:
                         options_missing_delta.append(ticker_str)
                     df.at[idx, "實質曝險(台幣)"] = np.nan
                     df.at[idx, "Beta曝險(台幣)"] = np.nan
                     df.at[idx, "曝險已知"] = False
-                    df.at[idx, "Delta狀態"] = "missing"
-                    df.at[idx, "Beta來源"] = "Delta 缺漏，曝險未計入"
+                    df.at[idx, "Delta狀態"] = "missing" if delta_val is None else "known"
+                    df.at[idx, "Beta來源"] = "Delta 缺漏，曝險未計入" if delta_val is None else "標的價格缺漏，曝險未計入"
+                    if delta_val is not None:
+                        df.at[idx, "Delta"] = delta_val
                 else:
                     opt_mult = 100.0 if "美" in kind_str else 50.0
                     if "合約乘數" in df.columns and pd.notna(row["合約乘數"]):
@@ -1166,19 +1305,38 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
                                 opt_mult = cm
                         except (ValueError, TypeError):
                             pass
-                    und_px = px
-                    if "標的現價" in df.columns and pd.notna(row["標的現價"]):
-                        try:
-                            und_px = float(row["標的現價"])
-                        except (ValueError, TypeError):
-                            pass
-                    beta_exp = delta_val * qty * opt_mult * und_px * fx
+                    root = str(row.get("標的代號") or "").strip().upper() or (occ_root(ticker_str) or "")
+                    own_beta = row.get("標的Beta")
+                    if not math.isfinite(_row_float(own_beta, float("nan"))):
+                        own_beta = row.get("Beta值")
+                    option_kind = "美股" if "美" in kind_str else kind_str
+                    eb = effective_beta(
+                        root or ticker_str, option_kind, 1.0, own_beta, row.get("標的Beta"),
+                        str(row.get("標的Beta來源") or ""), str(row.get("Beta來源") or ""), overrides,
+                    )
+                    sens = eb["sens"]
+                    gross_mult = float(eb["lev"] or 1.0)
+                    delta_notional = delta_val * qty * opt_mult * und_px * fx
                     df.at[idx, "Delta"] = delta_val
-                    df.at[idx, "實質曝險(台幣)"] = abs(beta_exp)
-                    df.at[idx, "Beta曝險(台幣)"] = beta_exp
-                    df.at[idx, "曝險已知"] = True
                     df.at[idx, "Delta狀態"] = "known"
-                    df.at[idx, "Beta來源"] = "選擇權 Delta 曝險"
+                    if root:
+                        df.at[idx, "標的代號"] = root
+                    df.at[idx, "採用標的Beta"] = eb["underlying_beta"] if eb["underlying_beta"] is not None else np.nan
+                    df.at[idx, "採用槓桿"] = gross_mult
+                    if sens is None or not math.isfinite(float(sens)):
+                        df.at[idx, "實質曝險(台幣)"] = np.nan
+                        df.at[idx, "Beta曝險(台幣)"] = np.nan
+                        df.at[idx, "有效Beta"] = np.nan
+                        df.at[idx, "曝險已知"] = False
+                        df.at[idx, "Beta來源"] = eb["source"] or "資料不足，Beta 未計入"
+                    else:
+                        # Delta 名目是對合約標的價格的曝險。標的若是槓桿／反向 ETF，
+                        # 再乘契約倍數一次，得到對基準的敏感度；權利金不拿來代替標的價。
+                        df.at[idx, "實質曝險(台幣)"] = abs(delta_notional) * gross_mult
+                        df.at[idx, "Beta曝險(台幣)"] = delta_notional * float(sens)
+                        df.at[idx, "有效Beta"] = float(sens)
+                        df.at[idx, "曝險已知"] = True
+                        df.at[idx, "Beta來源"] = eb["source"]
 
             elif is_fut:
                 # 期貨：曝險＝名目（報價 × 乘數 × 口數），Beta＝標的 Beta（臺指期定義 1）。槓桿已在名目裡，不再乘。
@@ -1203,23 +1361,32 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
                         if "預設值" not in str(eb["source"]):
                             df.at[idx, "採用標的Beta"] = sens
                     sign = 1.0 if qty > 0 else (-1.0 if qty < 0 else 0.0)
-                    df.at[idx, "Beta曝險(台幣)"] = mkt_val_twd * sens * sign
+                    if sens is None or not math.isfinite(float(sens)):
+                        df.at[idx, "有效Beta"] = np.nan
+                        df.at[idx, "Beta曝險(台幣)"] = np.nan
+                        df.at[idx, "Beta來源"] = eb["source"] or "資料不足，Beta 未計入"
+                    else:
+                        df.at[idx, "Beta曝險(台幣)"] = mkt_val_twd * float(sens) * sign
 
             else:
-                # 現股／ETF：名目曝險＝市值 × 槓桿；Beta 曝險＝市值 × 有效Beta（槓桿 × 標的一年 Beta）
-                # ＝名目曝險 × 標的 Beta。槓桿只乘一次。
-                mkt_val_twd = float(row["即時市值(台幣)"])
+                # 現股／ETF：名目＝|市值|×倍數絕對值。Beta 曝險＝|市值|×（契約倍數×標的 Beta）×持倉方向。
+                # 已知商品的契約倍數含正負號，試算表不能把它再乘一次。
+                mkt_val_twd = abs(_row_float(row["即時市值(台幣)"], 0.0))
                 eb = effective_beta(ticker_str, kind_str, row["標的槓桿"], row["Beta值"], row.get("標的Beta"), str(row.get("標的Beta來源") or ""), str(row.get("Beta來源") or ""), overrides)
-                lev = float(eb["lev"]) if eb.get("lev") is not None else _row_float(row["標的槓桿"], 1.0)
+                lev = float(eb["lev"]) if eb.get("lev") is not None else abs(_row_float(row["標的槓桿"], 1.0))
                 df.at[idx, "實質曝險(台幣)"] = mkt_val_twd * lev
                 df.at[idx, "採用槓桿"] = lev
                 sens = eb["sens"]
-                df.at[idx, "有效Beta"] = sens
                 df.at[idx, "Beta來源"] = eb["source"]
                 df.at[idx, "標的代號"] = eb["underlying"]
                 df.at[idx, "採用標的Beta"] = eb["underlying_beta"] if eb["underlying_beta"] is not None else np.nan
                 sign = 1.0 if qty > 0 else (-1.0 if qty < 0 else 0.0)
-                df.at[idx, "Beta曝險(台幣)"] = mkt_val_twd * sens * sign
+                if sens is None or not math.isfinite(float(sens)):
+                    df.at[idx, "有效Beta"] = np.nan
+                    df.at[idx, "Beta曝險(台幣)"] = np.nan
+                else:
+                    df.at[idx, "有效Beta"] = float(sens)
+                    df.at[idx, "Beta曝險(台幣)"] = mkt_val_twd * float(sens) * sign
         # 曝險Beta：套在名目曝險上的 Beta（槓桿 ETF＝標的 Beta；現股＝自身 Beta；臺指期＝1）。
         gross = df["實質曝險(台幣)"].astype(float)
         df["曝險Beta"] = np.where(gross != 0, df["Beta曝險(台幣)"].astype(float) / gross.where(gross != 0, 1.0), 0.0).astype(float)
@@ -1368,6 +1535,7 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
 
         tw_nav = 0.0
         us_nav = 0.0
+        unallocated_nav = 0.0
         for idx, row in account_data.iterrows():
             acc_name = str(row["帳戶名稱"]).strip()
             acc_nav = float(row["帳戶淨值"])
@@ -1377,15 +1545,13 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
             elif mtype == "US":
                 us_nav += acc_nav
             else:
-                subset = df[df["帳戶"] == acc_name]
-                us_subset = subset[subset["種類"].astype(str).str.contains("美")]
-                us_mv = float(us_subset["權益市值(台幣)"].sum())
-                us_nav += us_mv
-                tw_nav += (acc_nav - us_mv)
+                # 同一戶同時有台股與美股時，現金沒有歸屬標記，不把現金塞進其中一邊。
+                unallocated_nav += acc_nav
     else:
         nav = 0.0
         tw_nav = 0.0
         us_nav = 0.0
+        unallocated_nav = 0.0
 
     if not df.empty:
         df["真實風險權重 (%)"] = np.where(nav > 0, (df["實質曝險(台幣)"] / nav) * 100.0, 0.0).astype(float)
@@ -1394,7 +1560,17 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
     if helper_cols:
         df = df.drop(columns=helper_cols)
     expired_removed = positions.attrs.get("expired_removed", []) if positions is not None else []
-    metrics = _metrics_from_frames(df, account_data, nav, tw_nav, us_nav, options_missing_delta if not df.empty else [], expired_removed)
+    sleeve_complete = abs(float(unallocated_nav)) <= 0.5
+    beta_tw_nav = tw_nav if sleeve_complete else nav
+    beta_us_nav = us_nav if sleeve_complete else nav
+    metrics = _metrics_from_frames(
+        df, account_data, nav, tw_nav, us_nav,
+        options_missing_delta if not df.empty else [], expired_removed,
+        beta_tw_nav=beta_tw_nav, beta_us_nav=beta_us_nav,
+    )
+    metrics["unallocated_nav"] = float(unallocated_nav)
+    metrics["sleeve_nav_complete"] = bool(sleeve_complete)
+    metrics["beta_basis"] = "sleeve_nav" if sleeve_complete else "total_nav"
     metrics["cb_missing_delta"] = list(dict.fromkeys(cb_missing_delta))
     metrics["cb_missing_terms"] = list(dict.fromkeys(cb_missing_terms))
     unknown_symbols: list[str] = []
@@ -1420,6 +1596,18 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
                 })
         metrics["beta_fallbacks_used"] = fallbacks
 
+    unknown_beta: list[str] = []
+    if not df.empty and "Beta曝險(台幣)" in df.columns and "實質曝險(台幣)" in df.columns:
+        for _, row in df.iterrows():
+            beta_exp = _row_float(row.get("Beta曝險(台幣)"), float("nan"))
+            notional = _row_float(row.get("實質曝險(台幣)"), float("nan"))
+            if math.isfinite(notional) and not math.isfinite(beta_exp):
+                symbol = str(row.get("標的") or "").strip()
+                if symbol:
+                    unknown_beta.append(symbol)
+    metrics["unknown_beta_symbols"] = list(dict.fromkeys(unknown_beta))
+    metrics["beta_complete"] = not metrics["unknown_beta_symbols"]
+
     return df, account_data, metrics
 
 
@@ -1431,6 +1619,8 @@ def _metrics_from_frames(
     us_nav: float = 0.0,
     options_missing_delta: list[str] | None = None,
     expired_removed: list[str] | None = None,
+    beta_tw_nav: float | None = None,
+    beta_us_nav: float | None = None,
 ) -> dict:
     metrics = _empty_metrics()
     metrics["nav"] = float(nav)
@@ -1438,6 +1628,10 @@ def _metrics_from_frames(
     metrics["us_nav"] = float(us_nav)
     metrics["options_missing_delta"] = list(dict.fromkeys(options_missing_delta or []))
     metrics["expired_removed"] = list(expired_removed or [])
+    if beta_tw_nav is None:
+        beta_tw_nav = tw_nav
+    if beta_us_nav is None:
+        beta_us_nav = us_nav
 
     position_exposure = float(df["實質曝險(台幣)"].sum()) if not df.empty and "實質曝險(台幣)" in df.columns else 0.0
     metrics["position_exposure"] = position_exposure
@@ -1455,14 +1649,19 @@ def _metrics_from_frames(
     # 保留原意給下單試算（split_betas）與舊 API 使用者；新欄位見 beta_leverage_breakdown。
     metrics["tw_exposure"] = tw_exp
     metrics["us_exposure"] = us_exp
-    metrics["tw_beta"] = (tw_exp / tw_nav) if tw_nav > 0 else 0.0
-    metrics["us_beta"] = (us_exp / us_nav) if us_nav > 0 else 0.0
+    # beta_*_nav 是這次比率實際用的分母：純台／純美帳戶用各自分母；有混合戶時兩邊都用總淨值。
+    metrics["tw_beta"] = (tw_exp / beta_tw_nav) if beta_tw_nav > 0 else 0.0
+    metrics["us_beta"] = (us_exp / beta_us_nav) if beta_us_nav > 0 else 0.0
     total_beta = ((tw_exp + us_exp) / nav) if nav > 0 else 0.0
     metrics["total_beta"] = total_beta
     metrics["beta"] = total_beta
 
     tw_notional, us_notional = _notional_by_market(df, account_data)
-    metrics.update(beta_leverage_breakdown(tw_notional, us_notional, tw_exp, us_exp, tw_nav, us_nav, nav))
+    tw_beta_notional, us_beta_notional = _beta_known_notional(df, account_data)
+    metrics.update(beta_leverage_breakdown(
+        tw_notional, us_notional, tw_exp, us_exp, beta_tw_nav, beta_us_nav, nav,
+        tw_beta_notional, us_beta_notional,
+    ))
     metrics["beta_weighted_avg"] = metrics["avg_beta"]
 
     if not df.empty and "報價來源" in df.columns:
@@ -1546,9 +1745,27 @@ def exposure_warning_text(metrics: dict | None) -> str:
     symbols = [str(item) for item in ((metrics or {}).get("unknown_delta_symbols") or []) if str(item)]
     listed = "、".join(symbols) if symbols else "有部位"
     return (
-        f"{listed} 缺少 Delta。這些部位的名目曝險與 Beta 沒有計入，也不是 0。"
+        f"{listed} 缺少 Delta 或標的價格。這些部位的名目曝險與 Beta 沒有計入，也不是 0。"
         "合計槓桿與 Beta 只加總已知部位，不完整，不能當成安全。"
     )
+
+
+def beta_quality_warning(metrics: dict | None) -> str:
+    """Beta 品質問題合成一句。沒有問題回空字串。單一指數的說明放在固定註解，不在這裡重複。"""
+    m = metrics or {}
+    parts: list[str] = []
+    symbols = [str(item) for item in (m.get("unknown_beta_symbols") or []) if str(item)]
+    if symbols:
+        parts.append(f"{'、'.join(symbols)} 的重疊報酬不足，Beta 沒有計入，也不是 1。")
+    names = []
+    for item in m.get("beta_fallbacks_used") or []:
+        if isinstance(item, dict) and item.get("標的"):
+            names.append(str(item["標的"]))
+    if names:
+        parts.append(f"{'、'.join(dict.fromkeys(names))} 用的是已標示的預設 Beta，不是這次估出來的。")
+    if m.get("sleeve_nav_complete") is False:
+        parts.append("有帳戶同時含台股與美股，現金無法分辨歸屬，台股／美股敏感度改除以總淨值。")
+    return "".join(parts)
 
 
 def _row_float(value, default: float = 0.0) -> float:
@@ -1571,33 +1788,57 @@ def _row_multiplier(row) -> float:
     return futures_multiplier(ticker)
 
 
+def _account_rows(df: pd.DataFrame, account_data: pd.DataFrame | None) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    if account_data is not None and not account_data.empty and "帳戶名稱" in account_data.columns and "帳戶" in df.columns:
+        names = set(account_data["帳戶名稱"].astype(str).str.strip())
+        return df[df["帳戶"].astype(str).str.strip().isin(names)]
+    return df
+
+
 def _notional_by_market(df: pd.DataFrame, account_data: pd.DataFrame | None) -> tuple[float, float]:
     """台股／美股名目曝險合計。只算帳戶表有的帳戶，跟 metrics["exposure"]（帳戶加總）同一口徑。"""
     if df is None or df.empty or "實質曝險(台幣)" not in df.columns:
         return 0.0, 0.0
-    rows = df
-    if account_data is not None and not account_data.empty and "帳戶名稱" in account_data.columns and "帳戶" in df.columns:
-        names = set(account_data["帳戶名稱"].astype(str).str.strip())
-        rows = df[df["帳戶"].astype(str).str.strip().isin(names)]
+    rows = _account_rows(df, account_data)
     is_us = rows["種類"].astype(str).str.contains("美")
     return float(rows[~is_us]["實質曝險(台幣)"].sum()), float(rows[is_us]["實質曝險(台幣)"].sum())
+
+
+def _beta_known_notional(df: pd.DataFrame, account_data: pd.DataFrame | None) -> tuple[float, float]:
+    """已有 Beta 的名目。平均 Beta 不用「沒估到＝0」去稀釋。"""
+    if df is None or df.empty or "實質曝險(台幣)" not in df.columns or "Beta曝險(台幣)" not in df.columns:
+        return 0.0, 0.0
+    rows = _account_rows(df, account_data)
+    beta = pd.to_numeric(rows["Beta曝險(台幣)"], errors="coerce")
+    notional = pd.to_numeric(rows["實質曝險(台幣)"], errors="coerce")
+    known = beta.notna() & notional.notna()
+    is_us = rows["種類"].astype(str).str.contains("美")
+    tw = float(notional[known & ~is_us].sum()) if (known & ~is_us).any() else 0.0
+    us = float(notional[known & is_us].sum()) if (known & is_us).any() else 0.0
+    return tw, us
 
 
 def _ratio(numerator: float, denominator: float) -> float:
     return float(numerator) / float(denominator) if denominator and denominator > 0 else 0.0
 
 
-def beta_leverage_breakdown(tw_notional: float, us_notional: float, tw_beta_exp: float, us_beta_exp: float, tw_nav: float, us_nav: float, nav: float) -> dict:
-    """台股／美股／合計的三個數字，口徑一致：
+def beta_leverage_breakdown(
+    tw_notional: float, us_notional: float, tw_beta_exp: float, us_beta_exp: float,
+    tw_nav: float, us_nav: float, nav: float,
+    tw_beta_notional: float | None = None, us_beta_notional: float | None = None,
+) -> dict:
+    """台股／美股／合計。
 
-    - 名目曝險：現股／ETF＝市值 × 槓桿倍數；期貨＝報價 × 乘數 × 口數；選擇權＝|Delta 名目|；可轉債／CBAS＝|Delta × 轉換價值|。
-    - Beta 曝險＝Σ(名目曝險 × Beta)。槓桿 ETF 的 Beta 用標的一年 Beta（槓桿已在名目裡，只乘一次）。
-    - 槓桿＝名目曝險 ÷ 淨值
-    - 部位平均 Beta＝Beta 曝險 ÷ 名目曝險
-    - 帳戶 Beta＝Beta 曝險 ÷ 淨值＝槓桿 × 部位平均 Beta
+    名目用倍數絕對值。Beta 用契約倍數（可負）× 標的 Beta，只乘一次。
+    平均 Beta 的分母只含已估到 Beta 的名目。帳戶 Beta 的分母是傳入的淨值
+    （純帳戶用各自分母；混合戶用總淨值）。全部 Beta 都估到時，槓桿 × 平均 Beta＝帳戶 Beta。
     """
     notional = float(tw_notional) + float(us_notional)
     beta_exp = float(tw_beta_exp) + float(us_beta_exp)
+    tw_bn = float(tw_notional if tw_beta_notional is None else tw_beta_notional)
+    us_bn = float(us_notional if us_beta_notional is None else us_beta_notional)
     return {
         "tw_notional_exposure": float(tw_notional),
         "us_notional_exposure": float(us_notional),
@@ -1608,9 +1849,9 @@ def beta_leverage_breakdown(tw_notional: float, us_notional: float, tw_beta_exp:
         "tw_leverage": _ratio(tw_notional, tw_nav),
         "us_leverage": _ratio(us_notional, us_nav),
         "total_leverage": _ratio(notional, nav),
-        "tw_avg_beta": _ratio(tw_beta_exp, tw_notional),
-        "us_avg_beta": _ratio(us_beta_exp, us_notional),
-        "avg_beta": _ratio(beta_exp, notional),
+        "tw_avg_beta": _ratio(tw_beta_exp, tw_bn),
+        "us_avg_beta": _ratio(us_beta_exp, us_bn),
+        "avg_beta": _ratio(beta_exp, tw_bn + us_bn),
         "tw_account_beta": _ratio(tw_beta_exp, tw_nav),
         "us_account_beta": _ratio(us_beta_exp, us_nav),
         "account_beta": _ratio(beta_exp, nav),
@@ -1618,9 +1859,19 @@ def beta_leverage_breakdown(tw_notional: float, us_notional: float, tw_beta_exp:
 
 
 BETA_LEVERAGE_NOTE = (
-    "槓桿＝名目曝險 ÷ 淨值；部位平均 Beta＝Σ(名目曝險 × Beta) ÷ 名目曝險；帳戶 Beta＝Σ(名目曝險 × Beta) ÷ 淨值＝槓桿 × 部位平均 Beta。"
-    "名目曝險：現股／ETF＝市值 × 槓桿倍數，期貨＝報價 × 乘數 × 口數，可轉債／CBAS＝|Delta × 轉換價值|。槓桿 ETF 的 Beta 用標的一年 Beta，槓桿只乘一次。"
+    "名目＝市值或 Delta 名目乘上倍數的絕對值；Beta 曝險＝該名目乘上標的 Beta，契約倍數只進一次（SOXS 這類反向是負倍數）。"
+    "Beta 用同一條基準的最近 252 個交易日、至少 60 個重疊日報酬，共變異與變異都用樣本數減一；畫面才四捨五入。"
+    "資料不足不會當成 1。合計是台股對加權、美股對 S&P 500 的敏感度相加，不是單一指數 Beta。"
+    "帳戶同時有台股與美股時，現金不拆開，分開的兩列改除以總淨值。"
 )
+
+
+def _shown_sleeve_nav(metrics: dict, nav_key: str) -> float:
+    """表格上的淨值是比率實際用的分母。混合戶時台股／美股列也顯示總淨值。"""
+    m = metrics or {}
+    if nav_key != "nav" and m.get("beta_basis") == "total_nav":
+        return float(m.get("nav", 0.0) or 0.0)
+    return float(m.get(nav_key, 0.0) or 0.0)
 
 
 def beta_leverage_rows(metrics: dict) -> list[dict]:
@@ -1636,7 +1887,7 @@ def beta_leverage_rows(metrics: dict) -> list[dict]:
             "市場": label,
             "名目曝險": float(m.get(f"{prefix}notional_exposure", 0.0) or 0.0),
             "Beta曝險": float(m.get(f"{prefix}beta_exposure", 0.0) or 0.0),
-            "淨值": float(m.get(nav_key, 0.0) or 0.0),
+            "淨值": _shown_sleeve_nav(m, nav_key),
             "槓桿": float(m.get(lev_key, 0.0) or 0.0),
             "部位平均Beta": float(m.get(avg_key, 0.0) or 0.0),
             "帳戶Beta": float(m.get(acct_key, 0.0) or 0.0),

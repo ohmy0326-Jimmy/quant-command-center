@@ -308,7 +308,7 @@ def rule_leverage(r: dict, prev: Record | None, now: datetime):
                 "leverage",
                 NORMAL,
                 "⚠️ 槓桿與 Beta 不完整",
-                f"{listed} 缺少 Delta。已知槓桿 {lev:.2f}x 只含已知部位，不能當成未超標。",
+                f"{listed} 缺少 Delta 或標的價格。已知槓桿 {lev:.2f}x 只含已知部位，不能當成未超標。",
             )
         return "incomplete", f"{lev:.3f}", alert
     if lev > LEVERAGE_WARN + 1e-9 or (prev_state == "high" and lev >= LEVERAGE_CLEAR):
