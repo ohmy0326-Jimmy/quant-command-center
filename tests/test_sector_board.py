@@ -69,9 +69,46 @@ class GateTests(unittest.TestCase):
         self.assertEqual(board.role_of("XLK"), "攻擊")
         self.assertEqual(board.role_of("XLP"), "防禦")
         self.assertEqual(board.role_of("SOXX"), "主題（不歸攻防）")
-        self.assertEqual(board.stance_text("XLK", {"industries": []}), "未對應第五頁產業")
+        self.assertEqual(board.stance_text("XLC", {"industries": []}), "未對應第五頁產業")
+        self.assertEqual(board.stance_text("UFO", {"industries": []}), "未對應第五頁產業")
         view = {"industries": [{"name": "AI 算力", "stance": "加碼", "example": True}]}
         self.assertIn("示例", board.stance_text("NVDA", view))
+
+    def test_page2_etfs_use_existing_industries(self):
+        import json
+        from pathlib import Path
+
+        from sector_map import PAGE2_INDUSTRIES, industries_for_board
+
+        payload = json.loads((Path(__file__).resolve().parents[1] / "data" / "macro_cycle.json").read_text(encoding="utf-8"))
+        known = {item["name"] for item in payload["industries"]["items"]}
+        for names in PAGE2_INDUSTRIES.values():
+            self.assertTrue(names)
+            self.assertTrue(set(names) <= known)
+        view = {
+            "industries": [
+                {"name": "AI 算力", "stance": "中性"},
+                {"name": "軟體雲端", "stance": "加碼"},
+                {"name": "消費電子", "stance": "減碼"},
+                {"name": "金融", "stance": "中性"},
+            ]
+        }
+        self.assertEqual(industries_for_board("SOXX"), ("AI 算力",))
+        self.assertEqual(industries_for_board("IGV"), ("軟體雲端",))
+        self.assertEqual(board.stance_text("SOXX", view), "AI 算力 · 中性")
+        self.assertEqual(board.stance_text("IGV", view), "軟體雲端 · 加碼")
+        self.assertEqual(board.stance_text("XLF", view), "金融 · 中性")
+        xlk = board.stance_text("XLK", view)
+        self.assertEqual(xlk, "AI 算力 · 中性；軟體雲端 · 加碼；消費電子 · 減碼")
+        for ticker in ("XLC", "XLY", "XLI", "XLE", "XLB", "XLP", "XLU", "XLRE", "XLV", "UFO"):
+            self.assertEqual(industries_for_board(ticker), ())
+            self.assertEqual(board.stance_text(ticker, view), "未對應第五頁產業")
+        summary = board.summarize_gates(
+            [board.macro_gate("中性"), {"name": "價格結構", "state": board.FAIL, "detail": ""}, {"name": "相對大盤連兩週", "state": board.FAIL, "detail": ""}]
+        )
+        self.assertEqual(summary["unknown"], 1)
+        self.assertIn("未知是總經允許", summary["text"])
+        self.assertNotIn("未對應", summary["text"])
 
 
 class StrongStockTests(unittest.TestCase):

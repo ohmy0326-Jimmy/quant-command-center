@@ -45,6 +45,20 @@ OTHER_SECTOR: dict[str, str] = {
 
 TICKER_INDUSTRY: dict[str, str] = {**STOCK_INDUSTRY_MAP, **ETF_INDUSTRY_MAP}
 
+# 第二頁板塊／主題 ETF → 第五頁既有產業。可多於一個。
+# 不寫進 TICKER_INDUSTRY，避免把整檔 XLK 的部位曝險算進單一產業。
+# XLK 的前幾大對得上既有個股：NVDA／AVGO／AMD＝AI 算力、MSFT＝軟體雲端、AAPL＝消費電子。
+# SOXX、IGV 沿用第五頁價格代理（INDUSTRY_ETFS）的方向反過來。XLF 對「金融」。
+# 沒有對上的維持未對應：XLC（GOOGL、META 本來就不在二十個產業）、
+# XLY、XLI、XLE（不是綠能儲能）、XLB（不是半導體材料）、XLP、XLU、XLRE、
+# XLV（比生技醫療廣）、UFO。
+PAGE2_INDUSTRIES: dict[str, tuple[str, ...]] = {
+    "XLK": ("AI 算力", "軟體雲端", "消費電子"),
+    "XLF": ("金融",),
+    "IGV": ("軟體雲端",),
+    "SOXX": ("AI 算力",),
+}
+
 # 第四頁用的完整表（原本的 DETAILED_SECTOR_MAP）。
 DETAILED_SECTOR_MAP: dict[str, str] = {**OTHER_SECTOR, **TICKER_INDUSTRY}
 
@@ -71,8 +85,20 @@ def _key(ticker) -> str:
 
 
 def industry_for_ticker(ticker) -> str | None:
-    """第五頁產業名稱；對不到回傳 None。"""
+    """第五頁產業名稱；對不到回傳 None。第二頁的多產業對照不走這裡。"""
     return TICKER_INDUSTRY.get(_key(ticker))
+
+
+def industries_for_board(ticker) -> tuple[str, ...]:
+    """第二頁立場用的第五頁產業。板塊 ETF 可對到多個既有產業。"""
+    key = str(ticker or "").strip().upper().split(".")[0]
+    mapped = PAGE2_INDUSTRIES.get(key)
+    if mapped:
+        return mapped
+    single = industry_for_ticker(ticker)
+    if single:
+        return (single,)
+    return ()
 
 
 def sector_for_ticker(ticker, default: str | None = None) -> str | None:
