@@ -97,6 +97,83 @@ class IsolationTests(unittest.TestCase):
         self.assertIn("四大雲端廠資本支出下修", names)
 
 
+class FredFetchTests(unittest.TestCase):
+    def test_public_csv_parses_and_html_is_not_a_zero(self):
+        class Response:
+            def __init__(self, status, text="", payload=None):
+                self.status_code = status
+                self._text = text
+                self._payload = payload
+
+            @property
+            def text(self):
+                return self._text
+
+            def json(self):
+                if self._payload is None:
+                    raise ValueError("no json")
+                return self._payload
+
+        def csv_get(url, timeout=None, params=None, headers=None):
+            self.assertNotIn("api_key", params or {})
+            return Response(200, "observation_date,DFII10\n2026-11-09,1.80\n")
+
+        found = lights.fetch_fred_observations("DFII10", get=csv_get, api_key="")
+        self.assertEqual(found[-1], (date(2026, 11, 9), 1.8))
+
+        def html_get(url, timeout=None, params=None, headers=None):
+            return Response(200, "<html>blocked</html>")
+
+        with self.assertRaises(lights.FredFetchError) as ctx:
+            lights.fetch_fred_observations("DFII10", get=html_get, api_key="")
+        self.assertIn("不是數值", str(ctx.exception))
+        self.assertIn("沒有 FRED_API_KEY", str(ctx.exception))
+        self.assertNotIn("0", lights.public_fetch_reason(ctx.exception).split("沒有")[0][-3:])
+
+    def test_api_key_is_not_echoed_and_missing_stays_unknown(self):
+        secret = "super-secret-fred-key"
+
+        class Response:
+            def __init__(self, status, text="", payload=None):
+                self.status_code = status
+                self._text = text
+                self._payload = payload
+
+            @property
+            def text(self):
+                return self._text
+
+            def json(self):
+                return self._payload
+
+        def api_ok(url, timeout=None, params=None, headers=None):
+            self.assertIn("api.stlouisfed.org", url)
+            self.assertEqual(params["api_key"], secret)
+            return Response(200, payload={"observations": [{"date": "2026-11-09", "value": "1.55"}, {"date": "2026-11-10", "value": "."}]})
+
+        found = lights.fetch_fred_observations("DFII10", get=api_ok, api_key=secret)
+        self.assertEqual(found, [(date(2026, 11, 9), 1.55)])
+
+        def both_fail(url, timeout=None, params=None, headers=None):
+            if "api.stlouisfed.org" in url:
+                return Response(401, payload={"error_message": secret})
+            return Response(403, "<html></html>")
+
+        with self.assertRaises(lights.FredFetchError) as ctx:
+            lights.fetch_fred_observations("DFII10", get=both_fail, api_key=secret)
+        self.assertNotIn(secret, str(ctx.exception))
+        self.assertIn("官方 API 回應 401", str(ctx.exception))
+        self.assertIn("公開 CSV 回應 403", str(ctx.exception))
+
+        reason = "FRED 公開 CSV 連不上。這個服務沒有 FRED_API_KEY，無法改走官方 API。"
+        board = lights.assemble_board([_macro_item()], {"dfii10": None, "dgs30": None, "hy_oas": None, "ig_oas": None}, TODAY, {"dfii10": reason})
+        self.assertEqual(board["dfii10"]["light"], "unknown")
+        self.assertIsNone(board["dfii10"]["value"])
+        self.assertIn("沒有 FRED_API_KEY", board["dfii10"]["status_text"])
+        self.assertIn(reason, board["fetch_notes"][0])
+        self.assertEqual(lights.score_dfii10(None, risk.STATUS_MISSING)["points"], 0)
+
+
 class SummaryRenderTests(unittest.TestCase):
     def test_apptest_shows_unknown_instead_of_green(self):
         try:

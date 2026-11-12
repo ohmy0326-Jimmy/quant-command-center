@@ -385,15 +385,15 @@ def load_calendar_model(watchlist: str):
             payloads[symbol] = cached_yahoo_earnings(symbol)
         except Exception:
             payloads[symbol] = {"error": "來源失敗"}
-    fmp_key = os.environ.get("FMP_API_KEY") or read_secret("", "FMP_API_KEY")
+    fmp_key = str(os.environ.get("FMP_API_KEY") or read_secret("", "FMP_API_KEY") or "").strip()
     fmp_items = None
     fmp_error = ""
     if fmp_key:
         try:
             fmp_items = cached_fmp_raw(today.isoformat(), (today + timedelta(days=90)).isoformat(), fmp_key)
-        except Exception:
+        except Exception as exc:
             fmp_items = []
-            fmp_error = "FMP 來源失敗，這一段缺漏。其餘事件仍顯示。不會改用寫死日期。"
+            fmp_error = calendar_events.public_fmp_error(exc, fmp_key) + " 這一段缺漏。其餘事件仍顯示。不會改用寫死日期。"
     try:
         official_confirmed = official_dates.confirm_official_dates()
     except Exception:
@@ -413,12 +413,14 @@ def load_calendar_model(watchlist: str):
 def load_page1_board(macro_items: list):
     today = datetime.now(macro_risk.TPE).date()
     series = {}
+    reasons = {}
     for key, spec in {**page1_lights.AGREED_SERIES, **page1_lights.READING_SERIES}.items():
         try:
             series[key] = cached_fred_observations(spec["series_id"])
-        except Exception:
+        except Exception as exc:
             series[key] = None
-    return page1_lights.assemble_board(macro_items, series, today)
+            reasons[key] = page1_lights.public_fetch_reason(exc)
+    return page1_lights.assemble_board(macro_items, series, today, reasons)
 
 
 def load_macro_risk():

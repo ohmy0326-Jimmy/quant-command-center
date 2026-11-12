@@ -211,18 +211,10 @@ def _fred(series_id: str) -> list[float]:
 
 
 def _fred_points(series_id: str) -> list[tuple[str, float]]:
-    import requests
+    """與第一頁同一條路：有 FRED_API_KEY 先走官方 API，否則公開 CSV。"""
+    from page1_lights import fetch_fred_observations
 
-    from macro_proxies import parse_fred_points
-
-    response = requests.get(
-        "https://fred.stlouisfed.org/graph/fredgraph.csv",
-        params={"id": series_id},
-        headers={"User-Agent": "quant-command-center/1.0"},
-        timeout=_FETCH_TIMEOUT,
-    )
-    response.raise_for_status()
-    return parse_fred_points(response.text)
+    return [(day.isoformat(), value) for day, value in fetch_fred_observations(series_id)]
 
 
 def _proxy_fetchers() -> dict:
