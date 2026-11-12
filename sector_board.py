@@ -14,7 +14,7 @@ import math
 
 import pandas as pd
 
-from sector_map import industry_for_ticker
+from sector_map import industries_for_board
 
 LOOKBACK_4W = 20
 LOOKBACK_12W = 60
@@ -119,19 +119,23 @@ def role_of(ticker: str) -> str:
 
 
 def stance_text(ticker: str, view: dict | None) -> str:
-    """只在既有第五頁分類對得到時顯示立場。對不到就寫未對應，不另編一張表。"""
-    industry = industry_for_ticker(ticker)
-    if not industry:
+    """只顯示第五頁已經有的產業。對不到就寫未對應，不把漲跌說成加碼或減碼。"""
+    names = industries_for_board(ticker)
+    if not names:
         return "未對應第五頁產業"
-    items = (view or {}).get("industries") or []
-    for item in items:
-        if item.get("name") != industry:
+    items = {item.get("name"): item for item in (view or {}).get("industries") or []}
+    parts = []
+    for industry in names:
+        item = items.get(industry)
+        if not item:
+            parts.append(f"{industry}（第五頁沒有這列）")
             continue
         stance = item.get("stance") or "立場空白"
+        text = f"{industry} · {stance}"
         if item.get("example"):
-            return f"{industry} · {stance}（示例）"
-        return f"{industry} · {stance}"
-    return f"{industry}（第五頁沒有這列）"
+            text += "（示例）"
+        parts.append(text)
+    return "；".join(parts)
 
 
 def _state_text(state: str) -> str:
@@ -231,8 +235,12 @@ def relative_gate(asset, benchmark) -> dict:
 def summarize_gates(gates: list[dict]) -> dict:
     passed = sum(1 for gate in gates if gate["state"] == PASS)
     failed = sum(1 for gate in gates if gate["state"] == FAIL)
-    unknown = sum(1 for gate in gates if gate["state"] == UNKNOWN)
-    text = f"通過 {passed}、未過 {failed}、未知 {unknown}。未知沒有算成通過或未過。"
+    unknown_names = [gate["name"] for gate in gates if gate["state"] == UNKNOWN]
+    unknown = len(unknown_names)
+    text = f"通過 {passed}、未過 {failed}、未知 {unknown}。"
+    if unknown_names:
+        text += "未知是" + "、".join(unknown_names) + "。"
+    text += "未知沒有算成通過或未過。"
     return {"passed": passed, "failed": failed, "unknown": unknown, "text": text, "gates": gates}
 
 
