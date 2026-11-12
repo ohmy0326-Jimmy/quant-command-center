@@ -53,7 +53,7 @@ FUND_TICKERS = frozenset(
     | set(LEVERAGED_UNDERLYING)
     | set(ATTACK)
     | set(DEFENSE)
-    | {"0050", "006208", "00631L", "00663L", "KORU", "IGV", "SOXX", "UFO", "SPY", "QQQ", "SMH", "EWY"}
+    | {"0050", "006208", "00631L", "00663L", "KORU", "IGV", "SOXX", "UFO", "SPY", "QQQ", "SMH", "EWY", "GLD"}
 )
 INDEX_FUTURES = frozenset({"TX", "MTX", "FMF", "TMF", "MXF"})
 MAX_EARNINGS_LOOKUPS = 40
@@ -328,9 +328,11 @@ def parse_yahoo_calendar(symbol: str, calendar, market: str) -> dict | None:
     raw = None
     if isinstance(calendar, dict):
         for key, value in calendar.items():
-            if "earnings" not in str(key).lower():
+            if "earnings" not in str(key).lower() or "date" not in str(key).lower():
                 continue
             raw = value[0] if isinstance(value, list) and value else value
+            if raw == []:
+                raw = None
             break
     elif hasattr(calendar, "index") and getattr(calendar, "empty", True) is False:
         for label in calendar.index:
@@ -532,10 +534,10 @@ def official_macro_events(start: date, end: date, confirmed: set[str] | None = N
 
     confirmed = confirmed or set()
 
-    def stamp(key: str) -> tuple[str, str]:
+    def stamp(key: str, day: date) -> tuple[str, str]:
         url = SOURCES[key]["url"]
-        if key in confirmed:
-            return "官方", f"官方頁面仍含對照日期。{url}。表上次核對 {VERIFIED_ON}。"
+        if key in confirmed or f"{key}:{day.isoformat()}" in confirmed:
+            return "官方", f"官方頁面仍含這個日期。{url}。表上次核對 {VERIFIED_ON}。"
         return PENDING, f"官方日期待確認。沿用 {VERIFIED_ON} 核對的日期表，這次沒有從頁面確認。{url}"
 
     found = []
@@ -543,7 +545,7 @@ def official_macro_events(start: date, end: date, confirmed: set[str] | None = N
     def add(day: date, key: str, title: str, market: str, kind: str):
         if day < start or day > end:
             return
-        certainty, note = stamp(key)
+        certainty, note = stamp(key, day)
         found.append({
             "date": day,
             "when_text": day.isoformat(),
@@ -688,16 +690,59 @@ class CalendarSourceError(RuntimeError):
     """來源失敗。呼叫端要顯示缺漏，不要改用寫死的日期。"""
 
 
-def fetch_yahoo_calendar(symbol: str, factory=None):
+def coalesce_earnings_calendar(calendar, earnings_frame=None, today: date | None = None):
+    """日曆的財報日是空清單時，改用 earnings_dates 裡下一個日期。沒有就不補。"""
+    if not isinstance(calendar, dict):
+        return calendar
+    raw = None
+    for key, value in calendar.items():
+        if "earnings" in str(key).lower() and "date" in str(key).lower():
+            raw = value
+            break
+    if isinstance(raw, list) and raw:
+        return calendar
+    if raw not in (None, [], "") and not isinstance(raw, list):
+        return calendar
+    upcoming = _next_earnings_day(earnings_frame, today or date.today())
+    if upcoming is None:
+        return calendar
+    merged = dict(calendar)
+    merged["Earnings Date"] = [upcoming]
+    return merged
+
+
+def _next_earnings_day(frame, today: date) -> date | None:
+    if frame is None or getattr(frame, "empty", True):
+        return None
+    index = getattr(frame, "index", None)
+    if index is None:
+        return None
+    found = []
+    for item in index:
+        day = item.date() if isinstance(item, datetime) else item if isinstance(item, date) else None
+        if isinstance(day, datetime):
+            day = day.date()
+        if isinstance(day, date) and day >= today:
+            found.append(day)
+    return min(found) if found else None
+
+
+def fetch_yahoo_calendar(symbol: str, factory=None, today: date | None = None):
     """抓 Yahoo 日曆。失敗丟 CalendarSourceError，讓快取不要記住這次失敗。"""
     maker = factory or _yahoo_ticker
     try:
-        calendar = maker(symbol).calendar
+        ticker = maker(symbol)
+        calendar = ticker.calendar
     except Exception as exc:
         raise CalendarSourceError(f"{symbol} 日曆讀取失敗") from exc
     if calendar is None:
         raise CalendarSourceError(f"{symbol} 沒有日曆")
-    return calendar
+    frame = None
+    try:
+        frame = getattr(ticker, "earnings_dates", None)
+    except Exception:
+        frame = None
+    return coalesce_earnings_calendar(calendar, frame, today or date.today())
 
 
 def _yahoo_ticker(symbol: str):
@@ -706,33 +751,71 @@ def _yahoo_ticker(symbol: str):
     return yf.Ticker(symbol)
 
 
+FMP_ECONOMIC_URLS = (
+    "https://financialmodelingprep.com/stable/economic-calendar",
+    "https://financialmodelingprep.com/api/v3/economic_calendar",
+)
+
+
+def public_fmp_error(exc: BaseException, api_key: str = "") -> str:
+    """給畫面的一句。不用例外原文，也不把金鑰留在句子裡。"""
+    if isinstance(exc, CalendarSourceError):
+        text = str(exc)
+    else:
+        text = "FMP 連不上"
+    key = str(api_key or "").strip()
+    if key and key in text:
+        text = text.replace(key, "")
+    return text.strip() or "FMP 來源失敗"
+
+
 def fetch_fmp_calendar(api_key: str, start: date, end: date, get=None):
-    if not str(api_key or "").strip():
+    key = str(api_key or "").strip()
+    if not key:
         raise CalendarSourceError("沒有 FMP_API_KEY")
     getter = get or _http_get
-    url = (
-        "https://financialmodelingprep.com/api/v3/economic_calendar"
-        f"?from={start.isoformat()}&to={end.isoformat()}&apikey={api_key}"
-    )
+    params = {"from": start.isoformat(), "to": end.isoformat(), "apikey": key}
+    errors = []
+    for url in FMP_ECONOMIC_URLS:
+        try:
+            return _fmp_event_list(getter, url, params)
+        except CalendarSourceError as exc:
+            errors.append(str(exc))
+    reason = errors[-1] if errors else "FMP 來源失敗"
+    if key in reason:
+        reason = reason.replace(key, "")
+    raise CalendarSourceError(f"{reason} 已試過 stable 與 v3。")
+
+
+def _fmp_event_list(getter, url: str, params: dict):
     try:
-        response = getter(url, timeout=10)
-        status = getattr(response, "status_code", 0)
-        if status != 200:
-            raise CalendarSourceError(f"FMP 回應 {status}")
-        payload = response.json()
+        response = getter(url, timeout=(3.05, 12), params=params)
     except CalendarSourceError:
         raise
     except Exception as exc:
-        raise CalendarSourceError("FMP 連線失敗") from exc
+        raise CalendarSourceError("FMP 連不上") from exc
+    status = getattr(response, "status_code", 0)
+    if status != 200:
+        raise CalendarSourceError(f"FMP 回應 {status}")
+    try:
+        payload = response.json()
+    except Exception as exc:
+        raise CalendarSourceError("FMP 回應不是事件清單") from exc
+    if isinstance(payload, dict):
+        for name in ("data", "economicCalendar", "events"):
+            nested = payload.get(name)
+            if isinstance(nested, list):
+                payload = nested
+                break
     if not isinstance(payload, list):
         raise CalendarSourceError("FMP 回應不是事件清單")
     return payload
 
 
-def _http_get(url: str, timeout: int = 10):
+def _http_get(url: str, timeout: int = 10, params=None):
     import requests
 
-    return requests.get(url, timeout=timeout)
+    return requests.get(url, params=params, timeout=timeout)
 
 
 def build_calendar(rows, watchlist: str, earnings_by_symbol: dict, fmp_items, today: date, fetched_at: datetime, horizon_days: int = 90, fmp_error: str = "", official_confirmed: set[str] | None = None) -> dict:

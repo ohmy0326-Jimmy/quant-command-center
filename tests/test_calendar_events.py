@@ -681,20 +681,103 @@ class OfficialDateTests(unittest.TestCase):
 
         class Response:
             status_code = 200
-            text = "December 8-9 and nothing else"
+            text = """
+            <a id="1">2026 FOMC Meetings</a>
+            <strong>December</strong></div>
+            <div class="fomc-meeting__date col">8-9*</div>
+            <a id="2">2027 FOMC Meetings</a>
+            <strong>January</strong></div>
+            <div class="fomc-meeting__date col">26-27</div>
+            """
 
         confirmed = confirm_official_dates(get=lambda url, timeout=8: Response())
-        self.assertEqual(confirmed, {"fomc"})
+        self.assertIn("fomc:2026-12-09", confirmed)
+        self.assertIn("fomc:2027-01-27", confirmed)
+        self.assertNotIn("fomc", confirmed)
         model = cal.build_calendar([], "", {}, None, date(2026, 11, 7), FETCHED, official_confirmed=confirmed)
-        fomc = next(event for event in model["events"] if event["title"] == "聯準會 FOMC 決策")
+        fomc = [event for event in model["events"] if event["title"] == "聯準會 FOMC 決策"]
+        by_day = {event["date"]: event["certainty"] for event in fomc}
+        self.assertEqual(by_day[date(2026, 12, 9)], "官方")
+        self.assertEqual(by_day[date(2027, 1, 27)], "官方")
         cbc = next(event for event in model["events"] if event["title"] == "台灣央行理監事會")
-        self.assertEqual(fomc["certainty"], "官方")
         self.assertEqual(cbc["certainty"], "官方日期待確認")
+
+        class Plain:
+            status_code = 200
+            text = "December 8-9 and nothing else"
+
+        plain = confirm_official_dates(get=lambda url, timeout=8: Plain())
+        self.assertFalse(any(item.startswith("fomc:") for item in plain))
 
         def broken(url, timeout=8):
             raise TimeoutError("down")
 
         self.assertEqual(confirm_official_dates(get=broken), set())
+
+    def test_msci_dates_follow_the_csv_not_a_stale_needle(self):
+        from official_dates import confirm_official_dates
+
+        class Response:
+            def __init__(self, url):
+                self.status_code = 200
+                self.text = "02-09-2027,03-01-2027" if "msci" in url else ""
+
+        confirmed = confirm_official_dates(get=lambda url, timeout=8: Response(url))
+        self.assertIn("msci:2027-02-09", confirmed)
+        self.assertIn("msci:2027-03-01", confirmed)
+        self.assertNotIn("msci:2026-11-11", confirmed)
+        self.assertNotIn("msci:2026-12-01", confirmed)
+
+    def test_empty_earnings_date_is_not_invented_and_gld_is_a_fund(self):
+        self.assertIsNone(cal.parse_yahoo_calendar("3042.TW", {"Earnings Date": []}, "TW"))
+        upcoming = cal.coalesce_earnings_calendar(
+            {"Earnings Date": []},
+            type("Frame", (), {"empty": False, "index": [date(2026, 8, 13), date(2027, 2, 1)]})(),
+            date(2026, 11, 12),
+        )
+        self.assertEqual(upcoming["Earnings Date"], [date(2027, 2, 1)])
+        past = cal.coalesce_earnings_calendar(
+            {"Earnings Date": []},
+            type("Frame", (), {"empty": False, "index": [date(2026, 8, 13)]})(),
+            date(2026, 11, 12),
+        )
+        self.assertEqual(past["Earnings Date"], [])
+        held, notes = cal.holdings_from_positions([_row(標的="GLD", 名稱="黃金", 種類="美股")])
+        self.assertFalse(held[0]["earnings"])
+        self.assertTrue(any("GLD" in note for note in notes))
+
+    def test_fmp_tries_stable_and_does_not_echo_the_key(self):
+        secret = "fmp-secret-value"
+        calls = []
+
+        class Ok:
+            status_code = 200
+
+            def json(self):
+                return {"data": [{"event": "CPI", "country": "US", "date": "2026-12-10"}]}
+
+        def ok_get(url, timeout=None, params=None):
+            calls.append(url)
+            self.assertEqual(params.get("apikey"), secret)
+            self.assertNotIn(secret, url)
+            return Ok()
+
+        payload = cal.fetch_fmp_calendar(secret, date(2026, 11, 12), date(2026, 12, 12), get=ok_get)
+        self.assertEqual(calls, [cal.FMP_ECONOMIC_URLS[0]])
+        self.assertEqual(payload[0]["event"], "CPI")
+
+        class Denied:
+            status_code = 401
+
+            def json(self):
+                return {"Error Message": secret}
+
+        with self.assertRaises(cal.CalendarSourceError) as ctx:
+            cal.fetch_fmp_calendar(secret, date(2026, 11, 12), date(2026, 12, 12), get=lambda *args, **kwargs: Denied())
+        self.assertNotIn(secret, str(ctx.exception))
+        self.assertIn("401", str(ctx.exception))
+        self.assertIn("stable", str(ctx.exception))
+        self.assertEqual(cal.public_fmp_error(ctx.exception, secret), str(ctx.exception))
 
 
 if __name__ == "__main__":

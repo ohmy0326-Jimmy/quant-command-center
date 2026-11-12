@@ -6,9 +6,10 @@
 
 from __future__ import annotations
 
+import re
 from datetime import date
 
-VERIFIED_ON = "2026-11-11"
+VERIFIED_ON = "2026-11-12"
 
 # 決策日是兩日會議的第二天。來源頁最後更新 2026-10-28。
 # https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm
@@ -119,7 +120,8 @@ MSCI_REVIEWS = (
 SOURCES = {
     "fomc": {
         "url": "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm",
-        "needles": ("December 8-9",),
+        # 月份與日期分在兩個標籤，頁面上沒有連續的 "December 8-9"。改逐日解析。
+        "needles": (),
     },
     "cbc": {
         "url": "https://www.cbc.gov.tw/tw/cp-357-189514-82841-1.html",
@@ -143,28 +145,111 @@ SOURCES = {
     },
     "msci": {
         "url": "https://app2.msci.com/eqb/pressreleases/archive/ir_dates.csv",
-        "needles": ("11-11-2026", "12-01-2026"),
+        # 檔案是 MM-DD-YYYY，而且「接下來八次」會把已經公布的那次移出。改逐日對。
+        "needles": (),
     },
 }
+
+_FOMC_MONTHS = {
+    "January": 1,
+    "February": 2,
+    "March": 3,
+    "April": 4,
+    "May": 5,
+    "June": 6,
+    "July": 7,
+    "August": 8,
+    "September": 9,
+    "October": 10,
+    "November": 11,
+    "December": 12,
+}
+_FOMC_ROW = re.compile(
+    r"<strong>(January|February|March|April|May|June|July|August|September|October|November|December)</strong>\s*</div>\s*"
+    r'<div class="fomc-meeting__date[^"]*">\s*([^<]+?)\s*</div>',
+    re.IGNORECASE,
+)
+_MSCI_DATE = re.compile(r"\b(\d{2})-(\d{2})-(\d{4})\b")
+
+
+def parse_fomc_decision_dates(html: str) -> set[date]:
+    """決策日是會議區間的最後一天。對不到的字（例如 notation vote）略過。"""
+    text = str(html or "")
+    parts = re.split(r'<a id="\d+">(\d{4}) FOMC Meetings</a>', text)
+    found: set[date] = set()
+    for index in range(1, len(parts), 2):
+        try:
+            year = int(parts[index])
+        except ValueError:
+            continue
+        body = re.split(r'<a id="\d+">\d{4} FOMC Meetings</a>', parts[index + 1])[0]
+        for month_name, raw in _FOMC_ROW.findall(body):
+            token = raw.strip().rstrip("*").strip()
+            if not re.fullmatch(r"\d{1,2}(?:-\d{1,2})?", token):
+                continue
+            month = _FOMC_MONTHS.get(month_name.title())
+            if month is None:
+                continue
+            try:
+                found.add(date(year, month, int(token.split("-")[-1])))
+            except ValueError:
+                continue
+    return found
+
+
+def parse_msci_dates(text: str) -> set[date]:
+    """MSCI 檢討 CSV 的日期是月-日-年。"""
+    found: set[date] = set()
+    for month, day, year in _MSCI_DATE.findall(str(text or "")):
+        try:
+            found.add(date(int(year), int(month), int(day)))
+        except ValueError:
+            continue
+    return found
+
+
 PENDING = "官方日期待確認"
 
 
 def confirm_official_dates(get=None) -> set[str]:
-    """官方頁面仍含表上的對照字串才算確認。失敗的來源不在回傳集合裡。"""
+    """官方頁對得到才算確認。FOMC 與 MSCI 是逐日鍵，其餘來源仍是整表鍵。
+
+    抓不到、或表上的日期不在頁面裡，那個來源／那一天不會在回傳集合。不新增表上沒有的日期。
+    """
     getter = get or _http_get
-    confirmed = set()
+    confirmed: set[str] = set()
     for key, spec in SOURCES.items():
-        try:
-            response = getter(spec["url"], timeout=8)
-            status = getattr(response, "status_code", 0)
-            if status != 200:
-                continue
-            body = response.text if isinstance(getattr(response, "text", None), str) else ""
-        except Exception:
+        body = _read_source(getter, spec["url"])
+        if body is None:
             continue
-        if all(needle in body for needle in spec["needles"]):
+        if key == "fomc":
+            live = parse_fomc_decision_dates(body)
+            for day in FOMC_DECISIONS:
+                if day in live:
+                    confirmed.add(f"fomc:{day.isoformat()}")
+            continue
+        if key == "msci":
+            live = parse_msci_dates(body)
+            for item in MSCI_REVIEWS:
+                for day in (item["announce"], item["effective"]):
+                    if day in live:
+                        confirmed.add(f"msci:{day.isoformat()}")
+            continue
+        if spec["needles"] and all(needle in body for needle in spec["needles"]):
             confirmed.add(key)
     return confirmed
+
+
+def _read_source(getter, url: str) -> str | None:
+    try:
+        response = getter(url, timeout=8)
+        status = getattr(response, "status_code", 0)
+        if status != 200:
+            return None
+        body = response.text if isinstance(getattr(response, "text", None), str) else ""
+    except Exception:
+        return None
+    return body
 
 
 def _http_get(url: str, timeout: int = 8):
