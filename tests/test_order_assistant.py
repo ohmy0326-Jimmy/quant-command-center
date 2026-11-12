@@ -546,7 +546,7 @@ class DashboardWiringTests(unittest.TestCase):
         for label in [
             "第一頁：總經與風險鬧鐘",
             "第二頁：板塊與主題資金輪動",
-            "第三頁：重大行事曆與會展",
+            "第三頁：持倉、觀察清單與總經行事曆",
             "第四頁：部位監控與量化風控",
             "第五頁：總經週期與配置",
             "第六頁：下單輔助系統",
@@ -559,7 +559,10 @@ class DashboardWiringTests(unittest.TestCase):
         self.assertLess(macro, page6)
         self.assertNotIn("第五頁：Telegram 戰情推播", dashboard)
         radio = dashboard.split("切換監控面板：", 1)[1].split("key=\"nav_page\"", 1)[0]
-        self.assertLess(radio.index("第二頁：板塊與主題資金輪動"), radio.index("第三頁：重大行事曆與會展"))
+        self.assertLess(radio.index("第二頁：板塊與主題資金輪動"), radio.index("PAGE3"))
+        self.assertIn('PAGE3 = "第三頁：持倉、觀察清單與總經行事曆"', dashboard)
+        self.assertNotIn("重大行事曆與會展", dashboard)
+        self.assertNotIn("持倉與觀察清單行事曆", dashboard)
         self.assertNotIn("總經週期與配置", radio.split("第四頁：部位監控與量化風控", 1)[0])
         self.assertIn("send_to_telegram", dashboard)
         self.assertIn("render_macro_cycle_page", dashboard)

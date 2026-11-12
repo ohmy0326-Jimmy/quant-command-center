@@ -267,7 +267,7 @@ def render_page1_summary(st, board: dict, macro_summary: dict) -> None:
         st.caption(dfii_line)
     if board["unknown_names"]:
         st.warning("資料不完整：" + "、".join(board["unknown_names"]) + "。這些不是綠燈，也沒有當成 0 分的未觸發。")
-    st.dataframe(table_records(board["rows"] + board["readings"]), width="stretch", hide_index=True)
+    st.table(table_records(board["rows"] + board["readings"]), hide_index=True)
     st.caption("30 年債、高收益與投資級利差沒有約定門檻，表上寫「無約定門檻」。")
     with st.expander("這批沒有接上的項目"):
         for item in board["not_done"]:
