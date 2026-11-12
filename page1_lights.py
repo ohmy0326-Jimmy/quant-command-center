@@ -388,6 +388,8 @@ def fetch_fred_observations(series_id: str, get=None, api_key: str | None = None
 def render_page1_summary(st, board: dict, macro_summary: dict) -> None:
     """精簡摘要。st 是 Streamlit。新燈只顯示，不從這裡推播。"""
     st.subheader("警報燈摘要")
+    for note in board.get("fetch_notes") or []:
+        st.caption(note)
     level = macro_summary.get("level")
     headline = summary_lines(board, macro_summary)[0]
     if level == "red":
@@ -410,8 +412,6 @@ def render_page1_summary(st, board: dict, macro_summary: dict) -> None:
         st.caption(dfii_line)
     if board["unknown_names"]:
         st.warning("資料不完整：" + "、".join(board["unknown_names"]) + "。這些不是綠燈，也沒有當成 0 分的未觸發。")
-    for note in board.get("fetch_notes") or []:
-        st.caption(note)
     st.dataframe(table_records(board["rows"] + board["readings"]), width="stretch", hide_index=True)
     st.caption("30 年債、高收益與投資級利差沒有約定門檻，表上寫「無約定門檻」。")
     with st.expander("這批沒有接上的項目"):
