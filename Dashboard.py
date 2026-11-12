@@ -490,6 +490,9 @@ if 'ai_memo_p3' not in st.session_state:
 if 'ai_memo_p4' not in st.session_state:
     st.session_state.ai_memo_p4 = {"text": "", "time": ""}
 
+# 側欄與頁首共用這句，持倉、觀察清單與官方總經日期都在這一頁。
+PAGE3 = "第三頁：持倉、觀察清單與總經行事曆"
+
 with st.sidebar:
     st.title("⚙️ 系統導覽")
     page = st.radio(
@@ -497,7 +500,7 @@ with st.sidebar:
         [
             "第一頁：總經與風險鬧鐘",
             "第二頁：板塊與主題資金輪動",
-            "第三頁：重大行事曆與會展",
+            PAGE3,
             "第四頁：部位監控與量化風控",
             "第五頁：總經週期與配置",
             "第六頁：下單輔助系統",
@@ -563,7 +566,7 @@ if page == "第一頁：總經與風險鬧鐘":
                     st.info("✅ 目前無重大宏觀警訊，市場流動性與波動率維持健康 (Risk-On)。")
                 if risk_summary["missing_count"]:
                     st.warning("資料缺漏：" + "、".join(risk_summary["missing_names"]) + "。這些項目不計分，也不算「沒觸發」。")
-            st.dataframe(pd.DataFrame(macro_risk.table_rows(risk_items)), use_container_width=True, hide_index=True)
+            macro_risk.render_score_table(st, risk_items)
             st.caption(
                 f"燈號：0–{macro_risk.GREEN_MAX} 分 🟢、{macro_risk.GREEN_MAX + 1}–{macro_risk.YELLOW_MAX} 分 🟡、"
                 f"{macro_risk.YELLOW_MAX + 1} 分以上 🔴（滿分 {macro_risk.MAX_SCORE}）。核心指標缺漏且分數落在綠燈區時顯示 ⚪ 資料不足。"
@@ -765,12 +768,12 @@ elif page == "第二頁：板塊與主題資金輪動":
             st.error(f"資料抓取失敗: {e}")
 
 # ==========================================
-# 第三頁：重大行事曆與會展 (已串接 FMP API)
+# 第三頁：持倉、觀察清單與總經行事曆
 # ==========================================
-elif page == "第三頁：重大行事曆與會展":
+elif page == PAGE3:
     c1, c2 = st.columns([0.85, 0.15])
     with c1:
-        st.title("📅 第三頁：持倉與觀察清單行事曆")
+        st.title(f"📅 {PAGE3}")
     with c2:
         st.write("")
         if st.button("🔄 重新整理", key="refresh_p3", use_container_width=True):

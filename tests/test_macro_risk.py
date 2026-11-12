@@ -273,6 +273,23 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(len(rows), 5)
         self.assertEqual(set(rows[0]), {"指標", "數值", "資料日期", "門檻", "得分", "來源", "狀態"})
 
+    def test_vix_status_keeps_the_full_sentence(self):
+        items, _ = m.evaluate(today_like_loaders(), NOW)
+        vix = next(row for row in m.table_rows(items) if row["指標"] == "VIX 恐慌指數")
+        self.assertIn("取前一交易日收盤", vix["狀態"])
+        self.assertTrue(vix["狀態"].endswith("較大者"))
+
+        class Sink:
+            def table(self, data, **kwargs):
+                self.data = list(data)
+                self.kwargs = kwargs
+
+        sink = Sink()
+        m.render_score_table(sink, items)
+        shown = next(row for row in sink.data if row["指標"] == "VIX 恐慌指數")
+        self.assertEqual(shown["狀態"], vix["狀態"])
+        self.assertTrue(sink.kwargs.get("hide_index"))
+
 
 class DashboardWiringTests(unittest.TestCase):
     def test_dashboard_no_silent_defaults(self):
@@ -280,7 +297,7 @@ class DashboardWiringTests(unittest.TestCase):
         self.assertNotIn("/ 10.0 if tnx_df", text)
         self.assertNotIn("else 15.0", text)
         self.assertIn("load_macro_risk()", text)
-        self.assertIn("macro_risk.table_rows", text)
+        self.assertIn("macro_risk.render_score_table", text)
         self.assertIn("clear_macro_risk_caches()", text)
 
 

@@ -398,6 +398,11 @@ def table_rows(indicators: list[dict]) -> list[dict]:
     ]
 
 
+def render_score_table(st, indicators: list[dict]) -> None:
+    """靜態表會把長狀態換行。互動式表格會把「取前一交易日收盤」這類句子截掉。"""
+    st.table(table_rows(indicators), hide_index=True)
+
+
 # ---------------------------------------------------------------- 連網抓取（失敗丟例外）
 def fetch_history(ticker: str, period: str) -> pd.DataFrame:
     import yfinance as yf

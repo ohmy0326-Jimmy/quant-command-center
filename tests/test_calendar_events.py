@@ -279,7 +279,7 @@ class ImpactTests(unittest.TestCase):
 class PageTests(unittest.TestCase):
     def test_dashboard_drops_hardcoded_calendar(self):
         text = (ROOT / "Dashboard.py").read_text(encoding="utf-8")
-        start = text.index('elif page == "第三頁：重大行事曆與會展"')
+        start = text.index("elif page == PAGE3")
         end = text.index('elif page == "第四頁：部位監控與量化風控"')
         page = text[start:end]
         self.assertNotIn("2026-10-29", page)
