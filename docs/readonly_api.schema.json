@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.8.0",
+  "schema_version": "1.9.0",
   "header": "X-API-Key",
   "models": {
     "health": {
@@ -7,7 +7,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.8.0"
+            "1.9.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -100,6 +100,213 @@
             "total"
           ],
           "title": "BetaLeverageResponse",
+          "type": "object"
+        },
+        "CreditRowResponse": {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "series_id": {
+              "default": "",
+              "title": "Series Id",
+              "type": "string"
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Value"
+            },
+            "unit": {
+              "default": "",
+              "title": "Unit",
+              "type": "string"
+            },
+            "date": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Date"
+            },
+            "change": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Change"
+            },
+            "change_label": {
+              "default": "",
+              "title": "Change Label",
+              "type": "string"
+            },
+            "light": {
+              "enum": [
+                "green",
+                "yellow",
+                "red",
+                "missing",
+                "stale",
+                "unavailable"
+              ],
+              "title": "Light",
+              "type": "string"
+            },
+            "light_text": {
+              "title": "Light Text",
+              "type": "string"
+            },
+            "reason": {
+              "default": "",
+              "title": "Reason",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "light",
+            "light_text"
+          ],
+          "title": "CreditRowResponse",
+          "type": "object"
+        },
+        "CreditTransmissionResponse": {
+          "additionalProperties": false,
+          "description": "1.9.0。與第一頁信用傳導面板同一套 THRESHOLDS，不計入牛熊總分。",
+          "properties": {
+            "stage": {
+              "description": "階段句。只有放款量與信用價格同時惡化才是傳導確認。",
+              "title": "Stage",
+              "type": "string"
+            },
+            "stage_code": {
+              "enum": [
+                "equity_only",
+                "price_first",
+                "confirmed",
+                "volume_only",
+                "insufficient"
+              ],
+              "title": "Stage Code",
+              "type": "string"
+            },
+            "lending_light": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "green",
+                    "yellow",
+                    "red"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "TOTLL 與 BUSLOANS 的較差燈。要整體綠燈時兩條都得是綠。",
+              "title": "Lending Light"
+            },
+            "price_light": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "green",
+                    "yellow",
+                    "red"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "高收益 OAS、投資級 OAS、NFCI 的較差燈。STLFSI4 有黃或紅時會把價格燈拉差。",
+              "title": "Price Light"
+            },
+            "standards_light": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "green",
+                    "yellow",
+                    "red"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "SLOOS 放款意願。缺失或過舊是 null，不算收緊。",
+              "title": "Standards Light"
+            },
+            "disclaimer": {
+              "title": "Disclaimer",
+              "type": "string"
+            },
+            "rule_note": {
+              "description": "門檻與快速減速的定義，與畫面上的註解相同。",
+              "title": "Rule Note",
+              "type": "string"
+            },
+            "cds": {
+              "description": "固定說明沒有免費 CDS，不帶數字。",
+              "title": "Cds",
+              "type": "string"
+            },
+            "thresholds": {
+              "additionalProperties": true,
+              "description": "credit_transmission.THRESHOLDS。燈號只讀這張表。",
+              "title": "Thresholds",
+              "type": "object"
+            },
+            "rows": {
+              "items": {
+                "$ref": "#/$defs/CreditRowResponse"
+              },
+              "title": "Rows",
+              "type": "array"
+            }
+          },
+          "required": [
+            "stage",
+            "stage_code",
+            "lending_light",
+            "price_light",
+            "standards_light",
+            "disclaimer",
+            "rule_note",
+            "cds",
+            "thresholds",
+            "rows"
+          ],
+          "title": "CreditTransmissionResponse",
           "type": "object"
         },
         "PositionResponse": {
@@ -466,7 +673,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.8.0"
+            "1.9.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -658,6 +865,10 @@
           "description": "1.7.0 新增。依第五頁多空狀態的目標 Beta 區間。區間是程式預設。狀態未知時 tw 與 us 是 null。避險只建議同市場工具。",
           "title": "Beta Targets",
           "type": "object"
+        },
+        "credit_transmission": {
+          "$ref": "#/$defs/CreditTransmissionResponse",
+          "description": "1.9.0 新增。信用傳導。各指標的值、日期、較前期變化、燈號，以及階段。門檻與第一頁相同。不計入部位或牛熊分數。"
         }
       },
       "required": [
@@ -679,7 +890,8 @@
         "us_exposure",
         "beta_leverage",
         "positions",
-        "yuanta_futures"
+        "yuanta_futures",
+        "credit_transmission"
       ],
       "title": "PortfolioResponse",
       "type": "object"
@@ -689,7 +901,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.8.0"
+            "1.9.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -736,7 +948,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.8.0"
+            "1.9.0"
           ],
           "title": "Schema Version",
           "type": "string"

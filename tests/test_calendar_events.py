@@ -571,6 +571,7 @@ calendar_page.render_calendar(
     gemini_key=st.session_state.gkey,
     complete_analysis=complete,
     send=send,
+    today=date(2026, 11, 12),
 )
 """
 

@@ -577,6 +577,12 @@ if page == "第一頁：總經與風險鬧鐘":
             )
             page1_board = load_page1_board(risk_items)
             page1_lights.render_page1_summary(st, page1_board, risk_summary)
+            from credit_transmission import load_board, render_credit_panel
+
+            render_credit_panel(
+                st,
+                load_board(datetime.now(macro_risk.TPE).date(), fetch=cached_fred_observations),
+            )
 
             st.markdown("---")
             
