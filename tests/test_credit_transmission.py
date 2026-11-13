@@ -71,7 +71,7 @@ class LendingTests(unittest.TestCase):
         self.assertGreater(slowing["value"] - 2.0, rule["deceleration_gap"])
         self.assertEqual(slowing["light"], "yellow")
 
-    def test_monthly_busloans_uses_twelve_and_three_not_fifty_two_weeks(self):
+    def test_monthly_fallback_uses_twelve_and_three_not_fifty_two_weeks(self):
         values = _levels(16, 110.0, {12: 100.0, 3: 110.0 / (1.10 ** (3 / 12))})
         points = []
         cursor = date(2025, 6, 1)
@@ -82,13 +82,17 @@ class LendingTests(unittest.TestCase):
             month = (month - 1) % 12 + 1
             cursor = date(year, month, 1)
         self.assertEqual(points[-1][0], date(2026, 9, 1))
-        row = credit.score_lending(credit.SERIES[2], points, TODAY)
+        spec = {"id": "totci", "name": "工商放款（BUSLOANS，月資料備援）", "series_id": "BUSLOANS"}
+        row = credit.score_lending(spec, points, TODAY, frequency="month")
         self.assertEqual(row["light"], "stale")
         self.assertIn("月資料", row["change_text"] + row["reason"])
         self.assertAlmostEqual(row["value"], 10.0, places=4)
-        fresh = credit.score_lending(credit.SERIES[2], points, points[-1][0] + timedelta(days=10))
+        fresh = credit.score_lending(spec, points, points[-1][0] + timedelta(days=10), frequency="month")
         self.assertEqual(fresh["light"], "green")
         self.assertIn("3個月年化", fresh["value_text"])
+        self.assertEqual(credit.THRESHOLDS["lending"]["totci_series_id"], "TOTCI")
+        self.assertEqual(credit.THRESHOLDS["lending"]["week_stale_days"], 21)
+        self.assertEqual(credit.THRESHOLDS["lending"]["week_yoy_steps"], 52)
 
 
 class PriceTests(unittest.TestCase):
@@ -185,17 +189,18 @@ class StageTests(unittest.TestCase):
         series = {
             "drtscilm": [(TODAY, -5.0)],
             "totll": _weekly(_levels(54, 110.0, {52: 100.0, 13: 110.0 / (1.08 ** (13 / 52))})),
-            "busloans": None,
+            "totci": None,
             "hy_oas": _daily([2.0] * 22),
             "ig_oas": _daily([0.8] * 22),
             "nfci": _weekly([-0.4, -0.4]),
             "stlfsi4": None,
         }
-        board = credit.build_board(series, {"busloans": "FRED 公開 CSV 連不上"}, TODAY)
+        board = credit.build_board(series, {"totci": "FRED 公開 CSV 連不上"}, TODAY)
         self.assertIsNone(board["lending_light"])
         self.assertEqual(board["price_light"], "green")
         self.assertEqual(board["stage"], credit.STAGE_UNKNOWN)
-        series["busloans"] = _weekly(_levels(54, 108.0, {52: 100.0, 13: 108.0 / (1.06 ** (13 / 52))}))
+        self.assertEqual(next(row["name"] for row in board["rows"] if row["id"] == "totci"), "工商放款（TOTCI）")
+        series["totci"] = _weekly(_levels(54, 108.0, {52: 100.0, 13: 108.0 / (1.06 ** (13 / 52))}))
         series["stlfsi4"] = _weekly([0.4, 0.4])
         tight = credit.build_board(series, {}, TODAY)
         self.assertEqual(tight["price_light"], "red")
@@ -207,6 +212,70 @@ class StageTests(unittest.TestCase):
         source = open(credit.__file__, encoding="utf-8").read()
         self.assertNotIn("score_hy_spread(", source)
         self.assertIn("fetch_fred_observations", source)
+
+    def test_totci_failure_falls_back_to_labeled_monthly_busloans(self):
+        values = _levels(16, 110.0, {12: 100.0, 3: 110.0 / (1.10 ** (3 / 12))})
+        points = []
+        cursor = date(2025, 6, 1)
+        for value in values:
+            points.append((cursor, float(value)))
+            month = cursor.month + 1
+            year = cursor.year + (month - 1) // 12
+            month = (month - 1) % 12 + 1
+            cursor = date(year, month, 1)
+        calls = []
+
+        def fetch(series_id):
+            calls.append(series_id)
+            if series_id == "TOTCI":
+                raise RuntimeError("totci down")
+            if series_id == "BUSLOANS":
+                return points
+            raise AssertionError(series_id)
+
+        data, reason, fallback = credit.resolve_totci(fetch)
+        self.assertEqual(calls, ["TOTCI", "BUSLOANS"])
+        self.assertEqual(fallback, "BUSLOANS")
+        self.assertEqual(reason, "")
+        self.assertEqual(data[-1][0], date(2026, 9, 1))
+        board = credit.build_board(
+            {"totci": data, "totll": _weekly(_levels(54, 108.0, {52: 100.0, 13: 108.0 / (1.06 ** (13 / 52))}))},
+            {},
+            TODAY,
+            fallbacks={"totci": fallback},
+        )
+        row = next(item for item in board["rows"] if item["id"] == "totci")
+        self.assertEqual(row["series_id"], "BUSLOANS")
+        self.assertIn("月資料", row["name"])
+        self.assertEqual(row["light"], "stale")
+
+        calls.clear()
+
+        def weekly_only(series_id):
+            calls.append(series_id)
+            if series_id == "BUSLOANS":
+                raise AssertionError("TOTCI 成功時不該抓 BUSLOANS")
+            if series_id == "TOTCI":
+                return _weekly(_levels(54, 108.0, {52: 100.0, 13: 108.0 / (1.06 ** (13 / 52))}))
+            if series_id in {"BAMLH0A0HYM2", "BAMLC0A0CM"}:
+                return _daily([2.0] * 22)
+            if series_id == "DRTSCILM":
+                return [(TODAY, -5.0)]
+            if series_id == "NFCI":
+                return _weekly([-0.5, -0.5, -0.5, -0.5])
+            if series_id == "STLFSI4":
+                return _weekly([-0.4, -0.4, -0.4, -0.4])
+            if series_id == "TOTLL":
+                return _weekly(_levels(54, 108.0, {52: 100.0, 13: 108.0 / (1.06 ** (13 / 52))}))
+            raise AssertionError(series_id)
+
+        live = credit.load_board(TODAY, fetch=weekly_only)
+        self.assertNotIn("BUSLOANS", calls)
+        totci = next(item for item in live["rows"] if item["id"] == "totci")
+        self.assertEqual(totci["series_id"], "TOTCI")
+        self.assertEqual(totci["name"], "工商放款（TOTCI）")
+        self.assertEqual(totci["light"], "green")
+        self.assertEqual(live["lending_light"], "green")
 
 
 class CacheTests(unittest.TestCase):

@@ -30,6 +30,9 @@ THRESHOLDS = {
         "month_yoy_steps": 12,
         "month_fast_steps": 3,
         "month_stale_days": 45,
+        "totll_series_id": "TOTLL",
+        "totci_series_id": "TOTCI",
+        "totci_fallback_series_id": "BUSLOANS",
     },
     "hy_oas": {
         "series_id": "BAMLH0A0HYM2",
@@ -64,7 +67,7 @@ THRESHOLDS = {
 SERIES = (
     {"id": "drtscilm", "name": "銀行放款意願（SLOOS 大中型 C&I）", "kind": "standards"},
     {"id": "totll", "name": "銀行放款量 TOTLL", "kind": "lending", "series_id": "TOTLL"},
-    {"id": "busloans", "name": "銀行放款量 BUSLOANS", "kind": "lending", "series_id": "BUSLOANS"},
+    {"id": "totci", "name": "工商放款（TOTCI）", "kind": "lending", "series_id": "TOTCI"},
     {"id": "hy_oas", "name": "高收益債 OAS", "kind": "price"},
     {"id": "ig_oas", "name": "投資級債 OAS", "kind": "price"},
     {"id": "nfci", "name": "金融條件 NFCI", "kind": "price"},
@@ -75,10 +78,10 @@ CDS_TEXT = "CDS：無免費可靠來源，以利差代替"
 DISCLAIMER = "只觀察。不計入牛熊總分，不進 Macro_Score，不推播 Telegram。總經風險要放款量與信用價格同時惡化才算傳導確認。"
 RULE_NOTE = (
     "放款意願：綠 <0、黃 0–20、紅 >20，或單季跳升 ≥15 個百分點也是紅。超過 150 天算過舊。"
-    "放款量：綠為年增 >3%；黃為年增 0–3%，或快速減速（13 週年化比年增率低 3 個百分點以上；"
-    "FRED 上若是月資料，改看 3 個月年化，規則相同）；紅為年增 <0%。"
-    "週資料超過 21 天、月資料超過 45 天算過舊。兩條放款量各自給燈，整體取較差者；"
-    "其中一條過舊或缺失時，不把另一條綠燈當成放款量整體還健康。"
+    "放款量：綠為年增 >3%；黃為年增 0–3%，或快速減速（13 週年化比年增率低 3 個百分點以上）；紅為年增 <0%。"
+    "TOTLL 與工商放款 TOTCI 都是 H.8 週資料，年增看 52 週，過舊門檻 21 天。"
+    "TOTCI 抓不到時才用 BUSLOANS，那一列標明月資料，年增看 12 期、快速減速看 3 個月年化，超過 45 天算過舊。"
+    "兩條放款量各自給燈，整體取較差者；其中一條過舊或缺失時，不把另一條綠燈當成放款量整體還健康。"
     "高收益 OAS 換成基點：綠 <350、黃 350–400、紅 >400，或約 21 個交易日上升 ≥100bp 也是紅。"
     "投資級 OAS：綠 <120、黃 120–150、紅 >150。日資料超過 10 天算過舊。"
     "NFCI 是週資料：紅 >0、黃 -0.2–0、其餘綠，超過 21 天算過舊。"
@@ -242,9 +245,9 @@ def _growth(latest: float, past: float, power: float) -> float | None:
     return (latest / past) ** power - 1.0
 
 
-def score_lending(spec: dict, observations, today: date, reason: str = "") -> dict:
+def score_lending(spec: dict, observations, today: date, reason: str = "", frequency: str | None = None) -> dict:
     rule = THRESHOLDS["lending"]
-    freq = infer_frequency(observations or [])
+    freq = frequency or infer_frequency(observations or [])
     if freq == "month":
         yoy_steps = rule["month_yoy_steps"]
         fast_steps = rule["month_fast_steps"]
@@ -434,14 +437,48 @@ def _cds_row() -> dict:
     }
 
 
-def build_board(series: dict | None, reasons: dict | None, today: date) -> dict:
+def _totci_row(observations, today: date, reason: str, fallback: str | None) -> dict:
+    spec = next(item for item in SERIES if item["id"] == "totci")
+    if fallback == "BUSLOANS":
+        spec = {
+            **spec,
+            "name": "工商放款（BUSLOANS，月資料備援）",
+            "series_id": THRESHOLDS["lending"]["totci_fallback_series_id"],
+        }
+        return score_lending(spec, observations, today, reason, frequency="month")
+    return score_lending(spec, observations, today, reason)
+
+
+def resolve_totci(fetch) -> tuple[list | None, str, str | None]:
+    """先抓週資料 TOTCI。失敗才改抓月資料 BUSLOANS。回傳 (觀測, 原因, 備援代號)。"""
+    rule = THRESHOLDS["lending"]
+    try:
+        data = fetch(rule["totci_series_id"])
+    except Exception as exc:
+        data = None
+        totci_reason = public_reason(exc)
+    else:
+        if data:
+            return data, "", None
+        totci_reason = "TOTCI 沒有有效觀測"
+    try:
+        backup = fetch(rule["totci_fallback_series_id"])
+    except Exception as exc:
+        return None, f"TOTCI：{totci_reason}。月資料備援 BUSLOANS：{public_reason(exc)}", None
+    if not backup:
+        return None, f"TOTCI：{totci_reason}。月資料備援 BUSLOANS：沒有有效觀測", None
+    return backup, "", "BUSLOANS"
+
+
+def build_board(series: dict | None, reasons: dict | None, today: date, fallbacks: dict | None = None) -> dict:
     """series[id] 是由舊到新的 (日期, 數值)，或 None。reasons 是抓取失敗的原因，不含金鑰。"""
     series = series or {}
     reasons = reasons or {}
+    fallbacks = fallbacks or {}
     rows = [
         score_drtscilm(series.get("drtscilm"), today, reasons.get("drtscilm", "")),
         score_lending(SERIES[1], series.get("totll"), today, reasons.get("totll", "")),
-        score_lending(SERIES[2], series.get("busloans"), today, reasons.get("busloans", "")),
+        _totci_row(series.get("totci"), today, reasons.get("totci", ""), (fallbacks or {}).get("totci")),
         score_oas("hy_oas", series.get("hy_oas"), today, reasons.get("hy_oas", "")),
         score_oas("ig_oas", series.get("ig_oas"), today, reasons.get("ig_oas", "")),
         score_index("nfci", series.get("nfci"), today, reasons.get("nfci", "")),
@@ -450,7 +487,7 @@ def build_board(series: dict | None, reasons: dict | None, today: date) -> dict:
     ]
     by_id = {row["id"]: row for row in rows}
     standards = _usable(by_id["drtscilm"]["light"])
-    volume = worst_light([by_id["totll"]["light"], by_id["busloans"]["light"]], require_all=True)
+    volume = worst_light([by_id["totll"]["light"], by_id["totci"]["light"]], require_all=True)
     price_required = [by_id["hy_oas"]["light"], by_id["ig_oas"]["light"], by_id["nfci"]["light"]]
     price = worst_light(price_required, require_all=True)
     optional = _usable(by_id["stlfsi4"]["light"])
@@ -501,23 +538,27 @@ def absent_board() -> dict:
 
 
 def load_board(today: date, fetch=None) -> dict:
-    """逐條抓。單條失敗記原因，不把別條的舊值填過來。"""
+    """逐條抓。單條失敗記原因，不把別條的舊值填過來。TOTCI 失敗才改用 BUSLOANS。"""
     fetch = fetch or default_fetch
     series = {}
     reasons = {}
     for spec in SERIES:
-        if spec["id"] in {"totll", "busloans"}:
-            series_id = spec["series_id"]
-            key = spec["id"]
-        else:
-            series_id = THRESHOLDS[spec["id"]]["series_id"]
-            key = spec["id"]
+        if spec["id"] == "totci":
+            continue
+        series_id = spec.get("series_id") or THRESHOLDS[spec["id"]]["series_id"]
         try:
-            series[key] = fetch(series_id)
+            series[spec["id"]] = fetch(series_id)
         except Exception as exc:
-            series[key] = None
-            reasons[key] = public_reason(exc)
-    return build_board(series, reasons, today)
+            series[spec["id"]] = None
+            reasons[spec["id"]] = public_reason(exc)
+    totci, totci_reason, fallback = resolve_totci(fetch)
+    series["totci"] = totci
+    fallbacks = {}
+    if fallback:
+        fallbacks["totci"] = fallback
+    elif totci_reason:
+        reasons["totci"] = totci_reason
+    return build_board(series, reasons, today, fallbacks)
 
 
 def render_credit_panel(st, board: dict) -> None:

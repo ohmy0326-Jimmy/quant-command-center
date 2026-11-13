@@ -229,7 +229,7 @@
                   "type": "null"
                 }
               ],
-              "description": "TOTLL 與 BUSLOANS 的較差燈。要整體綠燈時兩條都得是綠。",
+              "description": "TOTLL 與工商放款 TOTCI（皆為週資料，52 週年增、13 週年化、21 天過舊）的較差燈。要整體綠燈時兩條都得是綠。TOTCI 抓不到才改用 BUSLOANS，該列標明月資料。",
               "title": "Lending Light"
             },
             "price_light": {

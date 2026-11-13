@@ -105,7 +105,7 @@ class CreditTransmissionResponse(BaseModel):
 
     stage: str = Field(description="階段句。只有放款量與信用價格同時惡化才是傳導確認。")
     stage_code: Literal["equity_only", "price_first", "confirmed", "volume_only", "insufficient"]
-    lending_light: Literal["green", "yellow", "red"] | None = Field(description="TOTLL 與 BUSLOANS 的較差燈。要整體綠燈時兩條都得是綠。")
+    lending_light: Literal["green", "yellow", "red"] | None = Field(description="TOTLL 與工商放款 TOTCI（皆為週資料，52 週年增、13 週年化、21 天過舊）的較差燈。要整體綠燈時兩條都得是綠。TOTCI 抓不到才改用 BUSLOANS，該列標明月資料。")
     price_light: Literal["green", "yellow", "red"] | None = Field(description="高收益 OAS、投資級 OAS、NFCI 的較差燈。STLFSI4 有黃或紅時會把價格燈拉差。")
     standards_light: Literal["green", "yellow", "red"] | None = Field(description="SLOOS 放款意願。缺失或過舊是 null，不算收緊。")
     disclaimer: str
