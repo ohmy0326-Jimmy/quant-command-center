@@ -159,25 +159,27 @@ class PriceTests(unittest.TestCase):
 class StageTests(unittest.TestCase):
     def test_combinations(self):
         cases = [
-            ("green", "green", "green", credit.STAGE_EQUITY, "equity_only"),
-            ("green", "green", None, credit.STAGE_EQUITY, "equity_only"),
-            ("green", "green", "stale", credit.STAGE_EQUITY, "equity_only"),
-            ("green", "yellow", "green", credit.STAGE_PRICE, "price_first"),
-            ("green", "red", None, credit.STAGE_PRICE, "price_first"),
-            ("green", "green", "red", credit.STAGE_PRICE, "price_first"),
-            ("green", "green", "yellow", credit.STAGE_PRICE, "price_first"),
-            ("yellow", "yellow", "green", credit.STAGE_CONFIRMED, "confirmed"),
-            ("red", "red", None, credit.STAGE_CONFIRMED, "confirmed"),
-            ("red", "yellow", "green", credit.STAGE_CONFIRMED, "confirmed"),
-            ("red", "green", "red", credit.STAGE_VOLUME, "volume_only"),
-            ("yellow", "green", None, credit.STAGE_VOLUME, "volume_only"),
-            (None, "red", "red", credit.STAGE_UNKNOWN, "insufficient"),
-            ("green", None, "green", credit.STAGE_UNKNOWN, "insufficient"),
-            (None, None, None, credit.STAGE_UNKNOWN, "insufficient"),
+            ("green", "green", "green", credit.STAGE_EQUITY, "equity_only", None),
+            ("green", "green", None, credit.STAGE_EQUITY, "equity_only", None),
+            ("green", "green", "stale", credit.STAGE_EQUITY, "equity_only", None),
+            ("green", "yellow", "green", credit.STAGE_PRICE, "price_first", "price"),
+            ("green", "red", None, credit.STAGE_PRICE, "price_first", "price"),
+            ("green", "green", "red", credit.STAGE_STANDARDS, "price_first", "standards"),
+            ("green", "green", "yellow", credit.STAGE_STANDARDS, "price_first", "standards"),
+            ("green", "yellow", "red", credit.STAGE_BOTH, "price_first", "both"),
+            ("green", "red", "yellow", credit.STAGE_BOTH, "price_first", "both"),
+            ("yellow", "yellow", "green", credit.STAGE_CONFIRMED, "confirmed", None),
+            ("red", "red", None, credit.STAGE_CONFIRMED, "confirmed", None),
+            ("red", "yellow", "green", credit.STAGE_CONFIRMED, "confirmed", None),
+            ("red", "green", "red", credit.STAGE_VOLUME, "volume_only", None),
+            ("yellow", "green", None, credit.STAGE_VOLUME, "volume_only", None),
+            (None, "red", "red", credit.STAGE_UNKNOWN, "insufficient", None),
+            ("green", None, "green", credit.STAGE_UNKNOWN, "insufficient", None),
+            (None, None, None, credit.STAGE_UNKNOWN, "insufficient", None),
         ]
-        for volume, price, standards, text, code in cases:
+        for volume, price, standards, text, code, trigger in cases:
             with self.case(f"{volume}-{price}-{standards}"):
-                self.assertEqual(credit.judge_stage(volume, price, standards), (text, code))
+                self.assertEqual(credit.judge_stage(volume, price, standards), (text, code, trigger))
 
     def case(self, name):
         return self.subTest(name)

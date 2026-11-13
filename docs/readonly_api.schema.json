@@ -215,6 +215,24 @@
               "title": "Stage Code",
               "type": "string"
             },
+            "stage_trigger": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "price",
+                    "standards",
+                    "both"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "1.9.0。stage_code 為 price_first 時：price＝信用價格惡化；standards＝只有放款意願收緊；both＝價格與放款意願一起轉緊。其餘階段是 null。",
+              "title": "Stage Trigger"
+            },
             "lending_light": {
               "anyOf": [
                 {

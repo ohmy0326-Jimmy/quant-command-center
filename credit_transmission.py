@@ -91,6 +91,8 @@ RULE_NOTE = (
 
 STAGE_EQUITY = "只有股市修正（信用穩）"
 STAGE_PRICE = "信用開始收緊（價格先動）"
+STAGE_STANDARDS = "信用開始收緊（銀行放款意願轉緊，價格與放款量仍穩）"
+STAGE_BOTH = "價格與放款意願同步轉緊"
 STAGE_CONFIRMED = "傳導確認（放款量＋信用價格同步惡化）"
 STAGE_VOLUME = "放款量轉弱，信用價格尚未同步惡化"
 STAGE_UNKNOWN = "資料不足，無法判定傳導"
@@ -399,24 +401,30 @@ def worst_light(lights: list[str | None], *, require_all: bool) -> str | None:
     return None
 
 
-def judge_stage(volume: str | None, price: str | None, standards: str | None) -> tuple[str, str]:
-    """放款量、信用價格、放款意願的燈號 → (階段句, stage_code)。
+def judge_stage(volume: str | None, price: str | None, standards: str | None) -> tuple[str, str, str | None]:
+    """放款量、信用價格、放款意願的燈號 → (階段句, stage_code, stage_trigger)。
 
     volume / price 是 green、yellow、red 或 None（無法判斷）。
     standards 黃或紅算收緊；缺失、過舊、綠都不算收緊。
+    stage_code 在價格或放款意願收緊、放款量未惡化時都是 price_first。
+    stage_trigger 只在這一級有值：price、standards 或 both。
     """
     if volume is None or price is None:
-        return STAGE_UNKNOWN, "insufficient"
+        return STAGE_UNKNOWN, "insufficient", None
     volume_bad = volume in {"yellow", "red"}
     price_bad = price in {"yellow", "red"}
     standards_bad = standards in {"yellow", "red"}
     if volume_bad and price_bad:
-        return STAGE_CONFIRMED, "confirmed"
+        return STAGE_CONFIRMED, "confirmed", None
     if (price_bad or standards_bad) and not volume_bad:
-        return STAGE_PRICE, "price_first"
+        if price_bad and standards_bad:
+            return STAGE_BOTH, "price_first", "both"
+        if standards_bad:
+            return STAGE_STANDARDS, "price_first", "standards"
+        return STAGE_PRICE, "price_first", "price"
     if volume_bad and not price_bad:
-        return STAGE_VOLUME, "volume_only"
-    return STAGE_EQUITY, "equity_only"
+        return STAGE_VOLUME, "volume_only", None
+    return STAGE_EQUITY, "equity_only", None
 
 
 def _cds_row() -> dict:
@@ -493,7 +501,7 @@ def build_board(series: dict | None, reasons: dict | None, today: date, fallback
     optional = _usable(by_id["stlfsi4"]["light"])
     if optional in {"yellow", "red"}:
         price = worst_light([price, optional], require_all=False) if price else optional
-    stage, code = judge_stage(volume, price, standards)
+    stage, code, trigger = judge_stage(volume, price, standards)
     table = []
     for row in rows:
         light = row["light_text"]
@@ -511,6 +519,7 @@ def build_board(series: dict | None, reasons: dict | None, today: date, fallback
     return {
         "stage": stage,
         "stage_code": code,
+        "stage_trigger": trigger,
         "lending_light": volume,
         "price_light": price,
         "standards_light": standards,
@@ -526,7 +535,7 @@ def build_board(series: dict | None, reasons: dict | None, today: date, fallback
 def api_view(board: dict) -> dict:
     """給 /v1/portfolio。不含畫面用的 table_rows。"""
     keys = (
-        "stage", "stage_code", "lending_light", "price_light", "standards_light",
+        "stage", "stage_code", "stage_trigger", "lending_light", "price_light", "standards_light",
         "disclaimer", "rule_note", "cds", "thresholds", "rows",
     )
     return {key: board[key] for key in keys}
