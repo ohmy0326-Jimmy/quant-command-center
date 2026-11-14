@@ -1,0 +1,4 @@
+date,time_taipei,title,market,scenario_card,source,note
+2026-11-30,收盤,MSCI 指數檢討生效（11/30 收盤）,BOTH,S18,使用者提供,使用者提供的時點是 11/30 收盤。official_dates 的生效日是 2026-12-01，官方列另保留並同樣標 S18。
+2026-11-18,05:20,NVIDIA 財報,US,,使用者提供,使用者提供的台北時間。尚未用公司新聞稿核對。
+,,FOMC 會議紀要,US,,使用者提供,official_dates 沒有會議紀要日期，不自編。待確認。
