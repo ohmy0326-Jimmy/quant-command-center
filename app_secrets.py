@@ -2,7 +2,11 @@
 
 
 def read_secret(default="", *path):
-    import streamlit as st
+    try:
+        import streamlit as st
+    except ModuleNotFoundError:
+        # API 映像沒有 Streamlit。沒有 secrets.toml 就用環境變數，不要把缺套件變成抓取失敗。
+        return default
 
     try:
         node = st.secrets
