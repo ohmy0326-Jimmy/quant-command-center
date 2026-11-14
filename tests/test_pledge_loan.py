@@ -109,7 +109,7 @@ class PledgeNavTests(unittest.TestCase):
         )
         payload = portfolio_payload(_valued, metrics, usdtwd=32.0, as_of=AS_OF)
         self.assertEqual(payload["schema_version"], SCHEMA_VERSION)
-        self.assertEqual(SCHEMA_VERSION, "1.17.0")
+        self.assertEqual(SCHEMA_VERSION, "1.17.1")
         self.assertEqual(payload["margin_financing"]["label"], "無融資")
         self.assertAlmostEqual(payload["pledge"]["maintenance_pct"], 200.0)
         self.assertAlmostEqual(payload["pledge"]["drop_to_call_pct"], 35.0)

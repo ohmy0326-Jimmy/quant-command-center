@@ -14,7 +14,7 @@ import pandas as pd
 
 from cb_holdings import product_kind
 
-SCHEMA_VERSION = "1.17.0"
+SCHEMA_VERSION = "1.17.1"
 TAIPEI = ZoneInfo("Asia/Taipei")
 
 

@@ -412,6 +412,11 @@ class BearBackfillResponse(BaseModel):
     status: Literal["written", "kept", "skipped", "failed"]
     sheet: str = "Bear_Warning_Daily"
     rows: int = 0
+    done: bool = False
+    filled_days: int = 0
+    remaining_days: int = 0
+    next_date: str | None = None
+    failures: list[str] = Field(default_factory=list)
     detail: str = ""
 
 

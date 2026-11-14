@@ -156,16 +156,23 @@ curl -fsS -X POST "${SERVICE_URL}/v1/nav-snapshot" \
 
 ## 熊市預警歷史回補
 
-`Bear_Warning_Daily` 要有大約 60 個交易日，三層燈才不會停在「遲滯資料不足」。每日 `POST /v1/nav-snapshot` 若發現條件歷史短於 60 個交易日，會在寫完淨值之後自動補這張表。補的是外資買賣超（BFI82U，外資及陸資不含外資自營商）、上市股票漲跌家數（MI_INDEX），以及用當天已經看得到的收盤與 FRED 重算的三層條件。高收益與殖利率晚一天、NFCI 晚五天才納入，不用當天還沒公布的數字。週末與沒有加權收盤的日子跳過。同一天重跑只填空白欄，不改 `NAV_Snapshots`，也不碰 `Daily_NAV`。
+`Bear_Warning_Daily` 要有大約 60 個交易日，三層燈才不會停在「遲滯資料不足」。補的是外資買賣超（BFI82U，外資及陸資不含外資自營商）、上市股票漲跌家數（MI_INDEX），以及用當天已經看得到的收盤與 FRED 重算的三層條件。高收益與殖利率晚一天、NFCI 晚五天才納入。週末與沒有加權收盤的日子跳過。同一天重跑只填空白欄，不改 `NAV_Snapshots`，也不碰 `Daily_NAV`。淨值快照先寫淨值，之後最多再花 8 秒補一天；這段失敗或逾時都不會讓淨值那次請求失敗。六十天要靠下面的回補端點分批做完。
 
-不想等到 15:00，可以在 Cloud Shell 立刻補一次。金鑰用 `read -s` 讀進變數，不要打在指令上，也不要 echo：
+一次只補最多 8 個交易日、大約 60 秒內結束，每補完一天就寫入。回應有 `done`、`filled_days`、`remaining_days`、`next_date`。淨值快照本身只再花最多 8 秒補一天，補不完或失敗都不會讓淨值那次請求失敗。
+
+在 Cloud Shell 連續補到完成。金鑰從 Secret Manager 讀進變數，不要 echo：
 
 ```bash
-read -s -p "X-Snapshot-Key: " KEY
-echo
-curl -fsS -X POST "${SERVICE_URL}/v1/bear-warning-backfill" \
-  -H "X-Snapshot-Key: ${KEY}"
+KEY=$(gcloud secrets versions access latest --secret=qcc-snapshot-key --project=quant-dashboard-512010)
+URL="https://quant-command-center-api-365769204437.asia-east1.run.app"
+i=0
+max=15
+while [ "$i" -lt "$max" ]; do
+  i=$((i+1))
+  body=$(curl -fsS --max-time 90 -X POST "$URL/v1/bear-warning-backfill" -H "X-Snapshot-Key: ${KEY}") || { echo "第 ${i} 次連線失敗"; break; }
+  echo "$body"
+  python3 -c 'import json,sys; raise SystemExit(0 if json.loads(sys.argv[1]).get("done") else 1)' "$body" && break
+  sleep 2
+done
 unset KEY
 ```
-
-`SERVICE_URL` 是 API 服務網址。這支與淨值快照共用 `QCC_SNAPSHOT_KEY`。證交所請求之間會停約 0.35 秒。中途失敗可以再跑一次，已寫入的日期不會被清掉。

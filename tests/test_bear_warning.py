@@ -229,6 +229,56 @@ class RuleTests(unittest.TestCase):
         again = record_warning_rows(book, rows[:2], "t")
         self.assertEqual(again["status"], "written")
         self.assertEqual(len(book.worksheet("Bear_Warning_Daily").rows), 3)
+
+    def test_chunk_writes_each_day_before_the_next_fetch(self):
+        from datetime import date, timedelta
+
+        from bear_warning import backfill_warning_chunk
+        from tests.test_nav_snapshot import FakeBook
+
+        today = date(2026, 11, 13)
+        days = []
+        cursor = today
+        while len(days) < 4:
+            if cursor.weekday() < 5:
+                days.append(cursor)
+            cursor -= timedelta(days=1)
+        days = list(reversed(days))
+        prices = {"^TWII": [(day, 100.0 + index) for index, day in enumerate(days)]}
+        book = FakeBook({})
+        seen = {"n": 0}
+
+        def fetch(day):
+            seen["n"] += 1
+            if seen["n"] >= 2:
+                self.assertGreaterEqual(len(book.worksheet("Bear_Warning_Daily").rows), 2)
+            if seen["n"] == 3:
+                raise TimeoutError("slow")
+            return {"foreign_net": -1e9, "up": 100, "down": 80, "errors": []}
+
+        first = backfill_warning_chunk(
+            today, book, max_days=8, budget_seconds=60, pause=0,
+            prices=prices, hy=[], nfci=[], fetch_day=fetch,
+        )
+        self.assertEqual(first["rows"], 3)
+        self.assertFalse(first["done"])
+        self.assertEqual(first["remaining_days"], 1)
+        self.assertEqual(first["next_date"], days[2].isoformat())
+        self.assertTrue(any("TimeoutError" in item for item in first["failures"]))
+        ticks = {"n": 0}
+
+        def clock():
+            ticks["n"] += 1
+            return 0 if ticks["n"] < 3 else 100
+
+        second_book = FakeBook({})
+        second = backfill_warning_chunk(
+            today, second_book, max_days=8, budget_seconds=5, pause=0,
+            prices=prices, hy=[], nfci=[], fetch_day=lambda day: {"foreign_net": -1.0, "up": 1, "down": 1, "errors": []},
+            clock=clock,
+        )
+        self.assertLess(second["rows"], 4)
+        self.assertFalse(second["done"])
         from tests.test_nav_snapshot import FakeBook
         from bear_warning import record_warning_rows, warning_history_from_sheet
 
@@ -284,7 +334,7 @@ class RuleTests(unittest.TestCase):
             as_of=AS_OF,
             regime="偏多",
         )
-        self.assertEqual(payload["schema_version"], "1.17.0")
+        self.assertEqual(payload["schema_version"], "1.17.1")
         self.assertEqual(payload["bear_warning"]["caption"], CAPTION)
         self.assertEqual(payload["bear_warning"]["suggested_cap"], 1.8)
         self.assertEqual(payload["bear_warning"]["overall"], "unknown")

@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.17.0",
+  "schema_version": "1.17.1",
   "header": "X-API-Key",
   "models": {
     "health": {
@@ -7,7 +7,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.17.0"
+            "1.17.1"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -1864,7 +1864,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.17.0"
+            "1.17.1"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -2112,7 +2112,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.17.0"
+            "1.17.1"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -2159,7 +2159,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.17.0"
+            "1.17.1"
           ],
           "title": "Schema Version",
           "type": "string"
