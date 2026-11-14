@@ -2040,60 +2040,149 @@ def load_bear_warning(today: date, regime: str | None = None, credit_board: dict
     return assess(snapshot)
 
 
-def _paint_light(st, state: str, text: str) -> None:
-    """綠黃紅用 Streamlit 色塊。未知用灰底，不是藍底提示，也不會藏起來。"""
-    label = _STATE_TEXT.get(state, "未知")
-    line = f"{label}　{text}"
-    if state == "red":
-        st.error(line)
-    elif state == "yellow":
-        st.warning(line)
-    elif state == "green":
-        st.success(line)
+LAYER_ACTION = {
+    "leading": "上限降一級",
+    "internal": "再降一級＋避險",
+    "confirm": "只留核心與避險",
+}
+_DOT = {"red": "🔴", "yellow": "🟡", "green": "🟢", "unknown": "⚪"}
+
+
+def layer_light_counts(layer: dict | None) -> dict:
+    """已亮只數主訊號裡的紅燈。未知不算亮。"""
+    indicators = [
+        item for item in (layer or {}).get("indicators") or []
+        if item.get("role", "main") == "main"
+    ]
+    return {
+        "lit": sum(1 for item in indicators if item.get("state") == "red"),
+        "unknown": sum(1 for item in indicators if item.get("state") not in {"red", "yellow", "green"}),
+        "total": len(indicators),
+    }
+
+
+def layer_title(layer: dict | None) -> str:
+    """層級標題。已亮 N 是紅燈數，分母是這一層的主訊號數。"""
+    layer = layer or {}
+    counts = layer_light_counts(layer)
+    need = layer.get("need") or 1
+    name = layer.get("name") or "這一層"
+    title = f"{name}｜需≥{need} 亮｜已亮 {counts['lit']}/{counts['total']}"
+    action = LAYER_ACTION.get(str(layer.get("id") or ""))
+    if action:
+        title += f"｜動作：{action}"
+    if counts["unknown"]:
+        title += f"｜未知 {counts['unknown']}"
+    return title
+
+
+def hysteresis_status_line(hysteresis: dict | None) -> str:
+    """遲滯一句話。已確認亮燈時補上熄燈要幾天。"""
+    hyst = hysteresis or {}
+    raw = hyst.get("raw_on")
+    if raw is True:
+        today = "今日成立"
+    elif raw is False:
+        today = "今日未成立"
     else:
-        st.markdown(
-            (
-                '<div style="background:#e5e7eb;color:#374151;border:1px solid #9ca3af;'
-                'border-radius:8px;padding:0.6rem 0.8rem;font-weight:700;margin:0.25rem 0;">'
-                f"未知　{text}</div>"
-            ),
-            unsafe_allow_html=True,
-        )
+        today = "今日未知"
+    on_streak = int(hyst.get("on_streak") or 0)
+    on_days = int(hyst.get("on_days") or 3)
+    line = f"{today}｜已連續 {on_streak} 日（需 {on_days} 日生效）"
+    if hyst.get("state") == "red":
+        off_days = int(hyst.get("off_days") or 10)
+        off_streak = int(hyst.get("off_streak") or 0)
+        line += f"｜熄燈需連續 {off_days} 日不成立，目前 {off_streak} 日"
+    return line
 
 
-def render_bear_panel(st, report: dict) -> None:
-    """第一頁信用傳導旁邊。每一層與總燈都畫出來，未知是灰燈。"""
+def cap_headline(report: dict | None) -> str:
+    """建議槓桿上限。數字沿用 payload 的 suggested_cap，這裡不再重算。"""
+    cap = (report or {}).get("suggested_cap")
+    if cap is None:
+        return "建議槓桿上限 未知"
+    return f"建議槓桿上限 {float(cap):.1f} 倍"
+
+
+def indicator_line(item: dict | None) -> str:
+    item = item or {}
+    dot = _DOT.get(item.get("state"), "⚪")
+    return f"{dot} {item.get('name') or '子指標'}　{item.get('value_text') or '未知'}"
+
+
+def _cap_source_line(report: dict) -> str:
+    def _times(value) -> str:
+        return "未知" if value is None else f"{float(value):.1f} 倍"
+
+    return (
+        f"牛熊上限 {_times(report.get('regime_cap'))}（牛熊分數）。"
+        f"預警上限 {_times(report.get('warning_cap'))}（預警燈）。取較低者。"
+    )
+
+
+def _overall_banner(state: str, headline: str) -> str:
+    colors = {
+        "red": ("#b42318", "#fff"),
+        "yellow": ("#b54708", "#fff"),
+        "green": ("#067647", "#fff"),
+        "unknown": ("#6b7280", "#fff"),
+    }
+    background, color = colors.get(state, colors["unknown"])
+    label = _STATE_TEXT.get(state, "未知")
+    return (
+        f'<div style="background:{background};color:{color};border-radius:12px;'
+        'padding:1rem 1.1rem;margin:0.4rem 0 0.6rem 0;">'
+        f'<div style="font-size:1.35rem;font-weight:800;">{label}燈</div>'
+        f'<div style="font-size:1.7rem;font-weight:800;line-height:1.3;">{headline}</div>'
+        "</div>"
+    )
+
+
+def render_bear_panel(parent, report: dict) -> None:
+    """第一頁信用傳導旁邊。層級內容寫進 container 本身，不寫到外層。"""
     report = report or {}
     if not report.get("layers"):
         report = assess({"regime": report.get("regime")})
-    st.subheader("熊市預警燈")
-    st.caption(CAPTION)
+    parent.subheader("熊市預警燈")
+    parent.caption(CAPTION)
     overall = report.get("overall") or overall_state(report.get("layers"))
-    _paint_light(st, overall, "總燈（已知各層裡最差的一層）")
-    cap = report.get("suggested_cap")
-    regime_cap_value = report.get("regime_cap")
-    warning_cap = report.get("warning_cap")
-    cap_text = "未知" if cap is None else f"{cap:.1f} 倍"
-    regime_text = "未知" if regime_cap_value is None else f"{regime_cap_value:.1f} 倍"
-    warning_text = "未知" if warning_cap is None else f"{warning_cap:.1f} 倍"
-    st.caption(f"建議槓桿上限 {cap_text}（牛熊上限 {regime_text}，預警調整 {warning_text}，取較低者）。{report.get('suggested_action') or ''}")
-    st.caption(report.get("note") or NOTE)
+    parent.markdown(_overall_banner(overall, cap_headline(report)), unsafe_allow_html=True)
+    parent.caption(_cap_source_line(report))
+    if report.get("suggested_action"):
+        parent.caption(report["suggested_action"])
     for layer in report.get("layers") or []:
-        hyst = layer.get("hysteresis") or {}
-        extra = "。".join(part for part in (hyst.get("raw_text"), hyst.get("note")) if part)
-        _paint_light(st, layer.get("state") or "unknown", f"{layer.get('name') or '這一層'}　{extra}")
+        box = parent.container(border=True)
+        state = layer.get("state") or "unknown"
+        box.markdown(f"#### {_DOT.get(state, '⚪')} {layer_title(layer)}")
+        if layer.get("provisional") or (layer.get("hysteresis") or {}).get("provisional"):
+            box.warning("疑似亮燈（遲滯資料不足）")
+        box.caption(hysteresis_status_line(layer.get("hysteresis")))
         for item in layer.get("indicators") or []:
-            _paint_light(st, item.get("state") or "unknown", f"{item.get('name') or '子指標'}　{item.get('value_text') or '未知'}")
-    st.markdown("**觀察（不點亮層級）**")
+            box.markdown(
+                f'<div style="font-size:0.92rem;margin-left:0.6rem;">{indicator_line(item)}</div>',
+                unsafe_allow_html=True,
+            )
+            detail = "。".join(part for part in (item.get("threshold"), item.get("source")) if part)
+            if detail:
+                box.caption(detail)
+    watch = parent.expander("觀察指標（不升級）", expanded=False)
     for item in report.get("watches") or []:
-        _paint_light(st, item.get("state") or "unknown", f"{item.get('name') or '觀察'}　{item.get('value_text') or '未知'}")
-    st.caption(report.get("core_note") or "核心部位跟著預警上限。")
+        word = _STATE_TEXT.get(item.get("state"), "未知")
+        watch.markdown(
+            (
+                '<div style="color:#6b7280;font-size:0.9rem;">'
+                f"● {item.get('name') or '觀察'}　{item.get('value_text') or '未知'}　{word}"
+                "</div>"
+            ),
+            unsafe_allow_html=True,
+        )
+    parent.caption(report.get("core_note") or "核心部位跟著預警上限。")
     advice = report.get("tactical_advice") or []
     if advice:
-        st.markdown("**戰術曝險：收破 20 日線減 1/3**")
+        parent.markdown("**戰術曝險：收破 20 日線減 1/3**")
         for item in advice:
-            st.caption(f"{item.get('symbol')} 對照 {item.get('underlying_label')}（{item.get('underlying')}）：{item.get('advice')}")
+            parent.caption(f"{item.get('symbol')} 對照 {item.get('underlying_label')}（{item.get('underlying')}）：{item.get('advice')}")
     else:
-        st.caption("戰術曝險若收破對應標的的 20 日線，減三分之一。沒有持倉或沒有收盤時不列。不下單。")
-    st.caption(US_BREADTH_UNIVERSE)
-    st.caption(TW_BREADTH_UNIVERSE)
+        parent.caption("戰術曝險若收破對應標的的 20 日線，減三分之一。沒有持倉或沒有收盤時不列。不下單。")
+    parent.caption(US_BREADTH_UNIVERSE)
+    parent.caption(TW_BREADTH_UNIVERSE)
