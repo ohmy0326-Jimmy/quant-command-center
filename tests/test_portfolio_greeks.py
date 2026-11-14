@@ -2,7 +2,7 @@
 
 import unittest
 
-from portfolio_greeks import aggregate_greeks, beta_targets, market_of, position_greeks
+from portfolio_greeks import aggregate_greeks, beta_targets, hedge_contracts, market_of, position_greeks
 
 
 class GreekTests(unittest.TestCase):
@@ -60,6 +60,49 @@ class GreekTests(unittest.TestCase):
         self.assertEqual(result["tw"]["delta_notional"], 0)
         self.assertAlmostEqual(result["us"]["delta_notional"], -0.4 * 1 * 100 * 500)
         self.assertTrue(result["us"]["missing"] == [])
+
+
+class HedgeContractTests(unittest.TestCase):
+    def test_full_and_half_lots_round_half_up(self):
+        plan = hedge_contracts(250, True)
+        self.assertTrue(plan["available"])
+        by_name = {row["name"]: row for row in plan["rows"]}
+        self.assertAlmostEqual(by_name["大台"]["full"], 250 / 200)
+        self.assertEqual(by_name["大台"]["full_lots"], 1)
+        self.assertAlmostEqual(by_name["大台"]["half"], 0.625)
+        self.assertEqual(by_name["大台"]["half_lots"], 1)
+        self.assertEqual(by_name["小台"]["point_value"], 50)
+        self.assertEqual(by_name["小台"]["full_lots"], 5)
+        self.assertEqual(by_name["微台"]["point_value"], 10)
+        self.assertEqual(by_name["微台"]["full_lots"], 25)
+        self.assertEqual(by_name["微台"]["half_lots"], 13)
+        self.assertIn("選擇權", plan["note"])
+
+    def test_incomplete_or_non_positive_hides_lots(self):
+        missing = hedge_contracts(None, False)
+        self.assertFalse(missing["available"])
+        self.assertEqual(missing["rows"], [])
+        self.assertIn("不完整", missing["reason"])
+        flat = hedge_contracts(0, True)
+        self.assertFalse(flat["available"])
+        self.assertIn("不大於 0", flat["reason"])
+        short = hedge_contracts(-40, True)
+        self.assertFalse(short["available"])
+        self.assertEqual(short["rows"], [])
+
+    def test_existing_short_is_already_inside_delta_points(self):
+        rows = [
+            {"種類": "台股", "標的": "2330", "持有數量": 40000, "即時報價": 200, "標的槓桿": 1},
+            {"種類": "期貨", "標的": "MTX", "持有數量": -1, "即時報價": 20000},
+        ]
+        result = aggregate_greeks(rows, tw_index=20000)
+        # 現股 8,000,000／20000＝400 點，小台空 1 口＝-50 點，淨 350。不再把空單扣第二次。
+        self.assertAlmostEqual(result["tw"]["delta_points"], 350)
+        hedge = result["tw"]["hedge_contracts"]
+        self.assertTrue(hedge["available"])
+        tx = hedge["rows"][0]
+        self.assertAlmostEqual(tx["full"], 350 / 200)
+        self.assertNotAlmostEqual(tx["full"], 400 / 200)
 
 
 class BetaTargetTests(unittest.TestCase):

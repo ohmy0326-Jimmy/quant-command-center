@@ -31,9 +31,16 @@ DEFAULT_BETA_BANDS = {
 
 TX_MULTIPLIER = 200.0
 MTX_MULTIPLIER = 50.0
+MICRO_MULTIPLIER = 10.0
 TW_OPTION_MULTIPLIER = 50.0
 US_OPTION_MULTIPLIER = 100.0
 DEFAULT_NOTE = "程式預設，不是已確認的策略參數。"
+HEDGE_FUTURES_NOTE = "僅期貨；選擇權口數因 Delta 會變動，需即時選擇權 Delta，暫不提供。"
+HEDGE_POINT_VALUES = (
+    ("大台", TX_MULTIPLIER),
+    ("小台", MTX_MULTIPLIER),
+    ("微台", MICRO_MULTIPLIER),
+)
 
 
 def _number(value, allow_zero: bool = True):
@@ -85,6 +92,37 @@ def _band(market: str, regime: str, overrides: dict | None) -> tuple[float, floa
     if pair is None:
         return None
     return float(pair[0]), float(pair[1])
+
+
+def round_half_up(value: float) -> int:
+    """正數四捨五入到整數。0.5 進位。"""
+    return int(math.floor(float(value) + 0.5))
+
+
+def hedge_contracts(delta_points, points_complete: bool) -> dict:
+    """用台股 delta_points（每點台幣）換算放空口數。已持有的空單已在點數裡，這裡不再扣。
+
+    點數不完整或不大於 0 時不給口數。選擇權口數不在這張表。
+    """
+    base = {"note": HEDGE_FUTURES_NOTE, "rows": []}
+    if not points_complete or delta_points is None:
+        return {**base, "available": False, "reason": "台股 Delta 點數不完整，不計算避險口數。"}
+    points = _number(delta_points)
+    if points is None or points <= 0:
+        return {**base, "available": False, "reason": "台股 Delta 點數不大於 0，沒有需要放空的口數。"}
+    rows = []
+    for name, point_value in HEDGE_POINT_VALUES:
+        full = points / point_value
+        half = full * 0.5
+        rows.append({
+            "name": name,
+            "point_value": point_value,
+            "full": full,
+            "full_lots": round_half_up(full),
+            "half": half,
+            "half_lots": round_half_up(half),
+        })
+    return {**base, "available": True, "reason": "", "rows": rows}
 
 
 def _empty_market(currency: str) -> dict:
@@ -187,7 +225,7 @@ def aggregate_greeks(rows, tw_index=None, us_index=None) -> dict:
         for book in books.values():
             book["delta_points"] = None
             book["points_complete"] = False
-        return {"tw": _freeze(books["tw"]), "us": _freeze(books["us"])}
+        return _pack_greeks(books)
     for row in iterable:
         item = row if isinstance(row, dict) else position_greeks(row)
         if "notional" not in item:
@@ -221,7 +259,14 @@ def aggregate_greeks(rows, tw_index=None, us_index=None) -> dict:
             book["delta_points"] = book["delta_notional"] / indexes[key]
         if not book["theta_complete"]:
             book["theta_per_day"] = None
-    return {"tw": _freeze(books["tw"]), "us": _freeze(books["us"])}
+    return _pack_greeks(books)
+
+
+def _pack_greeks(books: dict) -> dict:
+    found = {"tw": _freeze(books["tw"]), "us": _freeze(books["us"])}
+    tw = found["tw"]
+    tw["hedge_contracts"] = hedge_contracts(tw.get("delta_points"), bool(tw.get("points_complete")))
+    return found
 
 
 def _freeze(book: dict) -> dict:
@@ -336,6 +381,8 @@ def apply_indexes(greeks: dict, tw_index=None, us_index=None) -> dict:
         elif book.get("delta_notional") == 0 and book.get("delta_complete") and not book.get("missing"):
             book["delta_points"] = 0.0
             book["points_complete"] = True
+    tw = found["tw"]
+    tw["hedge_contracts"] = hedge_contracts(tw.get("delta_points"), bool(tw.get("points_complete")))
     return found
 
 
