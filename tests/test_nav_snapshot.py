@@ -156,7 +156,7 @@ class TakeSnapshotTests(unittest.TestCase):
         with patch("portfolio_risk.read_quant_sheets", return_value=(pd.DataFrame(), pd.DataFrame(), pd.DataFrame())), \
                 patch("portfolio_risk.value_positions_safely", return_value=fake_valuation):
             out = ns.take_snapshot(now=datetime(2026, 11, 4, 14, 30, tzinfo=TPE), spreadsheet=book, usdtwd=30.0,
-                                   market=lambda p: ({}, {}, {}, {}))
+                                   market=lambda p: ({}, {}, {}, {}), breadth_compute=False)
         self.assertEqual(out["action"], "inserted")
         self.assertEqual(out["row"]["出入金"], 13000)
         self.assertEqual(out["flow_sources"], {"futures_ledger": 10000, "cash_flows": 3000})
@@ -171,7 +171,7 @@ class TakeSnapshotTests(unittest.TestCase):
         with patch("portfolio_risk.read_quant_sheets", return_value=(pd.DataFrame(), pd.DataFrame(), pd.DataFrame())), \
                 patch("portfolio_risk.value_positions_safely", return_value=(None, None, {"nav": 0.0}, [])):
             with self.assertRaises(RuntimeError):
-                ns.take_snapshot(spreadsheet=book, usdtwd=30.0, market=lambda p: ({}, {}, {}, {}))
+                ns.take_snapshot(spreadsheet=book, usdtwd=30.0, market=lambda p: ({}, {}, {}, {}), breadth_compute=False)
         self.assertEqual(book.added, [])
 
 

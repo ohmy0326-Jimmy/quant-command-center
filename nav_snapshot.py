@@ -290,7 +290,29 @@ def attach_macro_history(payload: dict, spreadsheet, today: str) -> dict:
     return payload
 
 
-def take_snapshot(now: datetime | None = None, spreadsheet=None, usdtwd: float | None = None, market=None) -> dict:
+def attach_breadth(payload: dict, spreadsheet, today: str, compute=None) -> dict:
+    """廣度寫入失敗只記在摘要裡，不推翻已經寫好的淨值快照。"""
+    if compute is False:
+        payload["bear_breadth"] = {"status": "skipped", "sheet": "Bear_Breadth", "as_of": str(today), "detail": "這次沒有重算廣度。"}
+        return payload
+    try:
+        from bear_warning import compute_stored_breadth, record_breadth
+
+        result = compute_stored_breadth() if compute is None else compute()
+        written = str((payload.get("row") or {}).get("寫入時間") or "")
+        payload["bear_breadth"] = record_breadth(spreadsheet, str(today), result or {}, written)
+    except Exception:
+        logger.exception("bear breadth accumulation failed")
+        payload["bear_breadth"] = {
+            "status": "failed",
+            "sheet": "Bear_Breadth",
+            "as_of": str(today),
+            "detail": "廣度沒有寫入。淨值快照已寫入。",
+        }
+    return payload
+
+
+def take_snapshot(now: datetime | None = None, spreadsheet=None, usdtwd: float | None = None, market=None, breadth_compute=None) -> dict:
     """算出今天（台北）的淨值並寫入 NAV_Snapshots。回傳寫入的那一列與摘要。"""
     from futures_ledger import FUTURES_LEDGER_SHEET, ledger_cash_flows
     from portfolio_risk import (
@@ -350,7 +372,7 @@ def take_snapshot(now: datetime | None = None, spreadsheet=None, usdtwd: float |
         "usdtwd_source": fx.source,
         "warnings": [str(w) for w in fx_warnings + list(row_warnings) + flow_warnings],
     }
-    return attach_macro_history(payload, book, row["日期"])
+    return attach_breadth(attach_macro_history(payload, book, row["日期"]), book, row["日期"], compute=breadth_compute)
 
 
 # ---------------------------------------------------------------- 捕獲率

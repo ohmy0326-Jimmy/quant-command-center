@@ -70,11 +70,32 @@ class DeleverageTests(unittest.TestCase):
         accounts = pd.DataFrame([{"帳戶名稱": "股票戶", "現金餘額": 1_000_000, "融資/質押借款": 305_430}])
         valued, _accounts, metrics = finalize_valuation(pd.DataFrame([_etf("SOXL", 10, 20)]), accounts, 32.0)
         payload = portfolio_payload(valued, metrics, usdtwd=32.0, as_of=AS_OF)
-        self.assertEqual(payload["schema_version"], "1.13.0")
-        self.assertEqual(SCHEMA_VERSION, "1.13.0")
+        self.assertEqual(payload["schema_version"], "1.14.0")
+        self.assertEqual(SCHEMA_VERSION, "1.14.0")
         self.assertEqual(payload["deleverage"]["swaps"][0]["symbol"], "SOXL")
         self.assertAlmostEqual(payload["net_value"], metrics["nav"])
         PortfolioResponse(**payload)
+
+    def test_same_symbol_across_accounts_is_one_row(self):
+        metrics = {"nav": 1_000_000.0, "exposure": 2_000_000.0, "exposure_complete": True}
+        positions = pd.DataFrame([
+            {**_etf("SOXL", 10, 100), "帳戶": "甲", "即時市值(台幣)": 100_000, "換算匯率": 1.0},
+            {**_etf("SOXL", 5, 100), "帳戶": "乙", "即時市值(台幣)": 50_000, "換算匯率": 1.0},
+        ])
+        view = build_deleverage(positions, metrics)
+        self.assertEqual([item["symbol"] for item in view["swaps"]], ["SOXL"])
+        self.assertAlmostEqual(view["swaps"][0]["market_value_twd"], 150_000)
+        self.assertAlmostEqual(view["swaps"][0]["reduction_twd"], 300_000)
+        self.assertIn("2 個帳戶", view["swaps"][0]["note"])
+
+    def test_one_account_missing_price_keeps_the_symbol_unknown(self):
+        positions = pd.DataFrame([
+            {**_etf("SOXL", 10, 100), "即時市值(台幣)": 100_000},
+            {**_etf("SOXL", 5, float("nan")), "即時市值(台幣)": float("nan")},
+        ])
+        view = build_deleverage(positions, {"nav": 1_000_000, "exposure": 100, "exposure_complete": True})
+        self.assertEqual(len(view["swaps"]), 1)
+        self.assertIsNone(view["swaps"][0]["reduction_twd"])
 
 
 if __name__ == "__main__":

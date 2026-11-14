@@ -14,7 +14,7 @@ import pandas as pd
 
 from cb_holdings import product_kind
 
-SCHEMA_VERSION = "1.13.0"
+SCHEMA_VERSION = "1.14.0"
 TAIPEI = ZoneInfo("Asia/Taipei")
 
 
@@ -284,10 +284,13 @@ def _margin_block(metrics: dict) -> dict:
 
 
 def _bear_block(regime: str | None, bear_warning: dict | None) -> dict:
-    from bear_warning import assess
+    from bear_warning import assess, overall_state
 
     if isinstance(bear_warning, dict) and bear_warning.get("layers"):
-        return bear_warning
+        report = dict(bear_warning)
+        if report.get("overall") not in {"green", "yellow", "red", "unknown"}:
+            report["overall"] = overall_state(report["layers"])
+        return report
     return assess({"regime": regime})
 
 
