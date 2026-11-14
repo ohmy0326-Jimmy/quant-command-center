@@ -9,40 +9,77 @@ from __future__ import annotations
 import math
 from datetime import date
 
-# 程式預設。畫面上要標出來，請對照自己的用法再改。
+# 依 2026 覆盤設定，含後見之明。只改這張表，不改 REGIME_RISK。
+POSTMORTEM_LABEL = "依 2026 覆盤設定，含後見之明。"
+FRED_LAG_NOTE = "公布落差假設：高收益與殖利率約 1 日、NFCI 約 5 日、STLFSI4 約 6 日、H.8 約 9 日、SLOOS 約 35 日。只用已經公布的最新一筆，不往前補。"
 THRESHOLDS = {
-    "near_high_pct": 2.0,
-    "breadth_fall_weeks": 4,
-    "defensive_weeks": 2,
-    "week_sessions": 5,
+    "hy_lead": 0.30,
+    "hy_confirm": 0.75,
+    "hy_window": 60,
+    "nfci_rise": 0.03,
+    "nfci_weeks": 4,
+    "foreign_10d": -1500 * 1e8,
+    "foreign_days": 10,
+    "high_window": 252,
+    "high_recent": 20,
+    "sox_below_high": 0.05,
+    "rsp_spy_drop": -0.02,
+    "relative_sessions": 20,
+    "tw_breadth_weak": 40.0,
+    "tw_breadth_drop": 10.0,
     "leader_dma": 60,
+    "leader_need": 2,
     "leader_min_known": 3,
+    "sphb_splv_drop": -0.05,
     "high_beta_weeks": 4,
     "high_beta_red_gap": 0.03,
-    "index_dma": 200,
-    "index_slope_sessions": 20,
-    "hy_red_bp": 100.0,
-    "hy_yellow_bp": 50.0,
-    "hy_weeks": 4,
+    "dma20": 20,
+    "layer_on_days": 3,
+    "layer_off_days": 10,
+    "vix_watch": 25.0,
     "vix_red": 25.0,
     "vix_red_sessions": 10,
     "vix_yellow": 20.0,
+    "hy_red_bp": 100.0,
+    "hy_yellow_bp": 50.0,
+    "hy_weeks": 4,
+    "breadth_fall_weeks": 4,
+    "near_high_pct": 2.0,
     "curve_yellow": 0.25,
+    "index_dma": 200,
+    "index_slope_sessions": 20,
+    "defensive_weeks": 2,
+    "week_sessions": 5,
 }
-
-LEADERS = ("AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "AVGO")
+LEADERS = ("NVDA", "2330.TW", "MU", "AVGO")
+LEADER_FALLBACK = {"2330.TW": "TSM"}
 CAP_STEPS = ("牛", "偏多", "中性", "偏空", "熊")
 CAPTION = "牛熊分數決定槓桿上限，預警燈決定要不要提早降槓桿，兩者衝突時以較保守的為準。"
-US_BREADTH_UNIVERSE = "標普 500 成分股收盤是否站上 200 日線。沒有成分股收盤時是未知。"
-TW_BREADTH_UNIVERSE = "台股廣度不是全體加權成分。代理是 0050（台灣50）加 0051（中型100）。沒有這些成分股收盤時是未知。"
+US_BREADTH_UNIVERSE = "寬度看 RSP／SPY 二十日報酬，不重抓標普 500 成分股。"
+TW_BREADTH_UNIVERSE = "台股寬度用證交所 MI_INDEX 上市股票上漲家數 ÷（上漲＋下跌）。沒有家數時是未知。"
 NOTE = (
-    "門檻是程式預設。領先層的放款意願與高收益利差沿用信用傳導，不另設一套門檻。"
-    "大型權值是 AAPL、MSFT、NVDA、AMZN、GOOGL、META、AVGO，不是自動抓持倉。"
-    "總燈取已知各層裡最差的一層。某一層全部未知是灰燈，不算通過。"
-    "美股廣度用標普 500 成分股，只在每日淨值快照算一次，這一頁的請求不重抓那 500 檔。"
-    "台股廣度要 0050 與 0051 的全部成分。沒有完整清單時是未知，不用較短的代理名單充數。"
+    POSTMORTEM_LABEL + " 每一層只讓主訊號點燈，其餘是觀察，不點亮該層。"
+    "亮燈要連續 3 個交易日，熄燈要連續 10 個交易日。歷史不夠就寫遲滯資料不足，不猜。"
+    "核心部位跟著預警上限。收破 20 日線減 1/3 只套在槓桿／戰術曝險，不下單。"
+    + FRED_LAG_NOTE
 )
-PRICE_TICKERS = ("SPY", "XLV", "XLP", "XLU", "XLK", "SPHB", "SPLV", "^GSPC", "^TWII", "^VIX", *LEADERS)
+TACTICAL_UNDERLYING = {
+    "00663L": ("^TWII", "加權指數"),
+    "00631L": ("0050.TW", "台灣50"),
+    "SOXL": ("SOXX", "費半 ETF"),
+    "MUU": ("MU", "美光"),
+    "SNXX": ("SNDK", "SNDK"),
+    "LITX": ("LITE", "Lumentum"),
+    "AMUU": ("AMD", "超微"),
+}
+PRICE_TICKERS = (
+    "SPY", "RSP", "XLV", "XLP", "XLU", "XLK", "SPHB", "SPLV",
+    "^GSPC", "^TWII", "^SOX", "^VIX",
+    "NVDA", "2330.TW", "TSM", "MU", "AVGO",
+    "0050.TW", "SOXX", "SNDK", "LITE", "AMD",
+)
+WARNING_TAB = "Bear_Warning_Daily"
+WARNING_HEADER = ["日期", "領先條件", "內部條件", "確認條件", "外資買賣超", "上漲家數", "下跌家數", "寫入時間"]
 BREADTH_TAB = "Bear_Breadth"
 BREADTH_HEADER = ["日期", "美股廣度", "美股四周前", "台股廣度", "台股四周前", "美股檔數", "台股檔數", "寫入時間"]
 BREADTH_MAX_AGE_DAYS = 5
@@ -50,6 +87,7 @@ SP500_LIST_URL = "https://raw.githubusercontent.com/datasets/s-and-p-500-compani
 _PRICE_FAIL_SECONDS = 600
 _REGIME_CACHE = {"at": 0.0, "regime": None, "ready": False}
 _BREADTH_CACHE = {"at": 0.0, "value": None}
+_HISTORY_CACHE = {"at": 0.0, "value": None}
 
 _STATE_TEXT = {"green": "綠", "yellow": "黃", "red": "紅", "unknown": "未知"}
 _PRICE_CACHE: dict = {}
@@ -65,7 +103,7 @@ def _finite(value) -> float | None:
     return number
 
 
-def _indicator(name: str, state: str, *, value=None, value_text: str = "", threshold: str = "", source: str = "") -> dict:
+def _indicator(name: str, state: str, *, value=None, value_text: str = "", threshold: str = "", source: str = "", role: str = "main") -> dict:
     if state not in _STATE_TEXT:
         state = "unknown"
     return {
@@ -75,6 +113,7 @@ def _indicator(name: str, state: str, *, value=None, value_text: str = "", thres
         "value_text": value_text or "未知",
         "threshold": threshold,
         "source": source,
+        "role": "watch" if role == "watch" else "main",
     }
 
 
@@ -332,6 +371,377 @@ def _credit_indicator(name: str, light, source: str) -> dict:
     return _indicator(name, state, value_text=_STATE_TEXT[state], threshold="沿用信用傳導門檻。缺資料或過舊是未知，不算通過。", source=source)
 
 
+def _series(closes) -> list[float]:
+    return [item for item in (closes or []) if _finite(item) is not None]
+
+
+def _return_over_sessions(closes, sessions: int) -> float | None:
+    series = _series(closes)
+    if len(series) < sessions + 1 or series[-1 - sessions] <= 0:
+        return None
+    return series[-1] / series[-1 - sessions] - 1.0
+
+
+def ratio_return(left, right, sessions: int | None = None) -> float | None:
+    """左／右的區間報酬。缺一邊是 None，不是 0。"""
+    sessions = THRESHOLDS["relative_sessions"] if sessions is None else sessions
+    left_series = _series(left)
+    right_series = _series(right)
+    if len(left_series) < sessions + 1 or len(right_series) < sessions + 1:
+        return None
+    if min(left_series[-1], right_series[-1], left_series[-1 - sessions], right_series[-1 - sessions]) <= 0:
+        return None
+    now = left_series[-1] / right_series[-1]
+    then = left_series[-1 - sessions] / right_series[-1 - sessions]
+    if then <= 0:
+        return None
+    return now / then - 1.0
+
+
+def hy_gap(levels, window: int | None = None) -> float | None:
+    """最新值減最近 window 筆的最低值。筆數不夠是 None。單位沿用 FRED 的百分點。"""
+    window = THRESHOLDS["hy_window"] if window is None else window
+    series = _series(levels)
+    if len(series) < window:
+        return None
+    recent = series[-window:]
+    return recent[-1] - min(recent)
+
+
+def nfci_rise(observations, weeks: int | None = None) -> float | None:
+    """最新減約四週前的那一筆。沒有落在四週以前的觀測是 None。"""
+    from datetime import timedelta
+
+    weeks = THRESHOLDS["nfci_weeks"] if weeks is None else weeks
+    points = []
+    for item in observations or []:
+        if isinstance(item, (tuple, list)) and len(item) >= 2:
+            day, value = item[0], _finite(item[1])
+        else:
+            continue
+        if value is None or day is None:
+            continue
+        points.append((day, value))
+    if len(points) < 2:
+        return None
+    points.sort(key=lambda pair: pair[0])
+    latest_day, latest = points[-1]
+    cutoff = latest_day - timedelta(days=7 * weeks)
+    prior = [value for day, value in points if day <= cutoff]
+    if not prior:
+        return None
+    return latest - prior[-1]
+
+
+def foreign_sum(nets, days: int | None = None) -> float | None:
+    days = THRESHOLDS["foreign_days"] if days is None else days
+    series = _series(nets)
+    if len(series) < days:
+        return None
+    return sum(series[-days:])
+
+
+def made_recent_high(closes, window: int | None = None, recent: int | None = None) -> bool | None:
+    window = THRESHOLDS["high_window"] if window is None else window
+    recent = THRESHOLDS["high_recent"] if recent is None else recent
+    series = _series(closes)
+    if len(series) < window:
+        return None
+    span = series[-window:]
+    return max(span[-recent:]) >= max(span)
+
+
+def pct_below_high(closes, gap: float | None = None, window: int | None = None) -> bool | None:
+    window = THRESHOLDS["high_window"] if window is None else window
+    gap = THRESHOLDS["sox_below_high"] if gap is None else gap
+    series = _series(closes)
+    if len(series) < window or max(series[-window:]) <= 0:
+        return None
+    high = max(series[-window:])
+    return series[-1] <= high * (1.0 - gap)
+
+
+def below_dma(closes, window: int) -> bool | None:
+    series = _series(closes)
+    if len(series) < window:
+        return None
+    average = sum(series[-window:]) / window
+    return series[-1] < average
+
+
+def _or_flag(left: bool | None, right: bool | None) -> bool | None:
+    if left is True or right is True:
+        return True
+    if left is False and right is False:
+        return False
+    return None
+
+
+def _and_flag(left: bool | None, right: bool | None) -> bool | None:
+    if left is False or right is False:
+        return False
+    if left is True and right is True:
+        return True
+    return None
+
+
+def raw_layer(flags: list, need: int) -> bool | None:
+    """已知成立數已經夠就成立。已知不成立多到湊不齊就未成立。其餘未知。"""
+    ons = sum(1 for flag in flags if flag is True)
+    unknowns = sum(1 for flag in flags if flag is None)
+    if ons >= need:
+        return True
+    if ons + unknowns < need:
+        return False
+    return None
+
+
+def apply_hysteresis(prior: list | None, today: bool | None, on_days: int | None = None, off_days: int | None = None) -> dict:
+    """不假設歷史開始之前是熄燈。沒看過連續亮燈就不宣告亮或熄。"""
+    on_days = THRESHOLDS["layer_on_days"] if on_days is None else on_days
+    off_days = THRESHOLDS["layer_off_days"] if off_days is None else off_days
+    state = None
+    on_streak = 0
+    off_streak = 0
+    for value in list(prior or []) + [today]:
+        if value is None:
+            on_streak = 0
+            off_streak = 0
+            continue
+        if value is True:
+            on_streak += 1
+            off_streak = 0
+            if on_streak >= on_days:
+                state = True
+        else:
+            off_streak += 1
+            on_streak = 0
+            if state is True and off_streak >= off_days:
+                state = False
+    if today is True:
+        raw_text = "今日條件成立"
+    elif today is False:
+        raw_text = "今日條件未成立"
+    else:
+        raw_text = "今日條件未知"
+    sufficient = state is not None
+    note = "" if sufficient else "遲滯資料不足"
+    light = "red" if state is True else "green" if state is False else "unknown"
+    return {
+        "state": light,
+        "on": state is True,
+        "raw_on": today,
+        "raw_text": raw_text,
+        "on_streak": on_streak,
+        "off_streak": off_streak,
+        "on_days": on_days,
+        "off_days": off_days,
+        "sufficient": sufficient,
+        "note": note,
+    }
+
+
+def _flag_indicator(name: str, flag: bool | None, *, value=None, value_text: str = "", threshold: str = "", source: str = "", role: str = "main") -> dict:
+    if flag is True:
+        state = "red"
+    elif flag is False:
+        state = "green"
+    else:
+        state = "unknown"
+    text = value_text or {True: "成立", False: "未成立"}.get(flag, "未知")
+    return _indicator(name, state, value=value, value_text=text, threshold=POSTMORTEM_LABEL + threshold, source=source, role=role)
+
+
+def _leader_flags(prices: dict) -> list:
+    flags = []
+    for symbol in LEADERS:
+        series = prices.get(symbol) or []
+        if not series and LEADER_FALLBACK.get(symbol):
+            series = prices.get(LEADER_FALLBACK[symbol]) or []
+        flags.append(below_dma(series, THRESHOLDS["leader_dma"]))
+    return flags
+
+
+def _leader_on(flags: list) -> bool | None:
+    ons = sum(1 for flag in flags if flag is True)
+    unknowns = sum(1 for flag in flags if flag is None)
+    if ons >= THRESHOLDS["leader_need"]:
+        return True
+    if ons + unknowns < THRESHOLDS["leader_need"]:
+        return False
+    return None
+
+
+def tw_breadth_on(latest, prior) -> bool | None:
+    now = _finite(latest)
+    then = _finite(prior)
+    if now is None:
+        return None
+    if now < THRESHOLDS["tw_breadth_weak"]:
+        return True
+    if then is None:
+        return None
+    if then - now >= THRESHOLDS["tw_breadth_drop"]:
+        return True
+    return False
+
+
+def collect_warning_rows(today: date, fetch_foreign=None, fetch_breadth=None) -> list[dict]:
+    """給每日快照補外資與上市股票漲跌家數。失敗的那一側留空，不寫 0。"""
+    from datetime import timedelta
+
+    rows: dict[str, dict] = {}
+
+    def slot(day) -> dict:
+        key = day.isoformat() if hasattr(day, "isoformat") else str(day)
+        found = rows.get(key)
+        if found is None:
+            found = {"date": key}
+            rows[key] = found
+        return found
+
+    try:
+        if fetch_foreign is None:
+            from macro_risk import fetch_foreign_flows
+
+            flows = fetch_foreign_flows(today, trading_days=12, max_calendar_days=24, pause=0.15)
+        else:
+            flows = fetch_foreign(today)
+        for day, net in (flows or {}).get("days") or []:
+            if net is None:
+                continue
+            slot(day)["foreign_net"] = net
+    except Exception:
+        pass
+    try:
+        breadth_days = fetch_breadth(today) if fetch_breadth is not None else fetch_listed_breadth(today)
+        for item in breadth_days or []:
+            target = slot(item.get("date"))
+            if item.get("up") is not None:
+                target["up"] = item.get("up")
+            if item.get("down") is not None:
+                target["down"] = item.get("down")
+    except Exception:
+        pass
+    return [rows[key] for key in sorted(rows)]
+
+
+def fetch_listed_breadth(today: date, trading_days: int = 21) -> list[dict]:
+    """證交所 MI_INDEX 上市股票漲跌家數。連不上就停，不把缺日補 0。"""
+    import requests
+    from datetime import timedelta
+
+    found = []
+    for offset in range(trading_days * 2):
+        if len(found) >= trading_days:
+            break
+        day = today - timedelta(days=offset)
+        if day.weekday() >= 5:
+            continue
+        try:
+            response = requests.get(
+                "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX",
+                params={"date": day.strftime("%Y%m%d"), "type": "ALL", "response": "json"},
+                headers={"User-Agent": "quant-command-center/1.0"},
+                timeout=8,
+            )
+            response.raise_for_status()
+            parsed = parse_mi_index_breadth(response.json())
+        except Exception:
+            break
+        if not parsed:
+            continue
+        found.append({"date": day, "up": parsed["up"], "down": parsed["down"]})
+    return found
+
+
+def parse_mi_index_breadth(payload) -> dict | None:
+    """MI_INDEX「漲跌證券數合計」的股票欄。上漲、下跌拆不出來是 None。"""
+    if not isinstance(payload, dict):
+        return None
+    table = None
+    for item in payload.get("tables") or []:
+        if "漲跌" in str(item.get("title") or ""):
+            table = item
+            break
+    if not table:
+        return None
+    fields = [str(name) for name in (table.get("fields") or [])]
+    try:
+        column = fields.index("股票")
+    except ValueError:
+        return None
+    found = {}
+    for row in table.get("data") or []:
+        if not row or len(row) <= column:
+            continue
+        label = str(row[0])
+        raw = str(row[column])
+        number = _finite(raw.split("(")[0].replace(",", ""))
+        if number is None:
+            continue
+        if label.startswith("上漲"):
+            found["up"] = number
+        elif label.startswith("下跌"):
+            found["down"] = number
+    if "up" not in found or "down" not in found:
+        return None
+    return found
+
+
+def breadth_percent_from_counts(up, down) -> float | None:
+    up_n = _finite(up)
+    down_n = _finite(down)
+    if up_n is None or down_n is None or up_n + down_n <= 0:
+        return None
+    return up_n / (up_n + down_n) * 100.0
+
+
+def tactical_dma_advice(held: list | None, prices: dict | None) -> list[dict]:
+    """只對持有的槓桿／戰術部位。用對應指數或股票的 20 日線，不下單。"""
+    prices = prices or {}
+    rows = []
+    seen = set()
+    for item in held or []:
+        if isinstance(item, str):
+            symbol = _ticker_key_local(item)
+        else:
+            symbol = _ticker_key_local((item or {}).get("symbol") or (item or {}).get("標的"))
+        if not symbol or symbol in seen or symbol not in TACTICAL_UNDERLYING:
+            continue
+        seen.add(symbol)
+        underlying, label = TACTICAL_UNDERLYING[symbol]
+        series = _series(prices.get(underlying))
+        window = THRESHOLDS["dma20"]
+        row = {
+            "symbol": symbol,
+            "underlying": underlying,
+            "underlying_label": label,
+            "last": series[-1] if series else None,
+            "dma20": None,
+            "below": None,
+            "advice": "未知",
+        }
+        if len(series) < window:
+            rows.append(row)
+            continue
+        average = sum(series[-window:]) / window
+        below = series[-1] < average
+        row["dma20"] = average
+        row["below"] = below
+        row["advice"] = "收破 20 日線減 1/3" if below else "未破 20 日線，不減"
+        rows.append(row)
+    return rows
+
+
+def _ticker_key_local(symbol) -> str:
+    text = str(symbol or "").strip().upper()
+    for suffix in (".TW", ".TWO"):
+        if text.endswith(suffix) and text[:-len(suffix)].isdigit():
+            text = text[:-len(suffix)]
+    return text
+
+
 def suggestion(regime: str | None, layers: list[dict]) -> dict:
     current = regime_cap(regime)
     states = [layer["state"] for layer in layers]
@@ -347,19 +757,19 @@ def suggestion(regime: str | None, layers: list[dict]) -> dict:
     name = str(regime)
     if confirm == "red":
         warning_name = "熊"
-        action = "第三層確認，只留核心與避險。"
+        action = "第三層確認，只留核心與避險。核心跟著預警上限。"
     elif _lit(leading) and _lit(internal):
         warning_name = _step_down(name, 2)
-        action = "領先與內部轉弱都亮，槓桿上限再降一檔，並加避險。"
+        action = "領先與內部都亮，槓桿上限再降一檔，並加避險。核心跟著預警上限。"
     elif _lit(leading):
         warning_name = _step_down(name, 1)
-        action = "第一層亮，槓桿上限降一檔。"
+        action = "第一層亮，槓桿上限降一檔。核心跟著預警上限。"
     elif _lit(internal):
         warning_name = _step_down(name, 1)
-        action = "第二層亮，槓桿上限降一檔。"
+        action = "第二層亮，槓桿上限降一檔，並加避險。核心跟著預警上限。"
     else:
         warning_name = name
-        action = "預警未亮，沿用牛熊分數的槓桿上限。"
+        action = "預警未亮，沿用牛熊分數的槓桿上限。核心跟著這個上限。"
     warning = regime_cap(warning_name)
     suggested = None if warning is None else min(current, warning)
     return {
@@ -391,35 +801,212 @@ def _breadth_block(snapshot: dict) -> dict:
     return {"us": us, "tw": tw}
 
 
-def assess(snapshot: dict | None = None) -> dict:
-    """由已備好的數字組預警。沒傳的項目是未知。"""
-    snapshot = snapshot or {}
+def _credit_main(snapshot: dict) -> tuple[bool | None, dict]:
+    gap = hy_gap(snapshot.get("hy"))
+    rise = nfci_rise(snapshot.get("nfci"))
+    hy_on = None if gap is None else gap >= THRESHOLDS["hy_lead"]
+    nfci_on = None if rise is None else rise >= THRESHOLDS["nfci_rise"]
+    flag = _or_flag(hy_on, nfci_on)
+    parts = []
+    if gap is None:
+        parts.append("高收益距 60 日低點未知")
+    else:
+        parts.append(f"高收益距 60 日低點 {gap:.2f}")
+    if rise is None:
+        parts.append("NFCI 四週變化未知")
+    else:
+        parts.append(f"NFCI 四週 {rise:+.3f}")
+    indicator = _flag_indicator(
+        "信用合成",
+        flag,
+        value=gap if gap is not None else rise,
+        value_text="；".join(parts),
+        threshold=f"高收益 OAS 減 60 日低點 ≥ {THRESHOLDS['hy_lead']}，或 NFCI 四週上升 ≥ {THRESHOLDS['nfci_rise']}。",
+        source="FRED BAMLH0A0HYM2、NFCI。" + FRED_LAG_NOTE,
+    )
+    return flag, indicator
+
+
+def _foreign_main(snapshot: dict) -> tuple[bool | None, dict]:
+    total = foreign_sum(snapshot.get("foreign_nets"))
+    flag = None if total is None else total < THRESHOLDS["foreign_10d"]
+    if total is None:
+        text = "不滿 10 個交易日"
+    else:
+        text = f"10 日累計 {total / 1e8:,.0f} 億"
+    indicator = _flag_indicator(
+        "外資 10 日累計買賣超",
+        flag,
+        value=total,
+        value_text=text,
+        threshold="外資及陸資（不含外資自營商）10 日累計 < −1,500 億元。",
+        source="TWSE BFI82U。每日快照留下歷史，請求不重抓十日。",
+    )
+    return flag, indicator
+
+
+def _divergence_main(snapshot: dict) -> tuple[bool | None, dict]:
+    prices = snapshot.get("prices") or {}
+    twii = made_recent_high(prices.get("^TWII") or snapshot.get("twii"))
+    sox = pct_below_high(prices.get("^SOX") or snapshot.get("sox"))
+    flag = _and_flag(twii, sox)
+    indicator = _flag_indicator(
+        "加權新高而費半背離",
+        flag,
+        value_text=f"加權近 20 日創 252 日高：{twii}；費半低於 252 日高 5%：{sox}",
+        threshold="加權近 20 根曾創 252 日新高，且 ^SOX 收盤 ≤ 自己 252 日高點的 95%。",
+        source="Yahoo ^TWII、^SOX。",
+    )
+    return flag, indicator
+
+
+def _breadth_main(snapshot: dict) -> tuple[bool | None, dict]:
+    prices = snapshot.get("prices") or {}
+    relative = ratio_return(prices.get("RSP") or snapshot.get("rsp"), prices.get("SPY") or snapshot.get("spy"))
+    rsp_on = None if relative is None else relative <= THRESHOLDS["rsp_spy_drop"]
+    tw_on = tw_breadth_on(snapshot.get("tw_breadth"), snapshot.get("tw_breadth_prior"))
+    flag = _or_flag(rsp_on, tw_on)
+    bits = []
+    bits.append("RSP／SPY 未知" if relative is None else f"RSP／SPY {relative:+.1%}")
+    tw = _finite(snapshot.get("tw_breadth"))
+    bits.append("台股寬度未知" if tw is None else f"台股上漲比例 {tw:.1f}%")
+    indicator = _flag_indicator(
+        "寬度合成",
+        flag,
+        value=relative if relative is not None else tw,
+        value_text="；".join(bits),
+        threshold="RSP／SPY 二十日報酬 ≤ −2%，或台股上漲比例 < 40% 或較 20 個交易日前下降 ≥ 10 個百分點。",
+        source="Yahoo RSP、SPY。台股用證交所 MI_INDEX 上市股票漲跌家數。",
+    )
+    return flag, indicator
+
+
+def _leaders_main(snapshot: dict) -> tuple[bool | None, dict]:
+    prices = snapshot.get("prices") or {}
+    flags = snapshot.get("leader_flags")
+    if flags is None:
+        flags = _leader_flags(prices)
+    flag = _leader_on(list(flags))
+    known = sum(1 for item in flags if isinstance(item, bool))
+    below = sum(1 for item in flags if item is True)
+    indicator = _flag_indicator(
+        "領導股跌破 60 日線",
+        flag,
+        value=below,
+        value_text=f"{below} 檔在均線下，已知 {known} 檔",
+        threshold="NVDA、2330（沒有收盤才改看 TSM）、MU、AVGO。至少 2 檔收盤低於 60 日線。湊不齊就未知。",
+        source="Yahoo。",
+    )
+    return flag, indicator
+
+
+def _high_beta_main(snapshot: dict) -> tuple[bool | None, dict]:
+    prices = snapshot.get("prices") or {}
+    relative = ratio_return(prices.get("SPHB") or snapshot.get("sphb"), prices.get("SPLV") or snapshot.get("splv"))
+    flag = None if relative is None else relative <= THRESHOLDS["sphb_splv_drop"]
+    text = "未知" if relative is None else f"SPHB／SPLV {relative:+.1%}"
+    indicator = _flag_indicator(
+        "高貝塔相對低波",
+        flag,
+        value=relative,
+        value_text=text,
+        threshold="SPHB／SPLV 二十日報酬 ≤ −5%。",
+        source="Yahoo SPHB、SPLV。",
+    )
+    return flag, indicator
+
+
+def _confirm_credit(snapshot: dict) -> tuple[bool | None, dict]:
+    gap = hy_gap(snapshot.get("hy"))
+    flag = None if gap is None else gap >= THRESHOLDS["hy_confirm"]
+    text = "未知" if gap is None else f"距 60 日低點 {gap:.2f}"
+    indicator = _flag_indicator(
+        "高收益距低點擴大",
+        flag,
+        value=gap,
+        value_text=text,
+        threshold=f"高收益 OAS 減 60 日低點 ≥ {THRESHOLDS['hy_confirm']}。",
+        source="FRED BAMLH0A0HYM2。" + FRED_LAG_NOTE,
+    )
+    return flag, indicator
+
+
+def _confirm_tape(snapshot: dict) -> tuple[bool | None, dict]:
+    prices = snapshot.get("prices") or {}
+    below = below_dma(prices.get("^TWII") or snapshot.get("twii"), THRESHOLDS["leader_dma"])
+    foreign_flag, _item = _foreign_main(snapshot)
+    flag = _and_flag(below, foreign_flag)
+    indicator = _flag_indicator(
+        "加權跌破 60 日線且外資賣超",
+        flag,
+        value_text=f"加權在 60 日線下：{below}；外資 10 日賣超條件：{foreign_flag}",
+        threshold="加權收盤低於 60 日線，且外資 10 日累計 < −1,500 億。",
+        source="Yahoo ^TWII、TWSE BFI82U。",
+    )
+    return flag, indicator
+
+
+def _layer(layer_id: str, name: str, pairs: list[tuple], prior: list | None, need: int) -> dict:
+    flags = [flag for flag, _item in pairs]
+    today = raw_layer(flags, need)
+    hysteresis = apply_hysteresis(prior, today)
+    return {
+        "id": layer_id,
+        "name": name,
+        "state": hysteresis["state"],
+        "raw_on": today,
+        "need": need,
+        "hysteresis": hysteresis,
+        "indicators": [item for _flag, item in pairs],
+    }
+
+
+def _watch_block(snapshot: dict) -> list[dict]:
+    prices = snapshot.get("prices") or {}
     credit = snapshot.get("credit") or {}
-    leading = [
-        _credit_indicator("銀行放款意願 DRTSCILM", credit.get("drtscilm_light"), "信用傳導"),
-        _credit_indicator("高收益債利差", credit.get("hy_light"), "信用傳導"),
+    vix = _series(prices.get("^VIX") or snapshot.get("vix"))
+    if not vix:
+        vix_item = _indicator("VIX 高於 25", "unknown", threshold="收盤 > 25 僅供觀察。", source="Yahoo ^VIX", role="watch")
+    elif vix[-1] > THRESHOLDS["vix_watch"]:
+        vix_item = _indicator("VIX 高於 25", "red", value=vix[-1], value_text=f"{vix[-1]:.1f}", threshold="收盤 > 25 僅供觀察。", source="Yahoo ^VIX", role="watch")
+    else:
+        vix_item = _indicator("VIX 高於 25", "green", value=vix[-1], value_text=f"{vix[-1]:.1f}", threshold="收盤 > 25 僅供觀察。", source="Yahoo ^VIX", role="watch")
+    watches = [
+        vix_item,
         curve_indicator("十年減兩年利差", "T10Y2Y", snapshot.get("t10y2y")),
         curve_indicator("十年減三個月利差", "T10Y3M", snapshot.get("t10y3m")),
-        defensive_indicator(snapshot.get("prices")),
+        defensive_indicator({"SPY": prices.get("SPY"), "XLV": prices.get("XLV"), "XLP": prices.get("XLP"), "XLU": prices.get("XLU"), "XLK": prices.get("XLK")}),
+        _credit_indicator("金融壓力 STLFSI4", credit.get("stlfsi4_light"), "觀察。FRED STLFSI4。" + FRED_LAG_NOTE),
+        _credit_indicator("銀行放款意願 DRTSCILM", credit.get("drtscilm_light"), "觀察。信用傳導。" + FRED_LAG_NOTE),
+        _credit_indicator("銀行放款量 TOTLL", credit.get("totll_light"), "觀察。H.8。" + FRED_LAG_NOTE),
+        _credit_indicator("工商放款 TOTCI", credit.get("totci_light"), "觀察。H.8。" + FRED_LAG_NOTE),
+        index_trend_indicator("標普 500 跌破向下的 200 日線", prices.get("^GSPC") or snapshot.get("spx"), "觀察。Yahoo ^GSPC"),
+        index_trend_indicator("加權指數跌破向下的 200 日線", prices.get("^TWII") or snapshot.get("twii"), "觀察。Yahoo ^TWII"),
     ]
-    breadth = _breadth_block(snapshot)
-    internal = [
-        breadth["us"],
-        breadth["tw"],
-        leaders_indicator(snapshot.get("leader_below")),
-        high_beta_indicator(snapshot.get("sphb_return"), snapshot.get("splv_return")),
-    ]
-    confirm = [
-        index_trend_indicator("標普 500 跌破向下的 200 日線", snapshot.get("spx_closes"), "Yahoo ^GSPC"),
-        index_trend_indicator("加權指數跌破向下的 200 日線", snapshot.get("twii_closes"), "Yahoo ^TWII"),
-        hy_widening_indicator(credit.get("hy_change_bp")),
-        vix_indicator(snapshot.get("vix_closes")),
-    ]
+    for item in watches:
+        item["role"] = "watch"
+    return watches
+
+
+def assess(snapshot: dict | None = None) -> dict:
+    """由已備好的數字組預警。沒傳的項目是未知。觀察項不點亮層級。"""
+    snapshot = snapshot or {}
+    history = snapshot.get("history") or {}
+    leading_flag, leading_item = _credit_main(snapshot)
+    foreign_flag, foreign_item = _foreign_main(snapshot)
+    divergence_flag, divergence_item = _divergence_main(snapshot)
+    breadth_flag, breadth_item = _breadth_main(snapshot)
+    leader_flag, leader_item = _leaders_main(snapshot)
+    beta_flag, beta_item = _high_beta_main(snapshot)
+    confirm_credit_flag, confirm_credit_item = _confirm_credit(snapshot)
+    confirm_tape_flag, confirm_tape_item = _confirm_tape(snapshot)
     layers = [
-        {"id": "leading", "name": "第一層 領先", "indicators": leading, "state": _layer_state(leading)},
-        {"id": "internal", "name": "第二層 內部轉弱", "indicators": internal, "state": _layer_state(internal)},
-        {"id": "confirm", "name": "第三層 確認", "indicators": confirm, "state": _layer_state(confirm)},
+        _layer("leading", "第一層 領先", [(leading_flag, leading_item), (foreign_flag, foreign_item), (divergence_flag, divergence_item)], history.get("leading"), 2),
+        _layer("internal", "第二層 內部", [(breadth_flag, breadth_item), (leader_flag, leader_item), (beta_flag, beta_item)], history.get("internal"), 2),
+        _layer("confirm", "第三層 確認", [(confirm_credit_flag, confirm_credit_item), (confirm_tape_flag, confirm_tape_item)], history.get("confirm"), 1),
     ]
+    prices = snapshot.get("prices") or {}
+    advice = tactical_dma_advice(snapshot.get("held"), prices)
     plan = suggestion(snapshot.get("regime"), layers)
     return {
         "caption": CAPTION,
@@ -427,13 +1014,11 @@ def assess(snapshot: dict | None = None) -> dict:
         "overall": overall_state(layers),
         "thresholds": dict(THRESHOLDS),
         "leaders": list(LEADERS),
-        "breadth": {
-            "us_universe": US_BREADTH_UNIVERSE,
-            "tw_universe": TW_BREADTH_UNIVERSE,
-            "us": breadth["us"],
-            "tw": breadth["tw"],
-        },
+        "breadth": {"us_universe": US_BREADTH_UNIVERSE, "tw_universe": TW_BREADTH_UNIVERSE},
         "layers": layers,
+        "watches": _watch_block(snapshot),
+        "tactical_advice": advice,
+        "core_note": "核心部位跟著預警上限，不套用收破 20 日線減 1/3。",
         **plan,
     }
 
@@ -466,6 +1051,8 @@ def clear_bear_cache() -> None:
     _REGIME_CACHE["ready"] = False
     _BREADTH_CACHE["at"] = 0.0
     _BREADTH_CACHE["value"] = None
+    _HISTORY_CACHE["at"] = 0.0
+    _HISTORY_CACHE["value"] = None
 
 
 def _bundle_has_closes(prices: dict | None) -> bool:
@@ -479,7 +1066,7 @@ def closes_to_bundle(closes: dict | None) -> dict:
     """收盤序列（由舊到新）收成預警要用的行情。不夠長的項目留空，不當 0。"""
     closes = closes or {}
     bundle: dict = {}
-    for symbol in ("SPY", "XLV", "XLP", "XLU", "XLK", "SPHB", "SPLV", "^GSPC", "^TWII", "^VIX", *LEADERS):
+    for symbol in PRICE_TICKERS:
         series = [_finite(item) for item in (closes.get(symbol) or [])]
         series = [item for item in series if item is not None]
         bundle[symbol] = series or None
@@ -820,6 +1407,198 @@ def cached_breadth(today: date, reader=None) -> dict:
     return dict(found)
 
 
+def _fred_values(fetch_fred, series_id: str) -> list[float]:
+    try:
+        observations = fetch_fred(series_id) or []
+    except Exception:
+        return []
+    values = []
+    for item in observations:
+        if isinstance(item, (tuple, list)) and len(item) >= 2:
+            number = _finite(item[1])
+        else:
+            number = _finite(item)
+        if number is not None:
+            values.append(number)
+    return values
+
+
+def _fred_points(fetch_fred, series_id: str) -> list:
+    try:
+        observations = fetch_fred(series_id) or []
+    except Exception:
+        return []
+    return list(observations)
+
+
+def _cached_curves(today: date, fetch_fred) -> dict:
+    if _PRICE_CACHE.get("curve_day") == today.isoformat():
+        return dict(_PRICE_CACHE.get("curves") or {})
+    curves = {}
+    for series_id in ("T10Y2Y", "T10Y3M"):
+        try:
+            curves[series_id] = _latest(fetch_fred(series_id))
+        except Exception:
+            curves[series_id] = None
+    _PRICE_CACHE["curve_day"] = today.isoformat()
+    _PRICE_CACHE["curves"] = curves
+    return curves
+
+
+def cached_warning_history(today: date, reader=None) -> dict:
+    """十五分鐘內不重讀試算表。沒有存檔就是空，請求不去補抓十日外資。"""
+    import time
+
+    current = time.time()
+    cached = _HISTORY_CACHE.get("value")
+    if isinstance(cached, dict) and current - float(_HISTORY_CACHE.get("at") or 0) < 15 * 60:
+        return dict(cached)
+    if reader is None:
+        reader = read_warning_history
+    try:
+        found = reader(today) or {}
+    except Exception:
+        found = {}
+    if not isinstance(found, dict):
+        found = {}
+    _HISTORY_CACHE["at"] = current
+    _HISTORY_CACHE["value"] = found
+    return dict(found)
+
+
+def _flag_cell(value) -> str:
+    if value is True:
+        return "1"
+    if value is False:
+        return "0"
+    return ""
+
+
+def _cell_flag(value) -> bool | None:
+    text = str(value or "").strip()
+    if text in {"1", "True", "true", "成立"}:
+        return True
+    if text in {"0", "False", "false", "未成立"}:
+        return False
+    return None
+
+
+def record_warning_rows(spreadsheet, rows: list[dict], written_at: str = "") -> dict:
+    """依日期補上外資與漲跌家數。條件欄空白不覆蓋已經寫過的 0／1。"""
+    from sheet_dates import parse_sheet_date
+
+    usable = [row for row in rows or [] if row.get("date")]
+    if not usable:
+        return {"status": "skipped", "sheet": WARNING_TAB, "detail": "沒有可寫的列，沒有把缺值寫成 0。"}
+    from nav_snapshot import _ensure_worksheet
+
+    worksheet, created, _migrated = _ensure_worksheet(spreadsheet, WARNING_TAB, list(WARNING_HEADER))
+    existing = worksheet.col_values(1)
+    index_by_day = {}
+    for index, raw in enumerate(existing[1:], start=2):
+        day = parse_sheet_date(raw)
+        if day is not None:
+            index_by_day[day.isoformat()] = index
+    for row in usable:
+        day = parse_sheet_date(row.get("date"))
+        if day is None:
+            continue
+        values = [
+            day.isoformat(),
+            _flag_cell(row.get("leading")) if "leading" in row else "",
+            _flag_cell(row.get("internal")) if "internal" in row else "",
+            _flag_cell(row.get("confirm")) if "confirm" in row else "",
+            "" if row.get("foreign_net") is None else row.get("foreign_net"),
+            "" if row.get("up") is None else row.get("up"),
+            "" if row.get("down") is None else row.get("down"),
+            written_at,
+        ]
+        target = index_by_day.get(day.isoformat())
+        if target is None:
+            target = max(len(existing), 1) + 1
+            existing.append(day.isoformat())
+            index_by_day[day.isoformat()] = target
+            worksheet.update(range_name=f"A{target}:H{target}", values=[values], value_input_option="USER_ENTERED")
+            continue
+        current = worksheet.row_values(target)
+        while len(current) < 8:
+            current.append("")
+        for offset, key in ((1, "leading"), (2, "internal"), (3, "confirm")):
+            if key in row and current[offset] in {"", None}:
+                current[offset] = values[offset]
+        if "foreign_net" in row and row.get("foreign_net") is not None and str(current[4]).strip() == "":
+            current[4] = values[4]
+        if row.get("up") is not None and str(current[5]).strip() == "":
+            current[5] = values[5]
+        if row.get("down") is not None and str(current[6]).strip() == "":
+            current[6] = values[6]
+        current[7] = written_at or current[7]
+        worksheet.update(range_name=f"A{target}:H{target}", values=[current[:8]], value_input_option="USER_ENTERED")
+    return {"status": "written", "sheet": WARNING_TAB, "rows": len(usable), "sheet_created": created, "detail": ""}
+
+
+def read_warning_history(today: date) -> dict:
+    from portfolio_risk import load_service_account_info, open_quant_spreadsheet
+
+    return warning_history_from_sheet(open_quant_spreadsheet(load_service_account_info()), today)
+
+
+def warning_history_from_sheet(spreadsheet, today: date) -> dict:
+    """讀每日列。外資要滿 10 筆才回傳。寬度用最新一列與往前 20 列。條件不含今天，今天由請求重算。"""
+    from sheet_dates import parse_sheet_date
+
+    try:
+        worksheet = spreadsheet.worksheet(WARNING_TAB)
+    except Exception:
+        return {}
+    try:
+        from sheet_numbers import read_worksheet_records
+
+        rows = read_worksheet_records(worksheet)
+    except Exception:
+        try:
+            rows = worksheet.get_all_records()
+        except Exception:
+            return {}
+    parsed = []
+    for row in rows or []:
+        day = parse_sheet_date(row.get("日期"))
+        if day is None or day > today:
+            continue
+        parsed.append((day, row))
+    parsed.sort(key=lambda item: item[0])
+    foreign = []
+    for _day, row in parsed:
+        number = _finite(str(row.get("外資買賣超") or "").replace(",", ""))
+        if number is not None:
+            foreign.append(number)
+    breadth_rows = []
+    for day, row in parsed:
+        percent = breadth_percent_from_counts(row.get("上漲家數"), row.get("下跌家數"))
+        if percent is not None:
+            breadth_rows.append((day, percent))
+    flags = {"leading": [], "internal": [], "confirm": []}
+    for day, row in parsed:
+        if day >= today:
+            continue
+        leading = _cell_flag(row.get("領先條件"))
+        internal = _cell_flag(row.get("內部條件"))
+        confirm = _cell_flag(row.get("確認條件"))
+        if leading is None and internal is None and confirm is None:
+            continue
+        flags["leading"].append(leading)
+        flags["internal"].append(internal)
+        flags["confirm"].append(confirm)
+    latest = breadth_rows[-1][1] if breadth_rows else None
+    prior = breadth_rows[-21][1] if len(breadth_rows) >= 21 else None
+    return {
+        "foreign_nets": foreign[-THRESHOLDS["foreign_days"]:] if len(foreign) >= THRESHOLDS["foreign_days"] else None,
+        "tw_breadth": latest,
+        "tw_breadth_prior": prior,
+        "flags": flags,
+    }
+
+
 def _return_over(closes: list[float] | None, weeks: int) -> float | None:
     series = week_returns(closes, weeks)
     if not series:
@@ -830,7 +1609,7 @@ def _return_over(closes: list[float] | None, weeks: int) -> float | None:
     return total - 1.0
 
 
-def load_bear_warning(today: date, regime: str | None = None, credit_board: dict | None = None, fetch_fred=None, fetch_prices=None, regime_reader=None, breadth_reader=None) -> dict:
+def load_bear_warning(today: date, regime: str | None = None, credit_board: dict | None = None, fetch_fred=None, fetch_prices=None, regime_reader=None, breadth_reader=None, history_reader=None, held_symbols=None) -> dict:
     """信用傳導沿用呼叫端已經抓好的 board，不再抓一次。行情沒傳函式就抓 Yahoo。廣度只讀每日快照。"""
     if regime not in CAP_STEPS:
         regime = cached_sheet_regime(reader=regime_reader)
@@ -839,46 +1618,28 @@ def load_bear_warning(today: date, regime: str | None = None, credit_board: dict
 
         fetch_fred = fetch_fred_observations
     prices = cached_price_bundle(today, fetch_prices)
-    stored = cached_breadth(today, reader=breadth_reader)
-    for key in ("breadth_us", "breadth_us_prior", "breadth_tw", "breadth_tw_prior"):
-        if prices.get(key) is None and stored.get(key) is not None:
-            prices[key] = stored[key]
-    if _PRICE_CACHE.get("curve_day") == today.isoformat():
-        curves = dict(_PRICE_CACHE.get("curves") or {})
-    else:
-        curves = {}
-        for series_id in ("T10Y2Y", "T10Y3M"):
-            try:
-                curves[series_id] = _latest(fetch_fred(series_id))
-            except Exception:
-                curves[series_id] = None
-        _PRICE_CACHE["curve_day"] = today.isoformat()
-        _PRICE_CACHE["curves"] = curves
-    hy_change = _row_change(credit_board, "hy_oas")
+    history = cached_warning_history(today, reader=history_reader)
+    curves = _cached_curves(today, fetch_fred)
+    hy_levels = _fred_values(fetch_fred, "BAMLH0A0HYM2")
+    nfci_points = _fred_points(fetch_fred, "NFCI")
     snapshot = {
         "regime": regime,
+        "hy": hy_levels,
+        "nfci": nfci_points,
+        "foreign_nets": history.get("foreign_nets"),
+        "tw_breadth": history.get("tw_breadth"),
+        "tw_breadth_prior": history.get("tw_breadth_prior"),
+        "history": history.get("flags") or {},
         "credit": {
             "drtscilm_light": _row_light(credit_board, "drtscilm"),
-            "hy_light": _row_light(credit_board, "hy_oas"),
-            "hy_change_bp": hy_change,
+            "stlfsi4_light": _row_light(credit_board, "stlfsi4"),
+            "totll_light": _row_light(credit_board, "totll"),
+            "totci_light": _row_light(credit_board, "totci"),
         },
         "t10y2y": curves.get("T10Y2Y"),
         "t10y3m": curves.get("T10Y3M"),
-        "prices": {symbol: prices.get(symbol) for symbol in ("SPY", "XLV", "XLP", "XLU", "XLK")},
-        "leader_below": prices.get("leader_below"),
-        "sphb_return": _return_over(prices.get("SPHB"), THRESHOLDS["high_beta_weeks"]),
-        "splv_return": _return_over(prices.get("SPLV"), THRESHOLDS["high_beta_weeks"]),
-        "spx_closes": prices.get("^GSPC"),
-        "twii_closes": prices.get("^TWII"),
-        "vix_closes": prices.get("^VIX"),
-        "breadth_us": prices.get("breadth_us"),
-        "breadth_us_prior": prices.get("breadth_us_prior"),
-        "breadth_tw": prices.get("breadth_tw"),
-        "breadth_tw_prior": prices.get("breadth_tw_prior"),
-        "spx_last": prices.get("spx_last"),
-        "spx_high": prices.get("spx_high"),
-        "twii_last": prices.get("twii_last"),
-        "twii_high": prices.get("twii_high"),
+        "prices": prices,
+        "held": held_symbols,
     }
     return assess(snapshot)
 
@@ -922,8 +1683,21 @@ def render_bear_panel(st, report: dict) -> None:
     st.caption(f"建議槓桿上限 {cap_text}（牛熊上限 {regime_text}，預警調整 {warning_text}，取較低者）。{report.get('suggested_action') or ''}")
     st.caption(report.get("note") or NOTE)
     for layer in report.get("layers") or []:
-        _paint_light(st, layer.get("state") or "unknown", layer.get("name") or "這一層")
+        hyst = layer.get("hysteresis") or {}
+        extra = "。".join(part for part in (hyst.get("raw_text"), hyst.get("note")) if part)
+        _paint_light(st, layer.get("state") or "unknown", f"{layer.get('name') or '這一層'}　{extra}")
         for item in layer.get("indicators") or []:
             _paint_light(st, item.get("state") or "unknown", f"{item.get('name') or '子指標'}　{item.get('value_text') or '未知'}")
+    st.markdown("**觀察（不點亮層級）**")
+    for item in report.get("watches") or []:
+        _paint_light(st, item.get("state") or "unknown", f"{item.get('name') or '觀察'}　{item.get('value_text') or '未知'}")
+    st.caption(report.get("core_note") or "核心部位跟著預警上限。")
+    advice = report.get("tactical_advice") or []
+    if advice:
+        st.markdown("**戰術曝險：收破 20 日線減 1/3**")
+        for item in advice:
+            st.caption(f"{item.get('symbol')} 對照 {item.get('underlying_label')}（{item.get('underlying')}）：{item.get('advice')}")
+    else:
+        st.caption("戰術曝險若收破對應標的的 20 日線，減三分之一。沒有持倉或沒有收盤時不列。不下單。")
     st.caption(US_BREADTH_UNIVERSE)
     st.caption(TW_BREADTH_UNIVERSE)

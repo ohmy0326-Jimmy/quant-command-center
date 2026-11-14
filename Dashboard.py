@@ -901,6 +901,16 @@ elif page == "第四頁：部位監控與量化風控":
                 metrics["tw_index"] = float(cached_twii())
             except Exception:
                 metrics["tw_index"] = None
+            try:
+                from bear_warning import cached_price_bundle, tactical_dma_advice
+                from zoneinfo import ZoneInfo
+
+                held = df["標的"].tolist() if not df.empty and "標的" in df.columns else []
+                block = dict(metrics.get("deleverage") or {})
+                block["tactical_advice"] = tactical_dma_advice(held, cached_price_bundle(datetime.now(ZoneInfo("Asia/Taipei")).date()))
+                metrics["deleverage"] = block
+            except Exception:
+                pass
             render_risk_performance_card(st, metrics, nav_series, capture, nav_flows)
             if not df.empty:
                 known_exposure = pd.to_numeric(df['實質曝險(台幣)'], errors="coerce")

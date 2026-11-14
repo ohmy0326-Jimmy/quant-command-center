@@ -185,6 +185,7 @@ class BearIndicatorResponse(BaseModel):
     value_text: str = ""
     threshold: str = ""
     source: str = ""
+    role: Literal["main", "watch"] = "main"
 
 
 class BearLayerResponse(BaseModel):
@@ -195,6 +196,9 @@ class BearLayerResponse(BaseModel):
     id: str
     name: str
     state: Literal["green", "yellow", "red", "unknown"]
+    raw_on: bool | None = None
+    need: int | None = None
+    hysteresis: dict = Field(default_factory=dict, description="1.16.0。連續 3 日才亮、連續 10 日才熄。歷史不夠時 note 是遲滯資料不足，state 是 unknown。")
     indicators: list[BearIndicatorResponse]
 
 
@@ -215,6 +219,9 @@ class BearWarningResponse(BaseModel):
     leaders: list[str] = Field(default_factory=list)
     breadth: dict
     layers: list[BearLayerResponse]
+    watches: list[BearIndicatorResponse] = Field(default_factory=list, description="1.16.0。只觀察，不點亮層級。")
+    tactical_advice: list[dict] = Field(default_factory=list, description="1.16.0。戰術曝險收破對應標的 20 日線時建議減 1/3。不下單。")
+    core_note: str = ""
 
 
 class DeleverageTargetResponse(BaseModel):
@@ -422,6 +429,7 @@ class NavSnapshotResponse(BaseModel):
     warnings: list[str]
     macro_history: dict = Field(default_factory=dict, description="同一天寫入 Macro_Score_History 的結果。status 為 written、kept、skipped 或 failed。失敗不會讓淨值快照失敗。total 缺值是 null，不是 0。")
     bear_breadth: dict = Field(default_factory=dict, description="1.14.0。同一天寫入 Bear_Breadth 的廣度。失敗或跳過不會讓淨值快照失敗。沒有成分股收盤時不寫 0。")
+    bear_warning_history: dict = Field(default_factory=dict, description="1.16.0。同一天補上 Bear_Warning_Daily 的外資與漲跌家數。失敗不會讓淨值快照失敗。")
 
 
 def export_json_schema() -> dict:

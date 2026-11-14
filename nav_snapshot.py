@@ -290,6 +290,31 @@ def attach_macro_history(payload: dict, spreadsheet, today: str) -> dict:
     return payload
 
 
+def attach_warning_history(payload: dict, spreadsheet, today: str, compute=None) -> dict:
+    """外資與漲跌家數寫入失敗不推翻淨值快照。"""
+    if compute is False:
+        payload["bear_warning_history"] = {"status": "skipped", "sheet": "Bear_Warning_Daily", "as_of": str(today), "detail": "這次沒有補預警歷史。"}
+        return payload
+    try:
+        from datetime import date as date_cls
+
+        from bear_warning import collect_warning_rows, record_warning_rows
+
+        day = date_cls.fromisoformat(str(today))
+        rows = collect_warning_rows(day) if compute is None else compute()
+        written = str((payload.get("row") or {}).get("寫入時間") or "")
+        payload["bear_warning_history"] = record_warning_rows(spreadsheet, rows or [], written)
+    except Exception:
+        logger.exception("bear warning history failed")
+        payload["bear_warning_history"] = {
+            "status": "failed",
+            "sheet": "Bear_Warning_Daily",
+            "as_of": str(today),
+            "detail": "預警歷史沒有寫入。淨值快照已寫入。",
+        }
+    return payload
+
+
 def attach_breadth(payload: dict, spreadsheet, today: str, compute=None) -> dict:
     """廣度寫入失敗只記在摘要裡，不推翻已經寫好的淨值快照。"""
     if compute is False:
@@ -372,7 +397,9 @@ def take_snapshot(now: datetime | None = None, spreadsheet=None, usdtwd: float |
         "usdtwd_source": fx.source,
         "warnings": [str(w) for w in fx_warnings + list(row_warnings) + flow_warnings],
     }
-    return attach_breadth(attach_macro_history(payload, book, row["日期"]), book, row["日期"], compute=breadth_compute)
+    warning_compute = False if breadth_compute is False else None
+    saved = attach_breadth(attach_macro_history(payload, book, row["日期"]), book, row["日期"], compute=breadth_compute)
+    return attach_warning_history(saved, book, row["日期"], compute=warning_compute)
 
 
 # ---------------------------------------------------------------- 捕獲率

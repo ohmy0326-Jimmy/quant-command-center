@@ -605,6 +605,8 @@ def render_deleverage_panel(st, block: dict | None) -> None:
     priority = block.get("priority_reductions") or []
     if priority:
         st.error((block.get("priority_reason") or "優先減碼") + "：" + "、".join(item.get("symbol") or "—" for item in priority))
+    for item in block.get("tactical_advice") or []:
+        st.caption(f"{item.get('symbol')} 對照 {item.get('underlying_label')}：{item.get('advice')}。只減戰術曝險，不下單。")
     swaps = block.get("swaps") or []
     if not swaps:
         st.caption("目前沒有對照表裡的槓桿 ETF 持倉。")
