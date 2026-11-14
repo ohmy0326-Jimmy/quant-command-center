@@ -525,11 +525,20 @@ def apply_hysteresis(prior: list | None, today: bool | None, on_days: int | None
     else:
         raw_text = "今日條件未知"
     sufficient = state is not None
-    note = "" if sufficient else "遲滯資料不足"
-    light = "red" if state is True else "green" if state is False else "unknown"
+    provisional = (not sufficient) and today is True
+    if provisional:
+        note = "疑似亮燈（遲滯資料不足）"
+        light = "yellow"
+    elif not sufficient:
+        note = "遲滯資料不足"
+        light = "unknown"
+    else:
+        note = ""
+        light = "red" if state is True else "green"
     return {
         "state": light,
         "on": state is True,
+        "provisional": provisional,
         "raw_on": today,
         "raw_text": raw_text,
         "on_streak": on_streak,
@@ -586,6 +595,162 @@ def tw_breadth_on(latest, prior) -> bool | None:
     return False
 
 
+BACKFILL_TRADING_DAYS = 60
+HY_LAG_DAYS = 1
+NFCI_LAG_DAYS = 5
+
+
+def _through(dated, day: date, lag_days: int = 0):
+    from datetime import timedelta
+
+    cutoff = day - timedelta(days=lag_days)
+    return [(item_day, value) for item_day, value in dated if item_day <= cutoff]
+
+
+def build_backfill_rows(today: date, bundle: dict, trading_days: int = BACKFILL_TRADING_DAYS) -> list[dict]:
+    """用每個交易日當時已公布的數字重算三層條件。週末與沒有加權收盤的日子不寫。"""
+    from datetime import timedelta
+
+    prices = bundle.get("prices") or {}
+    twii = list(prices.get("^TWII") or [])
+    days = [item_day for item_day, _value in twii if item_day <= today and item_day.weekday() < 5]
+    days = days[-trading_days:]
+    foreign = list(bundle.get("foreign") or [])
+    breadth = list(bundle.get("breadth") or [])
+    hy = list(bundle.get("hy") or [])
+    nfci = list(bundle.get("nfci") or [])
+    foreign_by_day = {item_day: value for item_day, value in foreign}
+    breadth_by_day = {item_day: (up, down) for item_day, up, down in breadth}
+    rows = []
+    for day in days:
+        hy_values = [value for _day, value in _through(hy, day, HY_LAG_DAYS)]
+        nfci_points = _through(nfci, day, NFCI_LAG_DAYS)
+        nets = [value for item_day, value in foreign if item_day <= day]
+        breadth_days = [(item_day, breadth_percent_from_counts(up, down)) for item_day, up, down in breadth if item_day <= day]
+        breadth_days = [(item_day, percent) for item_day, percent in breadth_days if percent is not None]
+        sliced = {symbol: [value for item_day, value in series if item_day <= day] for symbol, series in prices.items()}
+        snapshot = {
+            "hy": hy_values,
+            "nfci": nfci_points,
+            "foreign_nets": nets[-THRESHOLDS["foreign_days"]:] if len(nets) >= THRESHOLDS["foreign_days"] else None,
+            "tw_breadth": breadth_days[-1][1] if breadth_days else None,
+            "tw_breadth_prior": breadth_days[-21][1] if len(breadth_days) >= 21 else None,
+            "prices": sliced,
+        }
+        leading = raw_layer([_credit_main(snapshot)[0], _foreign_main(snapshot)[0], _divergence_main(snapshot)[0]], 2)
+        internal = raw_layer([_breadth_main(snapshot)[0], _leaders_main(snapshot)[0], _high_beta_main(snapshot)[0]], 2)
+        confirm = raw_layer([_confirm_credit(snapshot)[0], _confirm_tape(snapshot)[0]], 1)
+        row = {"date": day.isoformat()}
+        if leading is not None:
+            row["leading"] = leading
+        if internal is not None:
+            row["internal"] = internal
+        if confirm is not None:
+            row["confirm"] = confirm
+        if day in foreign_by_day:
+            row["foreign_net"] = foreign_by_day[day]
+        if day in breadth_by_day:
+            row["up"], row["down"] = breadth_by_day[day]
+        rows.append(row)
+    return rows
+
+
+def backfill_warning_history(today: date, spreadsheet, trading_days: int = BACKFILL_TRADING_DAYS, pause: float = 0.35, loaders: dict | None = None, written_at: str = "") -> dict:
+    """補約 60 個交易日。同一天重跑只填空白欄。不寫 Daily_NAV。"""
+    loaders = loaders or {}
+    try:
+        foreign_days = loaders["foreign"](today) if "foreign" in loaders else _fetch_foreign_days(today, trading_days, pause)
+    except Exception:
+        foreign_days = []
+    try:
+        breadth_days = loaders["breadth"](today) if "breadth" in loaders else fetch_listed_breadth(today, trading_days=trading_days, pause=pause)
+    except Exception:
+        breadth_days = []
+    try:
+        prices = loaders["prices"]() if "prices" in loaders else _fetch_dated_prices()
+    except Exception:
+        prices = {}
+    try:
+        hy, nfci = loaders["fred"]() if "fred" in loaders else _fetch_fred_history()
+    except Exception:
+        hy, nfci = [], []
+    breadth = []
+    for item in breadth_days or []:
+        if isinstance(item, (tuple, list)) and len(item) >= 3:
+            breadth.append((item[0], item[1], item[2]))
+        elif isinstance(item, dict) and item.get("date") is not None:
+            breadth.append((item["date"], item.get("up"), item.get("down")))
+    rows = build_backfill_rows(today, {"prices": prices, "foreign": foreign_days, "breadth": breadth, "hy": hy, "nfci": nfci}, trading_days)
+    if not rows:
+        return {"status": "skipped", "sheet": WARNING_TAB, "rows": 0, "detail": "沒有可回補的交易日，沒有寫 0。"}
+    saved = record_warning_rows(spreadsheet, rows, written_at)
+    saved["rows"] = len(rows)
+    return saved
+
+
+def _fetch_foreign_days(today: date, trading_days: int, pause: float) -> list[tuple]:
+    from macro_risk import fetch_foreign_flows
+
+    flows = fetch_foreign_flows(today, trading_days=trading_days, max_calendar_days=trading_days * 2, pause=pause)
+    return [(day, net) for day, net in (flows or {}).get("days") or [] if net is not None]
+
+
+def _fetch_dated_prices() -> dict:
+    from order_insights import fetch_close_history
+
+    history = fetch_close_history(list(PRICE_TICKERS), period="2y")
+    found = {}
+    for symbol, series in (history or {}).items():
+        points = []
+        index = getattr(series, "index", [])
+        values = getattr(series, "tolist", lambda: [])()
+        for stamp, value in zip(index, values):
+            number = _finite(value)
+            if number is None:
+                continue
+            day = stamp.date() if hasattr(stamp, "date") else stamp
+            points.append((day, number))
+        if points:
+            found[str(symbol)] = points
+    return found
+
+
+def _fetch_fred_history() -> tuple[list, list]:
+    from page1_lights import fetch_fred_observations
+
+    def points(series_id):
+        rows = []
+        for item in fetch_fred_observations(series_id) or []:
+            if not isinstance(item, (tuple, list)) or len(item) < 2:
+                continue
+            number = _finite(item[1])
+            if number is None or item[0] is None:
+                continue
+            rows.append((item[0], number))
+        return rows
+
+    return points("BAMLH0A0HYM2"), points("NFCI")
+
+
+def flag_history_length(history: dict | None) -> int:
+    flags = (history or {}).get("flags") or {}
+    return len(flags.get("leading") or [])
+
+
+def ensure_warning_history(spreadsheet, today: date, written_at: str = "") -> dict:
+    """歷史短於 60 個交易日就回補；否則只抓今天附近的外資與漲跌家數。"""
+    try:
+        length = flag_history_length(warning_history_from_sheet(spreadsheet, today))
+    except Exception:
+        length = 0
+    if length < BACKFILL_TRADING_DAYS:
+        return backfill_warning_history(today, spreadsheet, written_at=written_at)
+    rows = collect_warning_rows(today)
+    saved = record_warning_rows(spreadsheet, rows, written_at)
+    saved["rows"] = len(rows)
+    return saved
+
+
 def collect_warning_rows(today: date, fetch_foreign=None, fetch_breadth=None) -> list[dict]:
     """給每日快照補外資與上市股票漲跌家數。失敗的那一側留空，不寫 0。"""
     from datetime import timedelta
@@ -626,8 +791,10 @@ def collect_warning_rows(today: date, fetch_foreign=None, fetch_breadth=None) ->
     return [rows[key] for key in sorted(rows)]
 
 
-def fetch_listed_breadth(today: date, trading_days: int = 21) -> list[dict]:
+def fetch_listed_breadth(today: date, trading_days: int = 21, pause: float = 0.2) -> list[dict]:
     """證交所 MI_INDEX 上市股票漲跌家數。連不上就停，不把缺日補 0。"""
+    import time
+
     import requests
     from datetime import timedelta
 
@@ -652,6 +819,8 @@ def fetch_listed_breadth(today: date, trading_days: int = 21) -> list[dict]:
         if not parsed:
             continue
         found.append({"date": day, "up": parsed["up"], "down": parsed["down"]})
+        if pause:
+            time.sleep(pause)
     return found
 
 
@@ -742,10 +911,17 @@ def _ticker_key_local(symbol) -> str:
     return text
 
 
+def _active(state: str) -> bool:
+    """已確認的紅燈，或歷史不夠但今日條件成立的黃燈，都先當成亮。"""
+    return state in {"red", "yellow"}
+
+
 def suggestion(regime: str | None, layers: list[dict]) -> dict:
     current = regime_cap(regime)
     states = [layer["state"] for layer in layers]
     leading, internal, confirm = (states + ["unknown", "unknown", "unknown"])[:3]
+    provisional = any(layer.get("provisional") for layer in layers)
+    prefix = "暫行：遲滯資料不足，今日條件先當成亮燈。" if provisional else ""
     if current is None:
         return {
             "regime": None,
@@ -753,20 +929,21 @@ def suggestion(regime: str | None, layers: list[dict]) -> dict:
             "warning_cap": None,
             "suggested_cap": None,
             "suggested_action": "牛熊狀態未知，不猜測槓桿上限。",
+            "provisional": False,
         }
     name = str(regime)
-    if confirm == "red":
+    if _active(confirm):
         warning_name = "熊"
-        action = "第三層確認，只留核心與避險。核心跟著預警上限。"
-    elif _lit(leading) and _lit(internal):
+        action = prefix + "第三層確認，只留核心與避險。核心跟著預警上限。"
+    elif _active(leading) and _active(internal):
         warning_name = _step_down(name, 2)
-        action = "領先與內部都亮，槓桿上限再降一檔，並加避險。核心跟著預警上限。"
-    elif _lit(leading):
+        action = prefix + "領先與內部都亮，槓桿上限再降一檔，並加避險。核心跟著預警上限。"
+    elif _active(leading):
         warning_name = _step_down(name, 1)
-        action = "第一層亮，槓桿上限降一檔。核心跟著預警上限。"
-    elif _lit(internal):
+        action = prefix + "第一層亮，槓桿上限降一檔。核心跟著預警上限。"
+    elif _active(internal):
         warning_name = _step_down(name, 1)
-        action = "第二層亮，槓桿上限降一檔，並加避險。核心跟著預警上限。"
+        action = prefix + "第二層亮，槓桿上限降一檔，並加避險。核心跟著預警上限。"
     else:
         warning_name = name
         action = "預警未亮，沿用牛熊分數的槓桿上限。核心跟著這個上限。"
@@ -778,6 +955,7 @@ def suggestion(regime: str | None, layers: list[dict]) -> dict:
         "warning_cap": warning,
         "suggested_cap": suggested,
         "suggested_action": action,
+        "provisional": provisional,
     }
 
 
@@ -955,6 +1133,7 @@ def _layer(layer_id: str, name: str, pairs: list[tuple], prior: list | None, nee
         "name": name,
         "state": hysteresis["state"],
         "raw_on": today,
+        "provisional": bool(hysteresis.get("provisional")),
         "need": need,
         "hysteresis": hysteresis,
         "indicators": [item for _flag, item in pairs],

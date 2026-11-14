@@ -298,12 +298,14 @@ def attach_warning_history(payload: dict, spreadsheet, today: str, compute=None)
     try:
         from datetime import date as date_cls
 
-        from bear_warning import collect_warning_rows, record_warning_rows
+        from bear_warning import ensure_warning_history, record_warning_rows
 
         day = date_cls.fromisoformat(str(today))
-        rows = collect_warning_rows(day) if compute is None else compute()
         written = str((payload.get("row") or {}).get("寫入時間") or "")
-        payload["bear_warning_history"] = record_warning_rows(spreadsheet, rows or [], written)
+        if compute is None:
+            payload["bear_warning_history"] = ensure_warning_history(spreadsheet, day, written)
+        else:
+            payload["bear_warning_history"] = record_warning_rows(spreadsheet, compute() or [], written)
     except Exception:
         logger.exception("bear warning history failed")
         payload["bear_warning_history"] = {

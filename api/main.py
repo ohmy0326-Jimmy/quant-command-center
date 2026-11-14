@@ -15,7 +15,7 @@ from fastapi.security import APIKeyHeader
 from ai_advice import RISK_MANAGER_MODEL, build_risk_manager_prompt, complete_risk_manager_prompt, page4_advice_figures
 from api.advice_cache import AdviceCache, AdviceTimeout, RateLimited, call_with_timeout
 from api.auth import api_key_matches, expected_api_key, expected_push_key, expected_snapshot_key, install_redact_filter, redact_secrets
-from api.schemas import AdviceResponse, ErrorResponse, HealthResponse, NavSnapshotResponse, PortfolioResponse
+from api.schemas import AdviceResponse, BearBackfillResponse, ErrorResponse, HealthResponse, NavSnapshotResponse, PortfolioResponse
 from portfolio_briefing import SCHEMA_VERSION, format_as_of, load_live_book, taipei_now
 
 logger = logging.getLogger(__name__)
@@ -41,6 +41,19 @@ def get_snapshot_writer():
     from nav_snapshot import take_snapshot
 
     return take_snapshot
+
+
+def get_warning_backfill():
+    from bear_warning import backfill_warning_history
+    from portfolio_briefing import taipei_now
+    from portfolio_risk import load_service_account_info, open_quant_spreadsheet
+
+    def run():
+        moment = taipei_now()
+        book = open_quant_spreadsheet(load_service_account_info())
+        return backfill_warning_history(moment.date(), book, written_at=moment.strftime("%Y-%m-%d %H:%M:%S"))
+
+    return run
 
 
 def get_alert_runner():
@@ -246,6 +259,28 @@ def nav_snapshot(_: None = Depends(require_snapshot_key), writer=Depends(get_sna
     payload = dict(result)
     payload.update(schema_version=SCHEMA_VERSION, as_of=format_as_of(taipei_now()), status="written")
     return _no_store(NavSnapshotResponse, payload)
+
+
+@app.post("/v1/bear-warning-backfill", response_model=BearBackfillResponse)
+def bear_warning_backfill(_: None = Depends(require_snapshot_key), runner=Depends(get_warning_backfill)):
+    """補 Bear_Warning_Daily 約 60 個交易日。同一天重跑只填空白欄。不寫 NAV_Snapshots 或 Daily_NAV。"""
+    try:
+        result = runner()
+    except Exception as exc:
+        _log_load_failure("/v1/bear-warning-backfill", exc)
+        raise HTTPException(status_code=502, detail="bear warning backfill failed") from exc
+    status = str((result or {}).get("status") or "skipped")
+    if status not in {"written", "kept", "skipped", "failed"}:
+        status = "written"
+    body = BearBackfillResponse(
+        schema_version=SCHEMA_VERSION,
+        as_of=format_as_of(taipei_now()),
+        status=status,
+        sheet=str((result or {}).get("sheet") or "Bear_Warning_Daily"),
+        rows=int((result or {}).get("rows") or 0),
+        detail=str((result or {}).get("detail") or ""),
+    )
+    return _no_store(BearBackfillResponse, body.model_dump())
 
 
 @app.post("/v1/alert-check")

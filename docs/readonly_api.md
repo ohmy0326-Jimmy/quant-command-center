@@ -25,6 +25,7 @@ POST {SERVICE_URL}/v1/nav-snapshot   # 寫入，另一把金鑰
 | `/v1/portfolio` | 要 | 第四頁同一套部位數字 |
 | `/v1/ai-advice` | 要 | 呼叫第四頁同一套 Gemini 風控建議 |
 | `POST /v1/nav-snapshot` | `X-Snapshot-Key`（`QCC_SNAPSHOT_KEY`） | 寫入當天淨值到 `NAV_Snapshots`，見 [nav_snapshot.md](nav_snapshot.md) |
+| `POST /v1/bear-warning-backfill` | `X-Snapshot-Key`（同一把） | 補 `Bear_Warning_Daily` 約 60 個交易日。不寫淨值分頁。 |
 
 OpenAPI（不含部位資料）：`{SERVICE_URL}/openapi.json` 與 `{SERVICE_URL}/docs`。
 
@@ -40,7 +41,7 @@ X-API-Key: <READONLY_API_KEY>
 
 每個 JSON 都有：
 
-- `schema_version`：目前 `1.16.0`。1.7.0 已有 `greeks` 與 `beta_targets`。1.8.0 再加上 Beta 品質與混合帳戶：`beta_complete`、`unknown_beta_symbols`、`sleeve_nav_complete`、`unallocated_nav`、`beta_basis`、`beta_label`，部位多 `beta_quality`。1.9.0 加 `credit_transmission`（階段、放款量燈、信用價格燈、放款意願燈、各列的值／日期／變化／燈號、門檻表）。這塊不計入淨值或 Beta。`beta` 是台股對加權、美股對 S&P 500 的敏感度相加後除以總淨值，不是單一指數 Beta。資料不足的 Beta 不計入，也不是 1。1.6.0 的缺 Delta 規則仍在。
+- `schema_version`：目前 `1.17.0`。1.7.0 已有 `greeks` 與 `beta_targets`。1.8.0 再加上 Beta 品質與混合帳戶：`beta_complete`、`unknown_beta_symbols`、`sleeve_nav_complete`、`unallocated_nav`、`beta_basis`、`beta_label`，部位多 `beta_quality`。1.9.0 加 `credit_transmission`（階段、放款量燈、信用價格燈、放款意願燈、各列的值／日期／變化／燈號、門檻表）。這塊不計入淨值或 Beta。`beta` 是台股對加權、美股對 S&P 500 的敏感度相加後除以總淨值，不是單一指數 Beta。資料不足的 Beta 不計入，也不是 1。1.6.0 的缺 Delta 規則仍在。
 - `as_of`：`Asia/Taipei` 的 ISO 8601，例如 `2026-10-29T22:00:00+08:00`
 
 機器可讀的 JSON Schema 在 [`readonly_api.schema.json`](readonly_api.schema.json)，由 `api/schemas.py` 的 Pydantic 模型產生。
@@ -98,6 +99,8 @@ X-API-Key: <READONLY_API_KEY>
 1.7.0：`greeks.tw` 與 `greeks.us` 分開。`delta_notional` 是原生貨幣的有號名目（台股 TWD、美股 USD）。`delta_points` 是這份名目 ÷ 該市場指數價；沒有指數價就是 null。`theta_per_day` 是每日時間價值；選擇權沒有 Theta 時整側是 null。`beta_targets` 的區間寫在 `portfolio_greeks.DEFAULT_BETA_BANDS`，是程式預設。狀態未知時不給目標，也不估算避險口數。台股口數只用台指期或小台，美股只用 SPX、XSP 或 SPY 的名目。
 
 1.8.0：美股 Beta 對 S&P 500（`^GSPC`），看種類是不是美股，不再用「代號剛好三個字母」判成台股。同一輪所有美股共用一次下載的基準，取最近 252 個基準交易日，至少 60 個重疊日報酬；共變異與變異都用樣本數減一；數字存完整精度，畫面才四捨五入到兩位。不足時 `beta_quality` 是 `missing`，`beta_exposure` 是 null，不是 1，`beta_complete` 為 false。已知槓桿／反向 ETF（含 SOXS＝−3）用契約倍數，名目取絕對值，Beta 只乘一次，不用 ETF 自己的報酬。選擇權的標的價不用權利金代替；缺 Delta 或標的價整筆不算。空單淨值是負的市值。`tw_nav`／`us_nav` 只含整戶同一市場的帳戶；混合帳戶放 `unallocated_nav`，此時 `beta_basis` 是 `total_nav`，台股與美股敏感度都除以總淨值。舊欄位名稱都還在。1.7.0 的 `greeks` 與 `beta_targets` 保留。PR47 讀的實際 Beta 就是這裡算出來的數字。
+
+1.17.0：遲滯歷史不夠但今日條件成立時，該層 `state` 是 `yellow`、`provisional` 是 true，`hysteresis.note` 是「疑似亮燈（遲滯資料不足）」。`suggested_action` 以「暫行」開頭，上限先當成已亮。`POST /v1/bear-warning-backfill` 用快照金鑰補 `Bear_Warning_Daily` 約 60 個交易日（外資、上市漲跌家數、依當日已公布資料重算的三層條件）。下一次每日淨值快照若歷史短於 60 個交易日也會自動補。不寫 `NAV_Snapshots` 或 `Daily_NAV`。
 
 1.16.0：`bear_warning` 依 2026 覆盤改主訊號。每一層只讓主訊號點燈，`watches` 是觀察、不點亮。亮燈要連續 3 個交易日，熄燈要連續 10 個交易日；`layers[].hysteresis.note` 在歷史不夠時是「遲滯資料不足」，`state` 是 unknown，不算通過。外資十日與上市股票漲跌家數由每日淨值快照寫進 `Bear_Warning_Daily`。`tactical_advice` 只對槓桿部位，收破對應標的 20 日線時文字是「收破 20 日線減 1/3」，不下單。門檻標成含後見之明。不改 REGIME_RISK。
 

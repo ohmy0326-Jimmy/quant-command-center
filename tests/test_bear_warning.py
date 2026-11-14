@@ -154,7 +154,10 @@ class RuleTests(unittest.TestCase):
         self.assertFalse(off["on"])
         self.assertEqual(off["state"], "green")
         gap = apply_hysteresis([True, None], True)
-        self.assertEqual(gap["note"], "遲滯資料不足")
+        self.assertTrue(gap["provisional"])
+        self.assertEqual(gap["state"], "yellow")
+        self.assertEqual(gap["note"], "疑似亮燈（遲滯資料不足）")
+        self.assertFalse(gap["sufficient"])
         prices = {"^TWII": _rising(260), "^SOX": [100.0] * 252 + [90.0], "SPY": spy, "RSP": rsp, "SPHB": rsp, "SPLV": spy, "NVDA": [100.0] * 80, "MU": [100.0] * 80, "AVGO": _rising(80), "2330.TW": _rising(80)}
         report = assess({
             "regime": "偏多",
@@ -185,6 +188,47 @@ class RuleTests(unittest.TestCase):
         self.assertEqual(advice[0]["underlying"], "SOXX")
         self.assertEqual(advice[0]["advice"], "收破 20 日線減 1/3")
         self.assertEqual(tactical_dma_advice(["00663L"], {})[0]["advice"], "未知")
+        provisional = assess({
+            "regime": "偏多",
+            "hy": [3.0] * 59 + [3.4],
+            "foreign_nets": [-200e8] * 10,
+        })
+        self.assertTrue(provisional["layers"][0]["provisional"])
+        self.assertEqual(provisional["layers"][0]["state"], "yellow")
+        self.assertTrue(provisional["provisional"])
+        self.assertIn("暫行", provisional["suggested_action"])
+        self.assertIn("疑似亮燈", provisional["layers"][0]["hysteresis"]["note"])
+        self.assertEqual(provisional["suggested_cap"], 1.5)
+        self.assertNotIn("預警未亮", provisional["suggested_action"])
+
+    def test_backfill_ignores_same_day_fred_and_skips_weekends(self):
+        from datetime import date, timedelta
+
+        from bear_warning import build_backfill_rows
+        from tests.test_nav_snapshot import FakeBook
+        from bear_warning import record_warning_rows
+
+        today = date(2026, 11, 13)
+        days = []
+        cursor = today
+        while len(days) < 70:
+            if cursor.weekday() < 5:
+                days.append(cursor)
+            cursor -= timedelta(days=1)
+        days = list(reversed(days))
+        twii = [(day, 18000.0 + index) for index, day in enumerate(days)]
+        hy = [(day, 3.0) for day in days[:-1]] + [(today, 9.0)]
+        visible = [value for item_day, value in hy if item_day <= today - timedelta(days=1)]
+        self.assertNotIn(9.0, visible)
+        rows = build_backfill_rows(today, {"prices": {"^TWII": twii, "^SOX": twii}, "hy": hy, "nfci": [], "foreign": [], "breadth": []}, trading_days=60)
+        self.assertGreaterEqual(len(rows), 60)
+        self.assertTrue(all(date.fromisoformat(row["date"]).weekday() < 5 for row in rows))
+        self.assertNotEqual(rows[-1].get("leading"), True)
+        book = FakeBook({})
+        record_warning_rows(book, rows[:2], "t")
+        again = record_warning_rows(book, rows[:2], "t")
+        self.assertEqual(again["status"], "written")
+        self.assertEqual(len(book.worksheet("Bear_Warning_Daily").rows), 3)
         from tests.test_nav_snapshot import FakeBook
         from bear_warning import record_warning_rows, warning_history_from_sheet
 
@@ -240,7 +284,7 @@ class RuleTests(unittest.TestCase):
             as_of=AS_OF,
             regime="偏多",
         )
-        self.assertEqual(payload["schema_version"], "1.16.0")
+        self.assertEqual(payload["schema_version"], "1.17.0")
         self.assertEqual(payload["bear_warning"]["caption"], CAPTION)
         self.assertEqual(payload["bear_warning"]["suggested_cap"], 1.8)
         self.assertEqual(payload["bear_warning"]["overall"], "unknown")
