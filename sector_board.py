@@ -4,14 +4,16 @@
 相對強弱＝板塊報酬 − 基準（預設 S&P 500）報酬。日期只留兩邊都有收盤的交易日。
 持平帶是程式預設：超額報酬絕對值小於 0.5 個百分點。這不是使用者逐條確認過的策略參數。
 
-進場關卡只看價格結構與相對大盤連兩週。總經不擋進場：防禦板塊在總經偏弱時仍可進場，
-總經只決定總槓桿上限（REGIME_RISK 不在這裡改）。任一關資料不夠就是未知，
-未知不算通過，也不算不通過。不另加第三關。
+進場關卡只看價格結構與相對大盤連兩週，判斷不因建議文字而改。總經不擋進場：
+防禦板塊在總經偏弱時仍可進場，總經只決定總槓桿上限（REGIME_RISK 不在這裡改）。
+兩關都過建議加碼至滿；恰過一關建議試單（ENTRY_PROBE_FRACTION）；兩關都未過不進場。
+任一關資料不夠就是未知。未知不算通過，也不算未過。不另加第三關。畫面只給建議，不下單。
 """
 
 from __future__ import annotations
 
 import math
+from fractions import Fraction
 
 import pandas as pd
 
@@ -25,6 +27,8 @@ FLAT_ABS = 0.005
 STRONG_RETURN = 0.10
 STRONG_SESSIONS = 3
 CROSS_WINDOW = 5
+# 恰過一關時的試單比例。日後只改這個分數，格子與表下說明會一起改。
+ENTRY_PROBE_FRACTION = Fraction(1, 3)
 
 ATTACK = frozenset({"XLK", "XLY", "XLC", "XLF", "XLI", "XLB", "XLE"})
 DEFENSE = frozenset({"XLP", "XLU", "XLV", "XLRE"})
@@ -218,32 +222,68 @@ def relative_gate(asset, benchmark) -> dict:
     return {"name": "相對大盤連兩週", "state": state, "detail": detail}
 
 
+_GATE_SHORT = {
+    "價格結構": "價格結構",
+    "相對大盤連兩週": "相對大盤",
+}
 _GATE_FAIL = {
     "價格結構": "價格未站上均線",
     "相對大盤連兩週": "相對大盤未轉強",
 }
-_GATE_UNKNOWN = {
-    "價格結構": "價格結構",
-    "相對大盤連兩週": "相對大盤",
-}
+
+
+def probe_share_text(fraction: Fraction | float | None = None) -> str:
+    """把試單比例印成 1/3，不印成小數。"""
+    if fraction is None:
+        fraction = ENTRY_PROBE_FRACTION
+    share = Fraction(fraction).limit_denominator(100)
+    return f"{share.numerator}/{share.denominator}"
+
+
+def entry_caption(fraction: Fraction | float | None = None) -> str:
+    share = probe_share_text(fraction)
+    return (
+        f"進場只看價格結構與相對大盤兩關：過一關先試單 {share}，兩關都過再加碼至滿。"
+        "未知不算通過也不算未過。"
+    )
+
+
+def entry_stage_of(gates: list[dict]) -> str:
+    """full / probe / none / unknown。只依這兩關的通過數，不改各關判斷。"""
+    if len(gates) != 2:
+        return "unknown"
+    passed = sum(1 for gate in gates if gate["state"] == PASS)
+    failed = sum(1 for gate in gates if gate["state"] == FAIL)
+    if passed == 2:
+        return "full"
+    if passed == 1:
+        return "probe"
+    if failed == 2:
+        return "none"
+    return "unknown"
 
 
 def gate_status_text(gates: list[dict]) -> str:
-    """格子裡的短狀態。說明句不放這裡。"""
-    total = len(gates)
-    if total and all(gate["state"] == PASS for gate in gates):
-        return f"✅ {total}/{total} 通過"
+    """格子裡的分批進場建議。說明句不放這裡。不下單。"""
+    stage = entry_stage_of(gates)
+    if stage == "full":
+        return "✅ 加碼至滿"
+    if stage == "none":
+        return "❌ 不進場"
+    if stage == "probe":
+        names = [_GATE_SHORT.get(gate["name"], gate["name"]) for gate in gates if gate["state"] == PASS]
+        return f"🟡 試單（{probe_share_text()} 部位，已過{'、'.join(names)}）"
+    if gates and all(gate["state"] == UNKNOWN for gate in gates):
+        return "⚪ 未知（缺價格資料）"
+    unknown = [_GATE_SHORT.get(gate["name"], gate["name"]) for gate in gates if gate["state"] == UNKNOWN]
     failed = [_GATE_FAIL.get(gate["name"], gate["name"]) for gate in gates if gate["state"] == FAIL]
-    unknown = [_GATE_UNKNOWN.get(gate["name"], gate["name"]) for gate in gates if gate["state"] == UNKNOWN]
-    parts = []
-    if failed:
-        parts.append("❌ " + "、".join(failed))
+    bits = []
     if unknown:
-        if len(unknown) == total:
-            parts.append("⚪ 未知（缺價格資料）")
-        else:
-            parts.append("⚪ 未知（" + "、".join(unknown) + "）")
-    return "；".join(parts) if parts else "⚪ 未知（缺價格資料）"
+        bits.append("、".join(unknown) + "未知")
+    if failed:
+        bits.append("、".join(failed))
+    detail = "、".join(bits) if bits else "缺價格資料"
+    return f"⚪ 未知（{detail}）"
 
 
 def summarize_gates(gates: list[dict]) -> dict:
@@ -255,6 +295,7 @@ def summarize_gates(gates: list[dict]) -> dict:
         "passed": passed,
         "failed": failed,
         "unknown": unknown,
+        "entry_stage": entry_stage_of(gates),
         "text": gate_status_text(gates),
         "gates": gates,
     }
@@ -356,7 +397,7 @@ def render_sector_summary(st, rows: list[dict], strong_by_etf: dict) -> None:
         "這是價格比較，不是資金流，也不是投信或外資買賣超。進場關卡只輔助，不擋下單。總經不在這兩關裡。"
     )
     st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
-    st.caption("未知不算通過，也不算未過。進場只看價格結構與相對大盤，沒有第三關。")
+    st.caption(entry_caption())
     st.subheader("前十大裡，三個交易日漲幅達到 10% 的股票")
     shown = False
     for ticker, result in strong_by_etf.items():

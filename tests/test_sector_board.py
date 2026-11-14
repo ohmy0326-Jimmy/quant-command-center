@@ -1,6 +1,7 @@
-"""第二頁相對強弱、三關與強勢股。不連網。"""
+"""第二頁相對強弱、進場建議與強勢股。不連網。"""
 
 import unittest
+from fractions import Fraction
 
 import numpy as np
 import pandas as pd
@@ -64,17 +65,20 @@ class GateTests(unittest.TestCase):
         )
         self.assertEqual(summary["passed"], 1)
         self.assertEqual(summary["unknown"], 1)
-        self.assertEqual(summary["text"], "⚪ 未知（價格結構）")
+        self.assertEqual(summary["entry_stage"], "probe")
+        self.assertEqual(summary["text"], "🟡 試單（1/3 部位，已過相對大盤）")
         self.assertNotIn("未知沒有算成通過或未過", summary["text"])
         self.assertNotIn("3/3", summary["text"])
         both_unknown = board.summarize_gates(
             [{"name": "價格結構", "state": board.UNKNOWN, "detail": ""}, {"name": "相對大盤連兩週", "state": board.UNKNOWN, "detail": ""}]
         )
+        self.assertEqual(both_unknown["entry_stage"], "unknown")
         self.assertEqual(both_unknown["text"], "⚪ 未知（缺價格資料）")
         both_pass = board.summarize_gates(
             [{"name": "價格結構", "state": board.PASS, "detail": ""}, {"name": "相對大盤連兩週", "state": board.PASS, "detail": ""}]
         )
-        self.assertEqual(both_pass["text"], "✅ 2/2 通過")
+        self.assertEqual(both_pass["entry_stage"], "full")
+        self.assertEqual(both_pass["text"], "✅ 加碼至滿")
 
     def test_roles_and_unmapped_stance(self):
         self.assertEqual(board.role_of("XLK"), "攻擊")
@@ -119,9 +123,43 @@ class GateTests(unittest.TestCase):
         )
         self.assertEqual(summary["unknown"], 0)
         self.assertEqual(summary["failed"], 2)
-        self.assertEqual(summary["text"], "❌ 價格未站上均線、相對大盤未轉強")
+        self.assertEqual(summary["entry_stage"], "none")
+        self.assertEqual(summary["text"], "❌ 不進場")
         self.assertNotIn("總經允許", summary["text"])
         self.assertNotIn("未對應", summary["text"])
+
+    def test_staged_advice_names_the_passed_gate_and_keeps_unknown_separate(self):
+        self.assertEqual(board.ENTRY_PROBE_FRACTION, Fraction(1, 3))
+        price_only = board.summarize_gates(
+            [{"name": "價格結構", "state": board.PASS, "detail": ""}, {"name": "相對大盤連兩週", "state": board.FAIL, "detail": ""}]
+        )
+        self.assertEqual(price_only["entry_stage"], "probe")
+        self.assertEqual(price_only["text"], "🟡 試單（1/3 部位，已過價格結構）")
+        relative_only = board.summarize_gates(
+            [{"name": "價格結構", "state": board.UNKNOWN, "detail": ""}, {"name": "相對大盤連兩週", "state": board.PASS, "detail": ""}]
+        )
+        self.assertEqual(relative_only["text"], "🟡 試單（1/3 部位，已過相對大盤）")
+        mixed = board.summarize_gates(
+            [{"name": "價格結構", "state": board.UNKNOWN, "detail": ""}, {"name": "相對大盤連兩週", "state": board.FAIL, "detail": ""}]
+        )
+        self.assertEqual(mixed["passed"], 0)
+        self.assertEqual(mixed["entry_stage"], "unknown")
+        self.assertEqual(mixed["text"], "⚪ 未知（價格結構未知、相對大盤未轉強）")
+        self.assertNotIn("不進場", mixed["text"])
+        self.assertNotIn("試單", mixed["text"])
+        original = board.ENTRY_PROBE_FRACTION
+        try:
+            board.ENTRY_PROBE_FRACTION = Fraction(1, 4)
+            shifted = board.gate_status_text(
+                [{"name": "價格結構", "state": board.PASS, "detail": ""}, {"name": "相對大盤連兩週", "state": board.FAIL, "detail": ""}]
+            )
+            self.assertIn("1/4", shifted)
+            self.assertIn("1/4", board.entry_caption())
+        finally:
+            board.ENTRY_PROBE_FRACTION = original
+        self.assertEqual(board.entry_caption(), "進場只看價格結構與相對大盤兩關：過一關先試單 1/3，兩關都過再加碼至滿。未知不算通過也不算未過。")
+        self.assertFalse(hasattr(board, "macro_gate"))
+        self.assertEqual(len(board.evaluate_entry(pd.DataFrame({"Close": [1], "Volume": [1]}), _series([1]))["gates"]), 2)
 
 
 class StrongStockTests(unittest.TestCase):
@@ -176,7 +214,9 @@ sector_board.render_sector_summary(st, rows, {"XLK": {"rows": [], "skipped": [],
         self.assertFalse(at.exception)
         blob = "\n".join(str(item.value) for item in list(at.caption) + list(at.markdown))
         self.assertIn("不是資金流", blob)
-        self.assertIn("未知不算通過，也不算未過", blob)
+        self.assertIn("未知不算通過也不算未過", blob)
+        self.assertIn("過一關先試單 1/3", blob)
+        self.assertNotIn("未知不算通過，也不算未過", blob)
         self.assertNotIn("總經允許", blob)
         self.assertIn("不列強勢股", blob)
 
