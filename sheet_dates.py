@@ -114,12 +114,14 @@ def nav_growth_series(nav_data: pd.DataFrame, today_nav: float, today: date | No
     today = taipei_today(today)
     rows: list[tuple[date, float]] = []
     if nav_data is not None and not nav_data.empty and "日期" in nav_data.columns and "總淨值" in nav_data.columns:
-        values = pd.to_numeric(nav_data["總淨值"], errors="coerce")
-        for raw_day, raw_nav in zip(nav_data["日期"], values):
+        from sheet_numbers import parse_sheet_number
+
+        for raw_day, raw_nav in zip(nav_data["日期"], nav_data["總淨值"]):
             day = parse_sheet_date(raw_day)
-            if day is None or pd.isna(raw_nav):
+            number = parse_sheet_number(raw_nav)
+            if day is None or number is None:
                 continue
-            rows.append((day, float(raw_nav)))
+            rows.append((day, number))
     rows = [(day, nav) for day, nav in rows if day != today]
     rows.append((today, float(today_nav)))
     rows.sort(key=lambda item: item[0])
@@ -187,10 +189,15 @@ def nav_flow_map(nav_data: pd.DataFrame | None) -> dict[str, float]:
     out: dict[str, float] = {}
     if nav_data is None or nav_data.empty or "日期" not in nav_data.columns or "出入金" not in nav_data.columns:
         return out
-    values = pd.to_numeric(nav_data["出入金"].astype(str).str.replace(",", "", regex=False), errors="coerce")
-    for raw_day, flow in zip(nav_data["日期"], values):
+    from sheet_numbers import classify_sheet_number
+
+    for raw_day, raw_flow in zip(nav_data["日期"], nav_data["出入金"]):
         day = parse_sheet_date(raw_day)
         if day is None:
             continue
-        out[day.isoformat()] = 0.0 if pd.isna(flow) else float(flow)
+        status, number = classify_sheet_number(raw_flow)
+        if status == "blank":
+            out[day.isoformat()] = 0.0
+        elif status == "ok":
+            out[day.isoformat()] = float(number)
     return out

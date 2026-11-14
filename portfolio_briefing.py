@@ -215,6 +215,10 @@ def portfolio_payload(
     quality = beta_quality_warning(metrics)
     if quality and quality not in warning_lines:
         warning_lines.append(quality)
+    for item in metrics.get("sheet_number_warnings") or []:
+        text = str(item)
+        if text and text not in warning_lines:
+            warning_lines.append(text)
     if credit_transmission is None:
         from credit_transmission import absent_board, api_view
 
