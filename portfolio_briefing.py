@@ -14,7 +14,7 @@ import pandas as pd
 
 from cb_holdings import product_kind
 
-SCHEMA_VERSION = "1.10.0"
+SCHEMA_VERSION = "1.11.0"
 TAIPEI = ZoneInfo("Asia/Taipei")
 
 
@@ -255,9 +255,29 @@ def portfolio_payload(
         "greeks": greeks_block(positions, metrics),
         "beta_targets": beta_target_block(metrics, regime),
         "credit_transmission": credit_transmission,
+        "pledge": _pledge_block(metrics),
+        "margin_financing": _margin_block(metrics),
         "positions": position_records(positions),
         "yuanta_futures": yuanta_from_metrics(metrics),
     }
+
+
+def _pledge_block(metrics: dict) -> dict:
+    from pledge_loan import empty_pledge
+
+    stored = metrics.get("pledge")
+    if isinstance(stored, dict) and stored.get("thresholds"):
+        return stored
+    return empty_pledge()
+
+
+def _margin_block(metrics: dict) -> dict:
+    from pledge_loan import empty_margin_financing
+
+    stored = metrics.get("margin_financing")
+    if isinstance(stored, dict) and stored.get("label"):
+        return stored
+    return empty_margin_financing()
 
 
 def greeks_block(positions: pd.DataFrame, metrics: dict) -> dict:

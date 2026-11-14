@@ -111,7 +111,7 @@ def test_card_renders_without_history():
     at = AppTest.from_string(_card_script(False), default_timeout=60).run()
     assert not at.exception
     labels = [m.label for m in at.metric]
-    assert labels == ["現金水位", "融資／質押借款", "最大回撤", "回撤煞車"]
+    assert labels == ["現金水位", "質押借款", "最大回撤", "回撤煞車"]
     assert [m.value for m in at.metric][2:] == ["—", "⚪"]
     captions = " ".join(str(c.value) for c in at.caption)
     assert "淨值歷史無法取得" in captions

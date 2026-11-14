@@ -576,39 +576,10 @@ def futures_margin_call_level(
 def margin_account_call_levels(
     snapshot: Snapshot, maintenance_ratio: float = 1.30
 ) -> list[dict]:
-    """計算非期貨帳戶（融資/質押）觸發整戶維持率追繳的跌幅幅度。"""
-    acc_df = getattr(snapshot, "accounts_valued", None)
-    if acc_df is None or acc_df.empty:
-        return []
+    """真正的融資整戶維持率。質押借款（融資/質押借款欄）不進這裡。"""
+    from pledge_loan import margin_account_call_levels as pledge_margin_levels
 
-    results = []
-    for _, row in acc_df.iterrows():
-        acc_name = str(row.get("帳戶名稱", "")).strip()
-        if "元大期貨" in acc_name:
-            continue
-        debt = float(row.get("融資/質押借款", 0.0))
-        if math.isnan(debt):
-            debt = 0.0
-        mv = float(row.get("即時持股市值", 0.0))
-        if math.isnan(mv):
-            mv = 0.0
-        if debt > 0 and mv > 0:
-            ratio_now = mv / debt
-            maint_now_pct = ratio_now * 100.0
-            trigger_drop_pct = (1.0 - maintenance_ratio * debt / mv) * 100.0
-            already_call = bool(ratio_now < maintenance_ratio)
-            results.append(
-                {
-                    "account": acc_name,
-                    "market_value": mv,
-                    "debt": debt,
-                    "maintenance_now_pct": maint_now_pct,
-                    "trigger_drop_pct": trigger_drop_pct,
-                    "already_call": already_call,
-                }
-            )
-
-    return results
+    return pledge_margin_levels(snapshot, maintenance_ratio)
 
 
 # ---------------------------------------------------------------------------
@@ -804,6 +775,29 @@ def priority_list(
                     "value": margin_acc["debt"],
                 }
             )
+
+    pledge = target_snap.metrics.get("pledge") if isinstance(getattr(target_snap, "metrics", None), dict) else None
+    if not isinstance(pledge, dict):
+        from pledge_loan import pledge_view
+
+        pledge = pledge_view(getattr(target_snap, "accounts_valued", None), getattr(target_snap, "valued", None))
+    from pledge_loan import drop_to_call_text
+
+    for row in pledge.get("accounts") or []:
+        if row.get("light") != "red":
+            continue
+        estimated = "（估算）" if row.get("collateral_basis") == "estimated_tw_spot" else ""
+        pct = float(row.get("maintenance_pct") or 0.0)
+        items.append(
+            {
+                "priority": 0,
+                "category": "追繳風險",
+                "ticker": "質押借款",
+                "account": row.get("account") or "",
+                "detail": f"質押維持率 {pct:.1f}%{estimated}，{drop_to_call_text(row.get('drop_to_call_pct'))}",
+                "value": float(row.get("balance") or 0.0),
+            }
+        )
 
     # 優先級 1: 觸發停損
     stop_rows = triggered_stop_losses(snapshot)

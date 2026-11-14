@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.10.0",
+  "schema_version": "1.11.0",
   "header": "X-API-Key",
   "models": {
     "health": {
@@ -7,7 +7,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.10.0"
+            "1.11.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -325,6 +325,255 @@
             "rows"
           ],
           "title": "CreditTransmissionResponse",
+          "type": "object"
+        },
+        "MarginFinancingAccountResponse": {
+          "additionalProperties": false,
+          "description": "1.11.0。真正的融資，不含質押借款。",
+          "properties": {
+            "account": {
+              "title": "Account",
+              "type": "string"
+            },
+            "balance": {
+              "title": "Balance",
+              "type": "number"
+            },
+            "market_value": {
+              "title": "Market Value",
+              "type": "number"
+            },
+            "maintenance_pct": {
+              "title": "Maintenance Pct",
+              "type": "number"
+            },
+            "drop_to_call_pct": {
+              "title": "Drop To Call Pct",
+              "type": "number"
+            },
+            "already_call": {
+              "title": "Already Call",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "account",
+            "balance",
+            "market_value",
+            "maintenance_pct",
+            "drop_to_call_pct",
+            "already_call"
+          ],
+          "title": "MarginFinancingAccountResponse",
+          "type": "object"
+        },
+        "MarginFinancingResponse": {
+          "additionalProperties": false,
+          "description": "1.11.0。沒有融資部位時 label 是「無融資」、balance 是 0。",
+          "properties": {
+            "balance": {
+              "title": "Balance",
+              "type": "number"
+            },
+            "label": {
+              "title": "Label",
+              "type": "string"
+            },
+            "status": {
+              "enum": [
+                "none",
+                "active"
+              ],
+              "title": "Status",
+              "type": "string"
+            },
+            "accounts": {
+              "items": {
+                "$ref": "#/$defs/MarginFinancingAccountResponse"
+              },
+              "title": "Accounts",
+              "type": "array"
+            }
+          },
+          "required": [
+            "balance",
+            "label",
+            "status"
+          ],
+          "title": "MarginFinancingResponse",
+          "type": "object"
+        },
+        "PledgeAccountResponse": {
+          "additionalProperties": false,
+          "description": "1.11.0。單一帳戶的股票質押維持率。",
+          "properties": {
+            "account": {
+              "title": "Account",
+              "type": "string"
+            },
+            "balance": {
+              "description": "質押借款餘額，台幣。來自 Active_Positions「融資/質押借款」，淨值已扣除。",
+              "title": "Balance",
+              "type": "number"
+            },
+            "collateral_value": {
+              "description": "質押品市值，台幣。",
+              "title": "Collateral Value",
+              "type": "number"
+            },
+            "collateral_basis": {
+              "description": "sheet＝試算表有標質押品；estimated_tw_spot＝沒標，改用該戶台股現股市值。",
+              "enum": [
+                "sheet",
+                "estimated_tw_spot"
+              ],
+              "title": "Collateral Basis",
+              "type": "string"
+            },
+            "maintenance_pct": {
+              "description": "質押維持率＝質押品市值 ÷ 質押借款 × 100。",
+              "title": "Maintenance Pct",
+              "type": "number"
+            },
+            "light": {
+              "enum": [
+                "green",
+                "yellow",
+                "red"
+              ],
+              "title": "Light",
+              "type": "string"
+            },
+            "drop_to_call_pct": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "距 130% 追繳線，質押品還能跌幾個百分點。已低於追繳線時是負數。質押品市值是 0 時是 null。",
+              "title": "Drop To Call Pct"
+            }
+          },
+          "required": [
+            "account",
+            "balance",
+            "collateral_value",
+            "collateral_basis",
+            "maintenance_pct",
+            "light"
+          ],
+          "title": "PledgeAccountResponse",
+          "type": "object"
+        },
+        "PledgeLoanResponse": {
+          "additionalProperties": false,
+          "description": "1.11.0。股票質押借款。門檻是程式預設，要對照券商契約。",
+          "properties": {
+            "balance": {
+              "description": "質押借款合計，台幣。沒有質押時是 0。",
+              "title": "Balance",
+              "type": "number"
+            },
+            "collateral_value": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "計入維持率的質押品市值合計。沒有借款時是 null。",
+              "title": "Collateral Value"
+            },
+            "collateral_basis": {
+              "default": "none",
+              "enum": [
+                "sheet",
+                "estimated_tw_spot",
+                "none"
+              ],
+              "title": "Collateral Basis",
+              "type": "string"
+            },
+            "maintenance_pct": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "合計維持率。沒有借款時是 null，不是 0。",
+              "title": "Maintenance Pct"
+            },
+            "light": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "green",
+                    "yellow",
+                    "red"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Light"
+            },
+            "drop_to_call_pct": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "距追繳還可跌幾個百分點。已低於 130% 時是負數。",
+              "title": "Drop To Call Pct"
+            },
+            "estimated": {
+              "default": false,
+              "description": "true 表示至少有一戶的質押品是用台股現股市值估算的。",
+              "title": "Estimated",
+              "type": "boolean"
+            },
+            "thresholds": {
+              "additionalProperties": true,
+              "description": "pledge_loan.PLEDGE_THRESHOLDS。call_below_pct 130、yellow_high_pct 160。",
+              "title": "Thresholds",
+              "type": "object"
+            },
+            "note": {
+              "title": "Note",
+              "type": "string"
+            },
+            "accounts": {
+              "items": {
+                "$ref": "#/$defs/PledgeAccountResponse"
+              },
+              "title": "Accounts",
+              "type": "array"
+            }
+          },
+          "required": [
+            "balance",
+            "thresholds",
+            "note"
+          ],
+          "title": "PledgeLoanResponse",
           "type": "object"
         },
         "PositionResponse": {
@@ -691,7 +940,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.10.0"
+            "1.11.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -887,6 +1136,14 @@
         "credit_transmission": {
           "$ref": "#/$defs/CreditTransmissionResponse",
           "description": "1.9.0 新增。信用傳導。各指標的值、日期、較前期變化、燈號，以及階段。門檻與第一頁相同。不計入部位或牛熊分數。"
+        },
+        "pledge": {
+          "$ref": "#/$defs/PledgeLoanResponse",
+          "description": "1.11.0 新增。股票質押借款與質押維持率。Active_Positions「融資/質押借款」整欄都算質押，淨值已扣除，這裡不再扣一次。門檻是程式預設。"
+        },
+        "margin_financing": {
+          "$ref": "#/$defs/MarginFinancingResponse",
+          "description": "1.11.0 新增。真正的融資（「融資」欄）。目前沒有融資部位時 label 為「無融資」。整戶 130% 維持率只套在這個欄，不套質押借款。"
         }
       },
       "required": [
@@ -909,7 +1166,9 @@
         "beta_leverage",
         "positions",
         "yuanta_futures",
-        "credit_transmission"
+        "credit_transmission",
+        "pledge",
+        "margin_financing"
       ],
       "title": "PortfolioResponse",
       "type": "object"
@@ -919,7 +1178,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.10.0"
+            "1.11.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -966,7 +1225,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.10.0"
+            "1.11.0"
           ],
           "title": "Schema Version",
           "type": "string"

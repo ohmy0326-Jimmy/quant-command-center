@@ -114,6 +114,8 @@ def risk_performance_summary(metrics: dict, nav_series: pd.Series | None = None,
         "account_beta": beta,
         "cash_pct": cash_pct,
         "debt": float(m.get("debt", 0.0) or 0.0),
+        "pledge_loan": float((m.get("pledge") or {}).get("balance", m.get("pledge_loan", m.get("debt", 0.0))) or 0.0),
+        "margin_label": str((m.get("margin_financing") or {}).get("label") or "無融資"),
         "leverage_ok": leverage <= LEVERAGE_WARN + 1e-9,
         "cash_ok": cash_pct + 1e-9 >= CASH_HEALTHY_PCT,
         "neutrality": neutrality_label(beta),
@@ -281,7 +283,11 @@ def render_risk_performance_card(
             f"{'🟢' if s['cash_ok'] else '🔴'} 健康 >{CASH_HEALTHY_PCT:.0f}%",
             delta_color="off",
         )
-        k2.metric("融資／質押借款", f"NT$ {s['debt']:,.0f}")
+        k2.metric("質押借款", f"NT$ {s['pledge_loan']:,.0f}")
+        from pledge_loan import pledge_caption
+
+        st.caption(s["margin_label"])
+        st.caption(pledge_caption(metrics.get("pledge")))
         if dd["available"]:
             k3.metric("最大回撤", f"{dd['max_dd_pct']:.2f}%", f"距高點 {dd['current_dd_pct']:.2f}%", delta_color="off")
         else:

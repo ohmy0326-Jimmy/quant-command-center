@@ -935,7 +935,8 @@ elif page == "第四頁：部位監控與量化風控":
                     else:
                         st.caption(lbl_text)
 
-                acc_cols = [c for c in ['帳戶名稱', '現金餘額', '融資/質押借款', '名目曝險', '帳戶淨值', '可動用保證金', '距追繳金額', '槓桿率 (倍)', '權益比率%/現金水位%'] if c in account_data.columns]
+                display_accounts = account_data.rename(columns={"融資/質押借款": "質押借款"})
+                acc_cols = [c for c in ['帳戶名稱', '現金餘額', '質押借款', '名目曝險', '帳戶淨值', '可動用保證金', '距追繳金額', '槓桿率 (倍)', '權益比率%/現金水位%'] if c in display_accounts.columns]
 
                 def _known_num(pattern: str):
                     def _fmt(value):
@@ -949,11 +950,16 @@ elif page == "第四頁：部位監控與量化風控":
                     return _fmt
 
                 fmt_dict = {
-                    "現金餘額": _known_num("NT$ {:,.0f}"), "融資/質押借款": _known_num("NT$ {:,.0f}"), "名目曝險": _known_num("NT$ {:,.0f}"),
+                    "現金餘額": _known_num("NT$ {:,.0f}"), "質押借款": _known_num("NT$ {:,.0f}"), "名目曝險": _known_num("NT$ {:,.0f}"),
                     "帳戶淨值": _known_num("NT$ {:,.0f}"), "可動用保證金": _known_num("NT$ {:,.0f}"), "距追繳金額": _known_num("NT$ {:,.0f}"),
                     "槓桿率 (倍)": _known_num("{:.2f}x"), "權益比率%/現金水位%": _known_num("{:.1f}%")
                 }
-                st.dataframe(account_data[acc_cols].style.format(fmt_dict), use_container_width=True, hide_index=True)
+                st.dataframe(display_accounts[acc_cols].style.format(fmt_dict), use_container_width=True, hide_index=True)
+                from pledge_loan import pledge_caption
+
+                financing = metrics.get("margin_financing") or {}
+                st.caption(str(financing.get("label") or "無融資"))
+                st.caption(pledge_caption(metrics.get("pledge")))
                 st.caption("元大期貨：現金餘額＝本日餘額；帳戶淨值＝權益數＝本日餘額＋期貨未實現損益（期交所即時/夜盤價）；權益比率＝權益數÷原始保證金。名目曝險顯示「未計入」代表這個帳戶的部位都缺 Delta，不是曝險為 0。")
                 ledger_label = str(metrics.get("futures_cash_label") or "")
                 if ledger_label:

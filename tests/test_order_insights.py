@@ -197,10 +197,26 @@ class TestOrderInsights(unittest.TestCase):
         )
         snap = Snapshot(positions, accounts, 32.0, 20000.0)
 
-        # MV = 100,000, Debt = 85,000. Ratio = 1.176 < 1.30 -> already in call
+        # 融資/質押借款是質押，不套整戶融資維持率。
         levels = margin_account_call_levels(snap)
-        self.assertEqual(len(levels), 1)
-        self.assertTrue(levels[0]["already_call"])
+        self.assertEqual(levels, [])
+        from pledge_loan import pledge_view
+
+        pledge = pledge_view(snap.accounts_valued, snap.valued)
+        self.assertAlmostEqual(pledge["maintenance_pct"], 100_000 / 85_000 * 100.0)
+        self.assertEqual(pledge["light"], "red")
+        self.assertTrue(pledge["estimated"])
+        self.assertLess(pledge["drop_to_call_pct"], 0)
+
+        financed = Snapshot(
+            positions,
+            pd.DataFrame([{"帳戶名稱": "現貨主帳戶", "現金餘額": 0, "融資/質押借款": 0, "融資": 85000}]),
+            32.0,
+            20000.0,
+        )
+        financed_levels = margin_account_call_levels(financed)
+        self.assertEqual(len(financed_levels), 1)
+        self.assertTrue(financed_levels[0]["already_call"])
 
     def test_hedge_suggestion(self):
         positions = pd.DataFrame([_stock("現貨主帳戶", "台股", "2330", 1000, 1000, 1000)])

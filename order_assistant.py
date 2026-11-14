@@ -781,15 +781,17 @@ def apply_order(snapshot: Snapshot, order: dict) -> tuple[Snapshot, list[str]]:
         else:
             i = acc_idx[0]
             cash = float(accounts.at[i, "現金餘額"])
-            debt = float(accounts.at[i, "融資/質押借款"])
+            if "融資" not in accounts.columns:
+                accounts["融資"] = 0.0
+            margin_balance = float(accounts.at[i, "融資"] or 0.0)
             if side == "buy":
                 if cash + 1e-6 >= cash_delta:
                     accounts.at[i, "現金餘額"] = cash - cash_delta
                 else:
                     shortfall = cash_delta - max(cash, 0.0)
                     accounts.at[i, "現金餘額"] = 0.0
-                    accounts.at[i, "融資/質押借款"] = debt + shortfall
-                    warnings.append(f"現金不足，不足的 NT$ {shortfall:,.0f} 以融資估算（只試算，不會向券商送單）")
+                    accounts.at[i, "融資"] = margin_balance + shortfall
+                    warnings.append(f"現金不足，不足的 NT$ {shortfall:,.0f} 以融資試算（只試算，不會向券商送單，也不計入質押借款）")
             else:
                 accounts.at[i, "現金餘額"] = cash + cash_delta
 
@@ -1165,7 +1167,7 @@ def _taiex_book(snapshot: Snapshot):
                 {
                     "name": str(row["帳戶名稱"]).strip(),
                     "cash": float(row.get("現金餘額", 0) or 0),
-                    "debt": float(row.get("融資/質押借款", 0) or 0),
+                    "debt": float(row.get("融資/質押借款", 0) or 0) + float(row.get("融資", 0) or 0),
                 }
             )
     return rows, accounts
