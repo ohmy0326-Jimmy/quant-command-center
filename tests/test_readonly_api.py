@@ -415,7 +415,7 @@ class ApiHttpTests(unittest.TestCase):
             if methods - {"GET", "HEAD"}:
                 writes.add((route.path, frozenset(methods)))
         # 寫入端點只有每日淨值快照與即時警報檢查，各用自己的金鑰。
-        self.assertEqual(writes, {("/v1/nav-snapshot", frozenset({"POST"})), ("/v1/alert-check", frozenset({"POST"}))})
+        self.assertEqual(writes, {("/v1/nav-snapshot", frozenset({"POST"})), ("/v1/bear-warning-backfill", frozenset({"POST"})), ("/v1/alert-check", frozenset({"POST"}))})
 
     def test_loader_error_hides_detail(self):
         def explode():

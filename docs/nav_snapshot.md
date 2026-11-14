@@ -153,3 +153,19 @@ curl -fsS -X POST "${SERVICE_URL}/v1/nav-snapshot" \
 3. **OAuth 範圍**：`portfolio_risk.SHEETS_SCOPES` 現在是 `https://www.googleapis.com/auth/spreadsheets`（讀寫試算表）＋ `https://www.googleapis.com/auth/drive.readonly`（依檔名找到 `Quant_Database`）。舊的範圍（`spreadsheets.google.com/feeds` ＋ 完整 `drive`）本來就允許寫入，所以範圍不是限制；實際的限制是上面的分享權限。新範圍拿掉了完整 Drive 權限，較小。
 
 4. **排程器**：在你自己的機器每天呼叫一次上面的 curl。金鑰從安全的地方讀進變數，不要寫進指令列歷史或日誌，curl 不要加 `-v`。
+
+## 熊市預警歷史回補
+
+`Bear_Warning_Daily` 要有大約 60 個交易日，三層燈才不會停在「遲滯資料不足」。每日 `POST /v1/nav-snapshot` 若發現條件歷史短於 60 個交易日，會在寫完淨值之後自動補這張表。補的是外資買賣超（BFI82U，外資及陸資不含外資自營商）、上市股票漲跌家數（MI_INDEX），以及用當天已經看得到的收盤與 FRED 重算的三層條件。高收益與殖利率晚一天、NFCI 晚五天才納入，不用當天還沒公布的數字。週末與沒有加權收盤的日子跳過。同一天重跑只填空白欄，不改 `NAV_Snapshots`，也不碰 `Daily_NAV`。
+
+不想等到 15:00，可以在 Cloud Shell 立刻補一次。金鑰用 `read -s` 讀進變數，不要打在指令上，也不要 echo：
+
+```bash
+read -s -p "X-Snapshot-Key: " KEY
+echo
+curl -fsS -X POST "${SERVICE_URL}/v1/bear-warning-backfill" \
+  -H "X-Snapshot-Key: ${KEY}"
+unset KEY
+```
+
+`SERVICE_URL` 是 API 服務網址。這支與淨值快照共用 `QCC_SNAPSHOT_KEY`。證交所請求之間會停約 0.35 秒。中途失敗可以再跑一次，已寫入的日期不會被清掉。

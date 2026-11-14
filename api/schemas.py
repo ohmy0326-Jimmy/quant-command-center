@@ -197,6 +197,7 @@ class BearLayerResponse(BaseModel):
     name: str
     state: Literal["green", "yellow", "red", "unknown"]
     raw_on: bool | None = None
+    provisional: bool = Field(default=False, description="1.17.0。今日條件成立但遲滯歷史不夠。燈是 yellow，建議上限先當成已亮。")
     need: int | None = None
     hysteresis: dict = Field(default_factory=dict, description="1.16.0。連續 3 日才亮、連續 10 日才熄。歷史不夠時 note 是遲滯資料不足，state 是 unknown。")
     indicators: list[BearIndicatorResponse]
@@ -222,6 +223,7 @@ class BearWarningResponse(BaseModel):
     watches: list[BearIndicatorResponse] = Field(default_factory=list, description="1.16.0。只觀察，不點亮層級。")
     tactical_advice: list[dict] = Field(default_factory=list, description="1.16.0。戰術曝險收破對應標的 20 日線時建議減 1/3。不下單。")
     core_note: str = ""
+    provisional: bool = Field(default=False, description="1.17.0。有層級是疑似亮燈。suggested_action 以暫行開頭，上限取較保守的一邊。")
 
 
 class DeleverageTargetResponse(BaseModel):
@@ -398,6 +400,19 @@ class AdviceResponse(BaseModel):
     model: str = Field(description="Gemini 模型名稱。")
     cached: bool = Field(description="true 表示這次沒有重新呼叫模型。")
     generated_at: str = Field(description="Asia/Taipei，這段文字實際產生的時間。")
+
+
+class BearBackfillResponse(BaseModel):
+    """POST /v1/bear-warning-backfill。只寫 Bear_Warning_Daily。"""
+
+    model_config = _MODEL
+
+    schema_version: str = Field(examples=[SCHEMA_VERSION])
+    as_of: str
+    status: Literal["written", "kept", "skipped", "failed"]
+    sheet: str = "Bear_Warning_Daily"
+    rows: int = 0
+    detail: str = ""
 
 
 class ErrorResponse(BaseModel):

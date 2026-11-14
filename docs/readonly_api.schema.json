@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.16.0",
+  "schema_version": "1.17.0",
   "header": "X-API-Key",
   "models": {
     "health": {
@@ -7,7 +7,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.16.0"
+            "1.17.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -235,6 +235,12 @@
               "default": null,
               "title": "Raw On"
             },
+            "provisional": {
+              "default": false,
+              "description": "1.17.0。今日條件成立但遲滯歷史不夠。燈是 yellow，建議上限先當成已亮。",
+              "title": "Provisional",
+              "type": "boolean"
+            },
             "need": {
               "anyOf": [
                 {
@@ -394,6 +400,12 @@
               "default": "",
               "title": "Core Note",
               "type": "string"
+            },
+            "provisional": {
+              "default": false,
+              "description": "1.17.0。有層級是疑似亮燈。suggested_action 以暫行開頭，上限取較保守的一邊。",
+              "title": "Provisional",
+              "type": "boolean"
             }
           },
           "required": [
@@ -1852,7 +1864,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.16.0"
+            "1.17.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -2100,7 +2112,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.16.0"
+            "1.17.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -2147,7 +2159,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.16.0"
+            "1.17.0"
           ],
           "title": "Schema Version",
           "type": "string"
