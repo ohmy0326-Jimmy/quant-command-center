@@ -70,8 +70,8 @@ class DeleverageTests(unittest.TestCase):
         accounts = pd.DataFrame([{"帳戶名稱": "股票戶", "現金餘額": 1_000_000, "融資/質押借款": 305_430}])
         valued, _accounts, metrics = finalize_valuation(pd.DataFrame([_etf("SOXL", 10, 20)]), accounts, 32.0)
         payload = portfolio_payload(valued, metrics, usdtwd=32.0, as_of=AS_OF)
-        self.assertEqual(payload["schema_version"], "1.14.0")
-        self.assertEqual(SCHEMA_VERSION, "1.14.0")
+        self.assertEqual(payload["schema_version"], "1.15.0")
+        self.assertEqual(SCHEMA_VERSION, "1.15.0")
         self.assertEqual(payload["deleverage"]["swaps"][0]["symbol"], "SOXL")
         self.assertAlmostEqual(payload["net_value"], metrics["nav"])
         PortfolioResponse(**payload)
@@ -96,6 +96,45 @@ class DeleverageTests(unittest.TestCase):
         view = build_deleverage(positions, {"nav": 1_000_000, "exposure": 100, "exposure_complete": True})
         self.assertEqual(len(view["swaps"]), 1)
         self.assertIsNone(view["swaps"][0]["reduction_twd"])
+
+    def test_allocation_bands_and_tactical_cap(self):
+        metrics = {
+            "nav": 1_000_000.0,
+            "exposure": 1_100_000.0,
+            "exposure_complete": True,
+            "cash": 120_000.0,
+            "brake_light": "🔴",
+            "bear_overall": "yellow",
+        }
+        positions = pd.DataFrame([
+            {"帳戶": "股票戶", "種類": "台股", "標的": "2330", "名稱": "台積電", "持有數量": 10,
+             "即時報價": 100, "即時市值(台幣)": 550_000, "標的槓桿": 1},
+            {"帳戶": "股票戶", "種類": "美股", "標的": "XLV", "名稱": "XLV", "持有數量": 10,
+             "即時報價": 100, "即時市值(台幣)": 250_000, "標的槓桿": 1, "換算匯率": 32},
+            {**_etf("SOXL", 10, 100), "即時市值(台幣)": 100_000, "標的槓桿": 3},
+            {"帳戶": "股票戶", "種類": "美股選擇權", "標的": "QQQ241220C00480000", "名稱": "QQQ Call",
+             "持有數量": 1, "即時市值(台幣)": 200_000, "標的槓桿": 1, "即時報價": 2},
+            {"帳戶": "股票戶", "種類": "台股", "標的": "9999", "名稱": "未對照",
+             "持有數量": 1, "即時市值(台幣)": 10_000, "標的槓桿": 1, "即時報價": 10},
+        ])
+        view = build_deleverage(positions, metrics)
+        self.assertEqual(view["exposure_band"]["status"], "在區間內")
+        self.assertEqual(view["exposure_band"]["gap_twd"], 0.0)
+        by_id = {item["id"]: item for item in view["buckets"]}
+        self.assertEqual(by_id["core"]["status"], "在區間內")
+        self.assertNotIn("SOXL", by_id["core"]["symbols"])
+        self.assertEqual(by_id["defense"]["status"], "在區間內")
+        self.assertEqual(by_id["event"]["status"], "超過上限")
+        self.assertAlmostEqual(by_id["event"]["gap_twd"], 50_000)
+        self.assertIn("單筆風險", by_id["event"]["note"])
+        self.assertIsNone(view["event_risk"]["per_trade_pct"])
+        self.assertTrue(view["tactical"]["exceeded"])
+        self.assertAlmostEqual(view["tactical"]["notional_twd"], 300_000)
+        self.assertEqual(view["tactical"]["positions"][0]["tag"], "戰術曝險")
+        self.assertEqual([item["symbol"] for item in view["unclassified"]], ["9999"])
+        self.assertEqual([item["symbol"] for item in view["priority_reductions"]], ["SOXL"])
+        quiet = build_deleverage(positions, {**metrics, "brake_light": "🟢", "bear_overall": "unknown"})
+        self.assertEqual(quiet["priority_reductions"], [])
 
 
 if __name__ == "__main__":

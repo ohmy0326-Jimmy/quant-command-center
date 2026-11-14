@@ -295,9 +295,16 @@ def render_risk_performance_card(
         k4.metric("回撤煞車", s["brake_light"], s["brake_text"], delta_color="off")
 
         render_beta_leverage_table(st, metrics)
-        from deleverage import render_deleverage_panel
+        from deleverage import annotate_priority, render_deleverage_panel
 
-        render_deleverage_panel(st, metrics.get("deleverage"))
+        render_deleverage_panel(
+            st,
+            annotate_priority(
+                metrics.get("deleverage"),
+                brake_light=s.get("brake_light"),
+                bear_overall=(metrics.get("bear_warning") or {}).get("overall") if isinstance(metrics.get("bear_warning"), dict) else None,
+            ),
+        )
         st.caption(
             f"合計槓桿 {'🟢 未超過' if s['leverage_ok'] else '🔴 超過'}警戒線 {LEVERAGE_WARN:.1f}x；"
             f"帳戶 Beta 方向：{s['neutrality']}。"
