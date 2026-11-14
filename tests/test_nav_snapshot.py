@@ -376,6 +376,19 @@ class SnapshotApiTests(unittest.TestCase):
         self.assertIsNone(out["macro_history"]["total"])
         self.assertNotIn("history down", out["macro_history"]["detail"])
 
+    def test_warning_backfill_cannot_fail_the_snapshot(self):
+        payload = {"date": "2026-11-04", "action": "inserted", "sheet": "NAV_Snapshots", "row": {"寫入時間": "t"}}
+
+        def boom(*_args, **_kwargs):
+            raise RuntimeError("backfill hung")
+
+        with unittest.mock.patch("bear_warning.backfill_warning_chunk", boom):
+            out = ns.attach_warning_history(payload, FakeBook({}), "2026-11-04")
+        self.assertEqual(out["action"], "inserted")
+        self.assertEqual(out["sheet"], "NAV_Snapshots")
+        self.assertEqual(out["bear_warning_history"]["status"], "failed")
+        self.assertNotIn("backfill hung", out["bear_warning_history"]["detail"])
+
     def test_snapshot_key_is_redacted(self):
         from api.auth import redact_secrets
 

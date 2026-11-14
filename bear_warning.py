@@ -655,37 +655,257 @@ def build_backfill_rows(today: date, bundle: dict, trading_days: int = BACKFILL_
     return rows
 
 
-def backfill_warning_history(today: date, spreadsheet, trading_days: int = BACKFILL_TRADING_DAYS, pause: float = 0.35, loaders: dict | None = None, written_at: str = "") -> dict:
-    """補約 60 個交易日。同一天重跑只填空白欄。不寫 Daily_NAV。"""
-    loaders = loaders or {}
+BATCH_DAYS = 8
+BATCH_BUDGET_SECONDS = 60
+SNAPSHOT_BATCH_DAYS = 1
+SNAPSHOT_BUDGET_SECONDS = 8
+REQUEST_TIMEOUT_SECONDS = 8
+
+
+def _progress(target: list[date], filled: set[date], wrote: int, failures: list[str], status: str) -> dict:
+    missing = [day for day in target if day not in filled]
+    return {
+        "status": status,
+        "sheet": WARNING_TAB,
+        "rows": wrote,
+        "done": not missing and bool(target),
+        "filled_days": len(target) - len(missing),
+        "remaining_days": len(missing),
+        "next_date": missing[0].isoformat() if missing else None,
+        "failures": failures,
+        "detail": "；".join(failures[:8]),
+    }
+
+
+def stored_foreign_points(spreadsheet, today: date) -> list[tuple[date, float]]:
+    from sheet_dates import parse_sheet_date
+
+    points = []
+    for day, row in _warning_rows(spreadsheet, today):
+        number = _finite(str(row.get("外資買賣超") or "").replace(",", ""))
+        if number is not None and day <= today:
+            points.append((day, number))
+    return points
+
+
+def stored_breadth_points(spreadsheet, today: date) -> list[tuple]:
+    points = []
+    for day, row in _warning_rows(spreadsheet, today):
+        if str(row.get("上漲家數") or "").strip() == "" or str(row.get("下跌家數") or "").strip() == "":
+            continue
+        points.append((day, row.get("上漲家數"), row.get("下跌家數")))
+    return points
+
+
+def _warning_rows(spreadsheet, today: date) -> list[tuple]:
+    from sheet_dates import parse_sheet_date
+
     try:
-        foreign_days = loaders["foreign"](today) if "foreign" in loaders else _fetch_foreign_days(today, trading_days, pause)
+        worksheet = spreadsheet.worksheet(WARNING_TAB)
     except Exception:
-        foreign_days = []
+        return []
     try:
-        breadth_days = loaders["breadth"](today) if "breadth" in loaders else fetch_listed_breadth(today, trading_days=trading_days, pause=pause)
+        from sheet_numbers import read_worksheet_records
+
+        rows = read_worksheet_records(worksheet)
     except Exception:
-        breadth_days = []
+        try:
+            rows = worksheet.get_all_records()
+        except Exception:
+            return []
+    parsed = []
+    for row in rows or []:
+        day = parse_sheet_date(row.get("日期"))
+        if day is None or day > today:
+            continue
+        parsed.append((day, row))
+    parsed.sort(key=lambda item: item[0])
+    return parsed
+
+
+def _flags_for_day(day: date, prices: dict, hy, nfci, foreign_points, breadth_points) -> dict:
+    """只使用這一天當時已公布的數字。高收益晚一天，NFCI 晚五天。"""
+    hy_values = [value for _day, value in _through(hy or [], day, HY_LAG_DAYS)]
+    nfci_points = _through(nfci or [], day, NFCI_LAG_DAYS)
+    nets = [value for item_day, value in foreign_points if item_day <= day]
+    breadth_days = []
+    for item_day, up, down in breadth_points:
+        if item_day > day:
+            continue
+        percent = breadth_percent_from_counts(up, down)
+        if percent is not None:
+            breadth_days.append(percent)
+    sliced = {symbol: [value for item_day, value in series if item_day <= day] for symbol, series in (prices or {}).items()}
+    snapshot = {
+        "hy": hy_values,
+        "nfci": nfci_points,
+        "foreign_nets": nets[-THRESHOLDS["foreign_days"]:] if len(nets) >= THRESHOLDS["foreign_days"] else None,
+        "tw_breadth": breadth_days[-1] if breadth_days else None,
+        "tw_breadth_prior": breadth_days[-21] if len(breadth_days) >= 21 else None,
+        "prices": sliced,
+    }
+    leading = raw_layer([_credit_main(snapshot)[0], _foreign_main(snapshot)[0], _divergence_main(snapshot)[0]], 2)
+    internal = raw_layer([_breadth_main(snapshot)[0], _leaders_main(snapshot)[0], _high_beta_main(snapshot)[0]], 2)
+    confirm = raw_layer([_confirm_credit(snapshot)[0], _confirm_tape(snapshot)[0]], 1)
+    row = {}
+    if leading is not None:
+        row["leading"] = leading
+    if internal is not None:
+        row["internal"] = internal
+    if confirm is not None:
+        row["confirm"] = confirm
+    return row
+
+
+def filled_warning_dates(spreadsheet, today: date) -> set[date]:
+    """已寫過外資、漲跌家數或任一層條件的日期。空白列不算。"""
+    from sheet_dates import parse_sheet_date
+
     try:
-        prices = loaders["prices"]() if "prices" in loaders else _fetch_dated_prices()
+        worksheet = spreadsheet.worksheet(WARNING_TAB)
     except Exception:
-        prices = {}
+        return set()
     try:
-        hy, nfci = loaders["fred"]() if "fred" in loaders else _fetch_fred_history()
+        from sheet_numbers import read_worksheet_records
+
+        rows = read_worksheet_records(worksheet)
     except Exception:
-        hy, nfci = [], []
-    breadth = []
-    for item in breadth_days or []:
-        if isinstance(item, (tuple, list)) and len(item) >= 3:
-            breadth.append((item[0], item[1], item[2]))
-        elif isinstance(item, dict) and item.get("date") is not None:
-            breadth.append((item["date"], item.get("up"), item.get("down")))
-    rows = build_backfill_rows(today, {"prices": prices, "foreign": foreign_days, "breadth": breadth, "hy": hy, "nfci": nfci}, trading_days)
-    if not rows:
-        return {"status": "skipped", "sheet": WARNING_TAB, "rows": 0, "detail": "沒有可回補的交易日，沒有寫 0。"}
-    saved = record_warning_rows(spreadsheet, rows, written_at)
-    saved["rows"] = len(rows)
-    return saved
+        try:
+            rows = worksheet.get_all_records()
+        except Exception:
+            return set()
+    found = set()
+    for row in rows or []:
+        day = parse_sheet_date(row.get("日期"))
+        if day is None or day > today:
+            continue
+        has_foreign = str(row.get("外資買賣超") or "").strip() != ""
+        has_breadth = str(row.get("上漲家數") or "").strip() != "" or str(row.get("下跌家數") or "").strip() != ""
+        has_flag = any(_cell_flag(row.get(name)) is not None for name in ("領先條件", "內部條件", "確認條件"))
+        if has_foreign or has_breadth or has_flag:
+            found.add(day)
+    return found
+
+
+def fetch_warning_day(day: date, timeout: float = REQUEST_TIMEOUT_SECONDS) -> dict:
+    """抓一天的 BFI82U 與 MI_INDEX。單日失敗回錯誤字串，不丟例外。"""
+    import requests
+
+    from macro_risk import TWSE_BFI82U_URL, parse_bfi82u
+
+    result = {"foreign_net": None, "up": None, "down": None, "errors": []}
+    headers = {"User-Agent": "quant-command-center/1.0"}
+    try:
+        response = requests.get(
+            TWSE_BFI82U_URL,
+            params={"type": "day", "dayDate": day.strftime("%Y%m%d"), "response": "json"},
+            headers=headers,
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        result["foreign_net"] = parse_bfi82u(response.json())
+        if result["foreign_net"] is None:
+            result["errors"].append(f"{day.isoformat()} BFI82U 沒有外資列")
+    except Exception as exc:
+        result["errors"].append(f"{day.isoformat()} BFI82U {exc.__class__.__name__}")
+    try:
+        response = requests.get(
+            "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX",
+            params={"date": day.strftime("%Y%m%d"), "type": "ALL", "response": "json"},
+            headers=headers,
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        parsed = parse_mi_index_breadth(response.json())
+        if parsed:
+            result["up"] = parsed["up"]
+            result["down"] = parsed["down"]
+        else:
+            result["errors"].append(f"{day.isoformat()} MI_INDEX 沒有漲跌家數")
+    except Exception as exc:
+        result["errors"].append(f"{day.isoformat()} MI_INDEX {exc.__class__.__name__}")
+    return result
+
+
+def backfill_warning_chunk(
+    today: date,
+    spreadsheet,
+    *,
+    max_days: int = BATCH_DAYS,
+    budget_seconds: float = BATCH_BUDGET_SECONDS,
+    pause: float = 0.25,
+    written_at: str = "",
+    clock=None,
+    prices: dict | None = None,
+    hy=None,
+    nfci=None,
+    fetch_day=None,
+    load_market=None,
+) -> dict:
+    """一次只補有限幾個交易日，每補完一天就寫入。時間到就停，留下剩下的日期。"""
+    import time
+
+    now = clock or time.monotonic
+    started = now()
+    failures: list[str] = []
+    if load_market is None:
+        def load_market():
+            return _fetch_dated_prices(), _fetch_fred_history()
+    if prices is None or hy is None or nfci is None:
+        try:
+            loaded_prices, loaded_fred = load_market()
+            prices = prices if prices is not None else loaded_prices
+            if hy is None or nfci is None:
+                hy = loaded_fred[0] if hy is None else hy
+                nfci = loaded_fred[1] if nfci is None else nfci
+        except Exception as exc:
+            failures.append(f"行情或 FRED {exc.__class__.__name__}")
+            prices = prices or {}
+            hy = hy or []
+            nfci = nfci or []
+    target = [item_day for item_day, _value in (prices.get("^TWII") or []) if item_day <= today and item_day.weekday() < 5]
+    target = target[-BACKFILL_TRADING_DAYS:]
+    filled = filled_warning_dates(spreadsheet, today)
+    if not target:
+        progress = _progress([], filled, 0, failures or ["沒有加權收盤，無法決定要補哪些交易日。"], "skipped")
+        return progress
+    missing = [day for day in target if day not in filled]
+    if not missing:
+        return _progress(target, filled, 0, failures, "kept")
+    fetch = fetch_day or fetch_warning_day
+    known_foreign = stored_foreign_points(spreadsheet, today)
+    known_breadth = stored_breadth_points(spreadsheet, today)
+    wrote = 0
+    for index, day in enumerate(missing):
+        if index >= max_days or now() - started >= budget_seconds - 1:
+            break
+        try:
+            got = fetch(day) or {}
+        except Exception as exc:
+            failures.append(f"{day.isoformat()} {exc.__class__.__name__}")
+            continue
+        failures.extend(str(item) for item in (got.get("errors") or []))
+        if got.get("foreign_net") is None and got.get("up") is None and got.get("down") is None:
+            continue
+        if got.get("foreign_net") is not None:
+            known_foreign.append((day, got["foreign_net"]))
+        if got.get("up") is not None and got.get("down") is not None:
+            known_breadth.append((day, got["up"], got["down"]))
+        row = {"date": day.isoformat()}
+        row.update(_flags_for_day(day, prices, hy, nfci, known_foreign, known_breadth))
+        if got.get("foreign_net") is not None:
+            row["foreign_net"] = got["foreign_net"]
+        if got.get("up") is not None:
+            row["up"] = got["up"]
+        if got.get("down") is not None:
+            row["down"] = got["down"]
+        record_warning_rows(spreadsheet, [row], written_at)
+        filled.add(day)
+        wrote += 1
+        if pause and index + 1 < len(missing) and index + 1 < max_days and now() - started < budget_seconds:
+            time.sleep(min(pause, max(0.0, budget_seconds - (now() - started))))
+    status = "written" if wrote else "skipped"
+    return _progress(target, filled, wrote, failures, status)
 
 
 def _fetch_foreign_days(today: date, trading_days: int, pause: float) -> list[tuple]:
@@ -738,17 +958,14 @@ def flag_history_length(history: dict | None) -> int:
 
 
 def ensure_warning_history(spreadsheet, today: date, written_at: str = "") -> dict:
-    """歷史短於 60 個交易日就回補；否則只抓今天附近的外資與漲跌家數。"""
-    try:
-        length = flag_history_length(warning_history_from_sheet(spreadsheet, today))
-    except Exception:
-        length = 0
-    if length < BACKFILL_TRADING_DAYS:
-        return backfill_warning_history(today, spreadsheet, written_at=written_at)
-    rows = collect_warning_rows(today)
-    saved = record_warning_rows(spreadsheet, rows, written_at)
-    saved["rows"] = len(rows)
-    return saved
+    """淨值快照裡只補一天、最多 8 秒。補不完就停，不能拖住已經寫好的淨值。"""
+    return backfill_warning_chunk(
+        today,
+        spreadsheet,
+        max_days=SNAPSHOT_BATCH_DAYS,
+        budget_seconds=SNAPSHOT_BUDGET_SECONDS,
+        written_at=written_at,
+    )
 
 
 def collect_warning_rows(today: date, fetch_foreign=None, fetch_breadth=None) -> list[dict]:

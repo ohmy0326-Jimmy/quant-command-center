@@ -44,14 +44,20 @@ def get_snapshot_writer():
 
 
 def get_warning_backfill():
-    from bear_warning import backfill_warning_history
+    from bear_warning import BATCH_BUDGET_SECONDS, BATCH_DAYS, backfill_warning_chunk
     from portfolio_briefing import taipei_now
     from portfolio_risk import load_service_account_info, open_quant_spreadsheet
 
     def run():
         moment = taipei_now()
         book = open_quant_spreadsheet(load_service_account_info())
-        return backfill_warning_history(moment.date(), book, written_at=moment.strftime("%Y-%m-%d %H:%M:%S"))
+        return backfill_warning_chunk(
+            moment.date(),
+            book,
+            max_days=BATCH_DAYS,
+            budget_seconds=BATCH_BUDGET_SECONDS,
+            written_at=moment.strftime("%Y-%m-%d %H:%M:%S"),
+        )
 
     return run
 
@@ -278,6 +284,11 @@ def bear_warning_backfill(_: None = Depends(require_snapshot_key), runner=Depend
         status=status,
         sheet=str((result or {}).get("sheet") or "Bear_Warning_Daily"),
         rows=int((result or {}).get("rows") or 0),
+        done=bool((result or {}).get("done")),
+        filled_days=int((result or {}).get("filled_days") or 0),
+        remaining_days=int((result or {}).get("remaining_days") or 0),
+        next_date=(result or {}).get("next_date"),
+        failures=list((result or {}).get("failures") or []),
         detail=str((result or {}).get("detail") or ""),
     )
     return _no_store(BearBackfillResponse, body.model_dump())
