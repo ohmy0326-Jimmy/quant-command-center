@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.11.0",
+  "schema_version": "1.12.0",
   "header": "X-API-Key",
   "models": {
     "health": {
@@ -7,7 +7,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.11.0"
+            "1.12.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -325,6 +325,265 @@
             "rows"
           ],
           "title": "CreditTransmissionResponse",
+          "type": "object"
+        },
+        "DeleverageResponse": {
+          "additionalProperties": false,
+          "description": "1.12.0。降槓進度。淨值已扣質押借款。",
+          "properties": {
+            "label": {
+              "title": "Label",
+              "type": "string"
+            },
+            "note": {
+              "title": "Note",
+              "type": "string"
+            },
+            "net_value": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Net Value"
+            },
+            "notional_exposure": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Notional Exposure"
+            },
+            "leverage": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Leverage"
+            },
+            "exposure_complete": {
+              "default": false,
+              "title": "Exposure Complete",
+              "type": "boolean"
+            },
+            "targets": {
+              "items": {
+                "$ref": "#/$defs/DeleverageTargetResponse"
+              },
+              "title": "Targets",
+              "type": "array"
+            },
+            "swaps": {
+              "items": {
+                "$ref": "#/$defs/DeleverageSwapResponse"
+              },
+              "title": "Swaps",
+              "type": "array"
+            }
+          },
+          "required": [
+            "label",
+            "note"
+          ],
+          "title": "DeleverageResponse",
+          "type": "object"
+        },
+        "DeleverageSwapResponse": {
+          "additionalProperties": false,
+          "description": "1.12.0。持有的槓桿 ETF 換成 1 倍標的。只列實際持倉。",
+          "properties": {
+            "symbol": {
+              "title": "Symbol",
+              "type": "string"
+            },
+            "name": {
+              "default": "",
+              "title": "Name",
+              "type": "string"
+            },
+            "underlying": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Underlying"
+            },
+            "multiple": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Multiple"
+            },
+            "multiple_source": {
+              "default": "",
+              "title": "Multiple Source",
+              "type": "string"
+            },
+            "note": {
+              "default": "",
+              "title": "Note",
+              "type": "string"
+            },
+            "market_value_twd": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Market Value Twd"
+            },
+            "notional_twd": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Notional Twd"
+            },
+            "reduction_twd": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "換成 1 倍可降低的名目。沒有報價是 null，不是 0。",
+              "title": "Reduction Twd"
+            },
+            "leverage_after": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Leverage After"
+            },
+            "cumulative_leverage": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "由降低名目大的先換，換完之後的組合槓桿。",
+              "title": "Cumulative Leverage"
+            }
+          },
+          "required": [
+            "symbol"
+          ],
+          "title": "DeleverageSwapResponse",
+          "type": "object"
+        },
+        "DeleverageTargetResponse": {
+          "additionalProperties": false,
+          "description": "1.12.0。使用者的降槓目標，不是 REGIME_RISK。",
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "label": {
+              "title": "Label",
+              "type": "string"
+            },
+            "target_leverage": {
+              "title": "Target Leverage",
+              "type": "number"
+            },
+            "reduction_twd": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "要降到目標還需減少的名目，台幣。已在目標內是 0。名目不完整是 null，不是 0。",
+              "title": "Reduction Twd"
+            },
+            "progress": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "目標倍數 ÷ 目前倍數，0 到 1。滿格代表已落到目標。未知是 null。",
+              "title": "Progress"
+            },
+            "reached": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Reached"
+            },
+            "reason": {
+              "default": "",
+              "title": "Reason",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "label",
+            "target_leverage"
+          ],
+          "title": "DeleverageTargetResponse",
           "type": "object"
         },
         "MarginFinancingAccountResponse": {
@@ -940,7 +1199,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.11.0"
+            "1.12.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -1144,6 +1403,10 @@
         "margin_financing": {
           "$ref": "#/$defs/MarginFinancingResponse",
           "description": "1.11.0 新增。真正的融資（「融資」欄）。目前沒有融資部位時 label 為「無融資」。整戶 130% 維持率只套在這個欄，不套質押借款。"
+        },
+        "deleverage": {
+          "$ref": "#/$defs/DeleverageResponse",
+          "description": "1.12.0 新增。使用者降槓目標：偏多上限 2.0 倍、降槓期間 1.5 倍。不是 REGIME_RISK 的偏多 1.8。槓桿用已扣質押借款的淨值。缺報價的降低名目是 null。"
         }
       },
       "required": [
@@ -1168,7 +1431,8 @@
         "yuanta_futures",
         "credit_transmission",
         "pledge",
-        "margin_financing"
+        "margin_financing",
+        "deleverage"
       ],
       "title": "PortfolioResponse",
       "type": "object"
@@ -1178,7 +1442,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.11.0"
+            "1.12.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -1225,7 +1489,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.11.0"
+            "1.12.0"
           ],
           "title": "Schema Version",
           "type": "string"

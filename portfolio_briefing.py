@@ -14,7 +14,7 @@ import pandas as pd
 
 from cb_holdings import product_kind
 
-SCHEMA_VERSION = "1.11.0"
+SCHEMA_VERSION = "1.12.0"
 TAIPEI = ZoneInfo("Asia/Taipei")
 
 
@@ -257,6 +257,7 @@ def portfolio_payload(
         "credit_transmission": credit_transmission,
         "pledge": _pledge_block(metrics),
         "margin_financing": _margin_block(metrics),
+        "deleverage": _deleverage_block(positions, metrics),
         "positions": position_records(positions),
         "yuanta_futures": yuanta_from_metrics(metrics),
     }
@@ -278,6 +279,17 @@ def _margin_block(metrics: dict) -> dict:
     if isinstance(stored, dict) and stored.get("label"):
         return stored
     return empty_margin_financing()
+
+
+def _deleverage_block(positions: pd.DataFrame, metrics: dict) -> dict:
+    from deleverage import build_deleverage, empty_deleverage
+
+    stored = metrics.get("deleverage")
+    if isinstance(stored, dict) and stored.get("targets"):
+        return stored
+    if positions is not None and metrics:
+        return build_deleverage(positions, metrics)
+    return empty_deleverage()
 
 
 def greeks_block(positions: pd.DataFrame, metrics: dict) -> dict:
