@@ -14,7 +14,7 @@ import pandas as pd
 
 from cb_holdings import product_kind
 
-SCHEMA_VERSION = "1.15.0"
+SCHEMA_VERSION = "1.16.0"
 TAIPEI = ZoneInfo("Asia/Taipei")
 
 
@@ -394,7 +394,10 @@ def load_live_book(as_of: datetime | None = None) -> LiveBook:
     regime = trusted_regime(macro_view_for_orders())
     board = load_board(moment.date())
     try:
-        bear = load_bear_warning(moment.date(), regime=regime, credit_board=board)
+        held = []
+        if positions is not None and not positions.empty and "標的" in positions.columns:
+            held = [str(symbol) for symbol in positions["標的"].tolist() if str(symbol).strip()]
+        bear = load_bear_warning(moment.date(), regime=regime, credit_board=board, held_symbols=held)
     except Exception:
         bear = None
     payload = portfolio_payload(

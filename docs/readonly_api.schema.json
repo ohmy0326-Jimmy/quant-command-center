@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.15.0",
+  "schema_version": "1.16.0",
   "header": "X-API-Key",
   "models": {
     "health": {
@@ -7,7 +7,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.15.0"
+            "1.16.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -183,6 +183,15 @@
               "default": "",
               "title": "Source",
               "type": "string"
+            },
+            "role": {
+              "default": "main",
+              "enum": [
+                "main",
+                "watch"
+              ],
+              "title": "Role",
+              "type": "string"
             }
           },
           "required": [
@@ -213,6 +222,36 @@
               ],
               "title": "State",
               "type": "string"
+            },
+            "raw_on": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Raw On"
+            },
+            "need": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Need"
+            },
+            "hysteresis": {
+              "additionalProperties": true,
+              "description": "1.16.0。連續 3 日才亮、連續 10 日才熄。歷史不夠時 note 是遲滯資料不足，state 是 unknown。",
+              "title": "Hysteresis",
+              "type": "object"
             },
             "indicators": {
               "items": {
@@ -333,6 +372,28 @@
               },
               "title": "Layers",
               "type": "array"
+            },
+            "watches": {
+              "description": "1.16.0。只觀察，不點亮層級。",
+              "items": {
+                "$ref": "#/$defs/BearIndicatorResponse"
+              },
+              "title": "Watches",
+              "type": "array"
+            },
+            "tactical_advice": {
+              "description": "1.16.0。戰術曝險收破對應標的 20 日線時建議減 1/3。不下單。",
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "title": "Tactical Advice",
+              "type": "array"
+            },
+            "core_note": {
+              "default": "",
+              "title": "Core Note",
+              "type": "string"
             }
           },
           "required": [
@@ -1791,7 +1852,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.15.0"
+            "1.16.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -2039,7 +2100,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.15.0"
+            "1.16.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -2086,7 +2147,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.15.0"
+            "1.16.0"
           ],
           "title": "Schema Version",
           "type": "string"

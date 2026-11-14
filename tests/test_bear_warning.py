@@ -41,6 +41,12 @@ def _rising(n=250, start=100.0, step=0.2):
     return [start + step * index for index in range(n)]
 
 
+def report_text() -> str:
+    from bear_warning import NOTE, TW_BREADTH_UNIVERSE
+
+    return NOTE + TW_BREADTH_UNIVERSE
+
+
 class RuleTests(unittest.TestCase):
     def test_regime_table_is_unchanged(self):
         self.assertEqual(
@@ -53,7 +59,8 @@ class RuleTests(unittest.TestCase):
         self.assertEqual(report["caption"], CAPTION)
         self.assertTrue(all(layer["state"] == "unknown" for layer in report["layers"]))
         self.assertEqual(report["suggested_cap"], 1.8)
-        self.assertEqual(report["suggested_action"], "預警未亮，沿用牛熊分數的槓桿上限。")
+        self.assertIn("預警未亮", report["suggested_action"])
+        self.assertIn("遲滯資料不足", report["layers"][0]["hysteresis"]["note"])
         self.assertIsNone(assess({})["suggested_cap"])
         self.assertEqual(curve_indicator("利差", "T10Y2Y", None)["state"], "unknown")
         self.assertEqual(defensive_indicator({})["state"], "unknown")
@@ -84,29 +91,109 @@ class RuleTests(unittest.TestCase):
         rising = _rising(250)
         self.assertEqual(index_trend_indicator("指數", rising, "測試")["state"], "green")
 
-    def test_breadth_divergence_and_proxy_label(self):
+    def test_breadth_uses_listed_advance_share_not_etf_proxy(self):
         closes = {"A": _rising(200, 10, 0.1), "B": [5.0] * 200, "C": [1.0] * 10}
         percent, counted = breadth_percent(closes)
         self.assertEqual(counted, 2)
         self.assertAlmostEqual(percent, 50.0)
-        report = assess({
-            "regime": "牛",
-            "breadth_us": 40.0,
-            "breadth_us_prior": 60.0,
-            "spx_last": 99.0,
-            "spx_high": 100.0,
-            "breadth_tw": 70.0,
-            "breadth_tw_prior": 70.0,
-            "twii_last": 100.0,
-            "twii_high": 100.0,
+        self.assertIn("MI_INDEX", report_text())
+        self.assertNotIn("0051", report_text())
+
+    def test_postmortem_rules_and_hysteresis(self):
+        from datetime import date, timedelta
+
+        from bear_warning import (
+            apply_hysteresis,
+            breadth_percent_from_counts,
+            foreign_sum,
+            hy_gap,
+            nfci_rise,
+            parse_mi_index_breadth,
+            ratio_return,
+            tactical_dma_advice,
+            tw_breadth_on,
+        )
+
+        self.assertIn("2026 覆盤", THRESHOLDS and report_text() or "")
+        self.assertEqual(LEADERS, ("NVDA", "2330.TW", "MU", "AVGO"))
+        flat = [3.0] * 59 + [3.2]
+        self.assertAlmostEqual(hy_gap(flat), 0.2)
+        self.assertIsNone(hy_gap([3.0] * 10))
+        wide = [3.0] * 59 + [3.4]
+        confirmed = [3.0] * 59 + [3.8]
+        start = date(2026, 1, 1)
+        nfci = [(start + timedelta(days=7 * index), 0.0) for index in range(6)]
+        nfci[-1] = (nfci[-1][0], 0.04)
+        self.assertAlmostEqual(nfci_rise(nfci), 0.04)
+        self.assertIsNone(nfci_rise([(start, 0.1)]))
+        self.assertIsNone(foreign_sum([-1e8] * 9))
+        self.assertLess(foreign_sum([-200e8] * 10), -1500 * 1e8)
+        spy = [100.0] * 30
+        rsp = [100.0] * 10 + [97.0] * 20
+        self.assertLess(ratio_return(rsp, spy), -0.02)
+        self.assertTrue(tw_breadth_on(35, 50))
+        self.assertFalse(tw_breadth_on(55, 58))
+        self.assertIsNone(tw_breadth_on(55, None))
+        self.assertAlmostEqual(breadth_percent_from_counts(30, 70), 30.0)
+        parsed = parse_mi_index_breadth({
+            "tables": [{"title": "漲跌證券數合計", "fields": ["類型", "整體市場", "股票"], "data": [["上漲(漲停)", "1", "811(28)"], ["下跌(跌停)", "1", "199(3)"]]}],
         })
-        us = report["breadth"]["us"]
-        tw = report["breadth"]["tw"]
-        self.assertEqual(us["state"], "red")
-        self.assertEqual(tw["state"], "green")
-        self.assertIn("0050", report["breadth"]["tw_universe"])
-        self.assertIn("標普 500", report["breadth"]["us_universe"])
-        self.assertEqual(THRESHOLDS["near_high_pct"], 2.0)
+        self.assertEqual(parsed["up"], 811)
+        self.assertEqual(parsed["down"], 199)
+        unknown_hyst = apply_hysteresis([False, False], False)
+        self.assertFalse(unknown_hyst["on"])
+        self.assertFalse(unknown_hyst["sufficient"])
+        self.assertEqual(unknown_hyst["note"], "遲滯資料不足")
+        turned = apply_hysteresis([True, True], True)
+        self.assertTrue(turned["on"])
+        self.assertEqual(turned["state"], "red")
+        still = apply_hysteresis([True, True, True] + [False] * 8, False)
+        self.assertTrue(still["on"])
+        off = apply_hysteresis([True, True, True] + [False] * 9, False)
+        # 3 on then 10 off: the last False is the 10th if prior has 9 falses.
+        self.assertFalse(off["on"])
+        self.assertEqual(off["state"], "green")
+        gap = apply_hysteresis([True, None], True)
+        self.assertEqual(gap["note"], "遲滯資料不足")
+        prices = {"^TWII": _rising(260), "^SOX": [100.0] * 252 + [90.0], "SPY": spy, "RSP": rsp, "SPHB": rsp, "SPLV": spy, "NVDA": [100.0] * 80, "MU": [100.0] * 80, "AVGO": _rising(80), "2330.TW": _rising(80)}
+        report = assess({
+            "regime": "偏多",
+            "hy": wide,
+            "nfci": nfci,
+            "foreign_nets": [-200e8] * 10,
+            "prices": prices,
+            "history": {"leading": [True, True], "internal": [False, False], "confirm": [False, False]},
+        })
+        self.assertEqual(report["layers"][0]["state"], "red")
+        self.assertEqual(report["layers"][0]["indicators"][0]["role"], "main")
+        self.assertEqual(report["suggested_cap"], 1.5)
+        self.assertTrue(all(item["role"] == "watch" for item in report["watches"]))
+        self.assertIn("DRTSCILM", " ".join(item["name"] for item in report["watches"]))
+        quiet = assess({"regime": "偏多", "hy": flat, "foreign_nets": [0.0] * 10, "prices": {"^TWII": _rising(260), "^SOX": _rising(260), "SPY": _rising(40), "RSP": _rising(40), "SPHB": _rising(40), "SPLV": _rising(40), "NVDA": _rising(80), "MU": _rising(80), "AVGO": _rising(80), "2330.TW": _rising(80)}, "tw_breadth": 70, "tw_breadth_prior": 72})
+        self.assertEqual(quiet["layers"][0]["raw_on"], False)
+        self.assertEqual(quiet["layers"][0]["state"], "unknown")
+        deep = assess({
+            "regime": "牛",
+            "hy": confirmed,
+            "history": {"confirm": [True, True]},
+        })
+        self.assertEqual(deep["layers"][2]["state"], "red")
+        self.assertEqual(deep["suggested_cap"], 1.0)
+        self.assertIn("只留核心與避險", deep["suggested_action"])
+        advice = tactical_dma_advice(["SOXL", "2330"], {"SOXX": [100.0] * 19 + [90.0]})
+        self.assertEqual(len(advice), 1)
+        self.assertEqual(advice[0]["underlying"], "SOXX")
+        self.assertEqual(advice[0]["advice"], "收破 20 日線減 1/3")
+        self.assertEqual(tactical_dma_advice(["00663L"], {})[0]["advice"], "未知")
+        from tests.test_nav_snapshot import FakeBook
+        from bear_warning import record_warning_rows, warning_history_from_sheet
+
+        book = FakeBook({})
+        written = record_warning_rows(book, [{"date": "2026-11-13", "foreign_net": -20e8, "up": 400, "down": 600}], "t")
+        self.assertEqual(written["status"], "written")
+        stored = warning_history_from_sheet(book, date(2026, 11, 14))
+        self.assertIsNone(stored["foreign_nets"])
+        self.assertAlmostEqual(stored["tw_breadth"], 40.0)
 
     def test_defensive_rotation(self):
         def series(base, weekly):
@@ -125,43 +212,25 @@ class RuleTests(unittest.TestCase):
         self.assertEqual(defensive_indicator(prices)["state"], "red")
 
     def test_caps_take_the_more_conservative(self):
-        quiet = assess({"regime": "偏多", "t10y2y": 1.0, "t10y3m": 1.0})
-        self.assertEqual(quiet["layers"][0]["state"] in {"yellow", "red", "unknown", "green"}, True)
-        leading = assess({
-            "regime": "偏多",
-            "credit": {"drtscilm_light": "red", "hy_light": "green", "hy_change_bp": 0},
-            "t10y2y": 1.0,
-            "t10y3m": 1.0,
-            "prices": {"SPY": _rising(20), "XLV": _rising(20), "XLP": _rising(20), "XLU": _rising(20), "XLK": _rising(20)},
-        })
-        self.assertEqual(leading["layers"][0]["state"], "red")
-        self.assertEqual(leading["warning_cap"], 1.5)
-        self.assertEqual(leading["suggested_cap"], 1.5)
         both = assess({
             "regime": "偏多",
-            "credit": {"drtscilm_light": "red", "hy_light": "green", "hy_change_bp": 0},
-            "t10y2y": 1.0,
-            "t10y3m": 1.0,
-            "prices": {"SPY": _rising(40), "XLV": _rising(40), "XLP": _rising(40), "XLU": _rising(40), "XLK": _rising(40)},
-            "breadth_us": 30,
-            "breadth_us_prior": 50,
-            "spx_last": 80,
-            "spx_high": 100,
-            "breadth_tw": 40,
-            "breadth_tw_prior": 40,
-            "twii_last": 80,
-            "twii_high": 100,
-            "leader_below": [False, False, False, False],
-            "sphb_return": 0.01,
-            "splv_return": 0.0,
+            "hy": [3.0] * 59 + [3.4],
+            "foreign_nets": [-200e8] * 10,
+            "prices": {
+                "SPY": [100.0] * 30,
+                "RSP": [100.0] * 10 + [97.0] * 20,
+                "NVDA": [100.0] * 60 + [50.0] * 20,
+                "MU": [100.0] * 60 + [50.0] * 20,
+                "^TWII": _rising(260),
+                "^SOX": _rising(260),
+            },
+            "history": {"leading": [True, True], "internal": [True, True]},
         })
+        self.assertEqual(both["layers"][0]["state"], "red")
+        self.assertEqual(both["layers"][1]["state"], "red")
         self.assertEqual(both["suggested_cap"], 1.2)
         self.assertIn("加避險", both["suggested_action"])
-        confirmed = assess({"regime": "牛", "credit": {"hy_change_bp": 120}})
-        self.assertEqual(confirmed["layers"][2]["state"], "red")
-        self.assertEqual(confirmed["suggested_cap"], 1.0)
-        self.assertIn("只留核心與避險", confirmed["suggested_action"])
-        self.assertEqual(LEADERS[0], "AAPL")
+        self.assertEqual(LEADERS[0], "NVDA")
 
     def test_api_object(self):
         payload = portfolio_payload(
@@ -171,7 +240,7 @@ class RuleTests(unittest.TestCase):
             as_of=AS_OF,
             regime="偏多",
         )
-        self.assertEqual(payload["schema_version"], "1.15.0")
+        self.assertEqual(payload["schema_version"], "1.16.0")
         self.assertEqual(payload["bear_warning"]["caption"], CAPTION)
         self.assertEqual(payload["bear_warning"]["suggested_cap"], 1.8)
         self.assertEqual(payload["bear_warning"]["overall"], "unknown")
@@ -219,14 +288,13 @@ class PriceAndLightTests(unittest.TestCase):
             fetch_prices=lambda: closes_to_bundle(closes),
             regime_reader=lambda: None,
             breadth_reader=lambda today: {},
+            history_reader=lambda today: {},
         )
-        names = {item["name"]: item["state"] for layer in report["layers"] for item in layer["indicators"]}
-        self.assertNotEqual(names["防禦股相對強、科技股相對弱"], "unknown")
-        self.assertNotEqual(names["VIX 持續偏高"], "unknown")
-        self.assertNotEqual(names["大型權值跌破 60 日線"], "unknown")
-        self.assertEqual(names["美股廣度"], "unknown")
+        names = {item["name"]: item["state"] for item in report["watches"]}
+        self.assertEqual(names["VIX 高於 25"], "green")
         self.assertEqual(report["regime"], "偏多")
         self.assertEqual(report["suggested_cap"], 1.8)
+        self.assertTrue(report["layers"][0]["hysteresis"]["note"])
 
     def test_sheet_regime_is_used_when_memory_view_is_not_the_sheet(self):
         from datetime import date
@@ -242,6 +310,7 @@ class PriceAndLightTests(unittest.TestCase):
             fetch_prices=lambda: {},
             regime_reader=lambda: "熊",
             breadth_reader=lambda today: {},
+            history_reader=lambda today: {},
         )
         self.assertEqual(report["regime"], "熊")
         self.assertEqual(report["regime_cap"], 1.0)
@@ -250,7 +319,7 @@ class PriceAndLightTests(unittest.TestCase):
         self.assertEqual(overall_state([{"state": "unknown"}, {"state": "unknown"}, {"state": "unknown"}]), "unknown")
         self.assertEqual(overall_state([{"state": "green"}, {"state": "unknown"}, {"state": "yellow"}]), "yellow")
         self.assertEqual(overall_state([{"state": "green"}, {"state": "red"}, {"state": "unknown"}]), "red")
-        confirmed = assess({"regime": "牛", "credit": {"hy_change_bp": 120}})
+        confirmed = assess({"regime": "牛", "hy": [1.0] * 59 + [2.0], "history": {"confirm": [True, True]}})
         self.assertEqual(confirmed["overall"], "red")
         self.assertEqual(confirmed["layers"][0]["state"], "unknown")
 
@@ -262,7 +331,7 @@ class PriceAndLightTests(unittest.TestCase):
         script = """
 import streamlit as st
 from bear_warning import assess, render_bear_panel
-render_bear_panel(st, assess({"regime": "牛", "credit": {"hy_change_bp": 120}}))
+render_bear_panel(st, assess({"regime": "牛", "hy": [1.0] * 59 + [2.0], "history": {"confirm": [True, True]}}))
 """
         at = AppTest.from_string(script, default_timeout=30).run()
         self.assertFalse(at.exception)
