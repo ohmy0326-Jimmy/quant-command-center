@@ -2138,51 +2138,51 @@ def _overall_banner(state: str, headline: str) -> str:
     )
 
 
-def render_bear_panel(st, report: dict) -> None:
-    """第一頁信用傳導旁邊。只改層級呈現，不重算燈號。"""
+def render_bear_panel(parent, report: dict) -> None:
+    """第一頁信用傳導旁邊。層級內容寫進 container 本身，不寫到外層。"""
     report = report or {}
     if not report.get("layers"):
         report = assess({"regime": report.get("regime")})
-    st.subheader("熊市預警燈")
-    st.caption(CAPTION)
+    parent.subheader("熊市預警燈")
+    parent.caption(CAPTION)
     overall = report.get("overall") or overall_state(report.get("layers"))
-    st.markdown(_overall_banner(overall, cap_headline(report)), unsafe_allow_html=True)
-    st.caption(_cap_source_line(report))
+    parent.markdown(_overall_banner(overall, cap_headline(report)), unsafe_allow_html=True)
+    parent.caption(_cap_source_line(report))
     if report.get("suggested_action"):
-        st.caption(report["suggested_action"])
+        parent.caption(report["suggested_action"])
     for layer in report.get("layers") or []:
-        with st.container(border=True):
-            state = layer.get("state") or "unknown"
-            st.markdown(f"### {_DOT.get(state, '⚪')} {layer_title(layer)}")
-            if layer.get("provisional") or (layer.get("hysteresis") or {}).get("provisional"):
-                st.warning("疑似亮燈（遲滯資料不足）")
-            st.caption(hysteresis_status_line(layer.get("hysteresis")))
-            for item in layer.get("indicators") or []:
-                st.markdown(
-                    f'<div style="font-size:0.92rem;margin-left:0.6rem;">{indicator_line(item)}</div>',
-                    unsafe_allow_html=True,
-                )
-                detail = "。".join(part for part in (item.get("threshold"), item.get("source")) if part)
-                if detail:
-                    st.caption(detail)
-    with st.expander("觀察指標（不升級）", expanded=False):
-        for item in report.get("watches") or []:
-            word = _STATE_TEXT.get(item.get("state"), "未知")
-            st.markdown(
-                (
-                    '<div style="color:#6b7280;font-size:0.9rem;">'
-                    f"● {item.get('name') or '觀察'}　{item.get('value_text') or '未知'}　{word}"
-                    "</div>"
-                ),
+        box = parent.container(border=True)
+        state = layer.get("state") or "unknown"
+        box.markdown(f"#### {_DOT.get(state, '⚪')} {layer_title(layer)}")
+        if layer.get("provisional") or (layer.get("hysteresis") or {}).get("provisional"):
+            box.warning("疑似亮燈（遲滯資料不足）")
+        box.caption(hysteresis_status_line(layer.get("hysteresis")))
+        for item in layer.get("indicators") or []:
+            box.markdown(
+                f'<div style="font-size:0.92rem;margin-left:0.6rem;">{indicator_line(item)}</div>',
                 unsafe_allow_html=True,
             )
-    st.caption(report.get("core_note") or "核心部位跟著預警上限。")
+            detail = "。".join(part for part in (item.get("threshold"), item.get("source")) if part)
+            if detail:
+                box.caption(detail)
+    watch = parent.expander("觀察指標（不升級）", expanded=False)
+    for item in report.get("watches") or []:
+        word = _STATE_TEXT.get(item.get("state"), "未知")
+        watch.markdown(
+            (
+                '<div style="color:#6b7280;font-size:0.9rem;">'
+                f"● {item.get('name') or '觀察'}　{item.get('value_text') or '未知'}　{word}"
+                "</div>"
+            ),
+            unsafe_allow_html=True,
+        )
+    parent.caption(report.get("core_note") or "核心部位跟著預警上限。")
     advice = report.get("tactical_advice") or []
     if advice:
-        st.markdown("**戰術曝險：收破 20 日線減 1/3**")
+        parent.markdown("**戰術曝險：收破 20 日線減 1/3**")
         for item in advice:
-            st.caption(f"{item.get('symbol')} 對照 {item.get('underlying_label')}（{item.get('underlying')}）：{item.get('advice')}")
+            parent.caption(f"{item.get('symbol')} 對照 {item.get('underlying_label')}（{item.get('underlying')}）：{item.get('advice')}")
     else:
-        st.caption("戰術曝險若收破對應標的的 20 日線，減三分之一。沒有持倉或沒有收盤時不列。不下單。")
-    st.caption(US_BREADTH_UNIVERSE)
-    st.caption(TW_BREADTH_UNIVERSE)
+        parent.caption("戰術曝險若收破對應標的的 20 日線，減三分之一。沒有持倉或沒有收盤時不列。不下單。")
+    parent.caption(US_BREADTH_UNIVERSE)
+    parent.caption(TW_BREADTH_UNIVERSE)

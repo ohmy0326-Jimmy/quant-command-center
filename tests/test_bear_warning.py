@@ -444,6 +444,67 @@ class PriceAndLightTests(unittest.TestCase):
         self.assertEqual(cap_headline({"suggested_cap": 1.5}), "建議槓桿上限 1.5 倍")
         self.assertEqual(cap_headline({"suggested_cap": None}), "建議槓桿上限 未知")
 
+    def test_layer_block_writes_into_the_container(self):
+        from bear_warning import render_bear_panel
+
+        def _texts(node):
+            found = []
+            for name, args, _kwargs in node.calls:
+                found.append(str(name))
+                found.extend(str(arg) for arg in args)
+            return found
+
+        class Node:
+            def __init__(self):
+                self.calls = []
+                self.children = []
+
+            def _record(self, name, *args, **kwargs):
+                self.calls.append((name, args, kwargs))
+                return self
+
+            subheader = caption = markdown = warning = __call__ = _record
+
+            def container(self, border=False):
+                child = Node()
+                child.border = border
+                self.children.append(child)
+                return child
+
+            def expander(self, label, expanded=False):
+                child = Node()
+                child.label = label
+                child.expanded = expanded
+                self.children.append(child)
+                return child
+
+        parent = Node()
+        render_bear_panel(parent, {
+            "overall": "yellow",
+            "suggested_cap": 1.2,
+            "regime_cap": 1.8,
+            "warning_cap": 1.2,
+            "suggested_action": "暫行。",
+            "layers": [{
+                "id": "internal",
+                "name": "第二層 內部",
+                "need": 2,
+                "state": "yellow",
+                "provisional": True,
+                "hysteresis": {"raw_on": True, "on_streak": 1, "on_days": 3, "state": "yellow", "off_streak": 0, "off_days": 10, "provisional": True},
+                "indicators": [{"role": "main", "state": "red", "name": "寬度合成", "value_text": "成立", "threshold": "門檻", "source": "來源"}],
+            }],
+            "watches": [{"state": "green", "name": "VIX 高於 25", "value_text": "18"}],
+        })
+        boxes = [child for child in parent.children if getattr(child, "border", False)]
+        self.assertEqual(len(boxes), 1)
+        self.assertTrue(any("第二層 內部" in text for text in _texts(boxes[0])))
+        self.assertTrue(any("寬度合成" in text for text in _texts(boxes[0])))
+        self.assertFalse(any("第二層 內部" in text for text in _texts(parent)))
+        watch = next(child for child in parent.children if getattr(child, "label", "") == "觀察指標（不升級）")
+        self.assertFalse(watch.expanded)
+        self.assertTrue(any("VIX" in text for text in _texts(watch)))
+
     def test_panel_paints_grey_unknown_and_a_red_overall(self):
         try:
             from streamlit.testing.v1 import AppTest
