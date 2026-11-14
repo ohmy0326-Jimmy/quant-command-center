@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.13.0",
+  "schema_version": "1.14.0",
   "header": "X-API-Key",
   "models": {
     "health": {
@@ -7,7 +7,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.13.0"
+            "1.14.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -193,6 +193,17 @@
               "title": "Suggested Action",
               "type": "string"
             },
+            "overall": {
+              "description": "1.14.0。已知各層裡最差的一盞。全未知是 unknown，不是綠。",
+              "enum": [
+                "green",
+                "yellow",
+                "red",
+                "unknown"
+              ],
+              "title": "Overall",
+              "type": "string"
+            },
             "thresholds": {
               "additionalProperties": true,
               "title": "Thresholds",
@@ -221,6 +232,7 @@
           "required": [
             "caption",
             "note",
+            "overall",
             "thresholds",
             "breadth",
             "layers"
@@ -1394,7 +1406,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.13.0"
+            "1.14.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -1601,11 +1613,11 @@
         },
         "deleverage": {
           "$ref": "#/$defs/DeleverageResponse",
-          "description": "1.12.0 新增。使用者降槓目標：偏多上限 2.0 倍、降槓期間 1.5 倍。不是 REGIME_RISK 的偏多 1.8。槓桿用已扣質押借款的淨值。缺報價的降低名目是 null。"
+          "description": "1.12.0 新增。使用者降槓目標：偏多上限 2.0 倍、降槓期間 1.5 倍。不是 REGIME_RISK 的偏多 1.8。槓桿用已扣質押借款的淨值。缺報價的降低名目是 null。1.14.0 起同一代號跨帳戶合成一列。"
         },
         "bear_warning": {
           "$ref": "#/$defs/BearWarningResponse",
-          "description": "1.13.0 新增。熊市預警燈。不改牛熊分數與 REGIME_RISK。suggested_cap 是牛熊上限與預警調整後上限的較低者。子指標缺資料是 unknown，不算通過。"
+          "description": "1.13.0 新增，1.14.0 加 overall。熊市預警燈。不改牛熊分數與 REGIME_RISK。suggested_cap 是牛熊上限與預警調整後上限的較低者。子指標缺資料是 unknown，不算通過。"
         }
       },
       "required": [
@@ -1642,7 +1654,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.13.0"
+            "1.14.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -1689,7 +1701,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.13.0"
+            "1.14.0"
           ],
           "title": "Schema Version",
           "type": "string"

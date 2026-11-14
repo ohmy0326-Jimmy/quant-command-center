@@ -119,6 +119,7 @@ class SnapshotFxTests(unittest.TestCase):
     tearDown = setUp
 
     def _run(self, book, nav_history, **kwargs):
+        kwargs.setdefault("breadth_compute", False)
         fake_valuation = (pd.DataFrame(), pd.DataFrame(), _metrics(), [])
         with patch("portfolio_risk.read_quant_sheets", return_value=(pd.DataFrame(), nav_history, pd.DataFrame())), \
                 patch("portfolio_risk.value_positions_safely", return_value=fake_valuation) as valued:

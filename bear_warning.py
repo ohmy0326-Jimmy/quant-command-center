@@ -35,7 +35,21 @@ CAP_STEPS = ("牛", "偏多", "中性", "偏空", "熊")
 CAPTION = "牛熊分數決定槓桿上限，預警燈決定要不要提早降槓桿，兩者衝突時以較保守的為準。"
 US_BREADTH_UNIVERSE = "標普 500 成分股收盤是否站上 200 日線。沒有成分股收盤時是未知。"
 TW_BREADTH_UNIVERSE = "台股廣度不是全體加權成分。代理是 0050（台灣50）加 0051（中型100）。沒有這些成分股收盤時是未知。"
-NOTE = "門檻是程式預設。領先層的放款意願與高收益利差沿用信用傳導，不另設一套門檻。大型權值是 AAPL、MSFT、NVDA、AMZN、GOOGL、META、AVGO，不是自動抓持倉。"
+NOTE = (
+    "門檻是程式預設。領先層的放款意願與高收益利差沿用信用傳導，不另設一套門檻。"
+    "大型權值是 AAPL、MSFT、NVDA、AMZN、GOOGL、META、AVGO，不是自動抓持倉。"
+    "總燈取已知各層裡最差的一層。某一層全部未知是灰燈，不算通過。"
+    "美股廣度用標普 500 成分股，只在每日淨值快照算一次，這一頁的請求不重抓那 500 檔。"
+    "台股廣度要 0050 與 0051 的全部成分。沒有完整清單時是未知，不用較短的代理名單充數。"
+)
+PRICE_TICKERS = ("SPY", "XLV", "XLP", "XLU", "XLK", "SPHB", "SPLV", "^GSPC", "^TWII", "^VIX", *LEADERS)
+BREADTH_TAB = "Bear_Breadth"
+BREADTH_HEADER = ["日期", "美股廣度", "美股四周前", "台股廣度", "台股四周前", "美股檔數", "台股檔數", "寫入時間"]
+BREADTH_MAX_AGE_DAYS = 5
+SP500_LIST_URL = "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/data/constituents.csv"
+_PRICE_FAIL_SECONDS = 600
+_REGIME_CACHE = {"at": 0.0, "regime": None, "ready": False}
+_BREADTH_CACHE = {"at": 0.0, "value": None}
 
 _STATE_TEXT = {"green": "綠", "yellow": "黃", "red": "紅", "unknown": "未知"}
 _PRICE_CACHE: dict = {}
@@ -82,6 +96,19 @@ def _layer_state(indicators: list[dict]) -> str:
     if "green" in states:
         return "green"
     return "unknown"
+
+
+def overall_state(layers: list[dict] | None) -> str:
+    """已知各層裡最差的一盞。未知的層不把別層拉成未知，也不算通過。全未知是 unknown。"""
+    known = [str((layer or {}).get("state") or "") for layer in (layers or [])]
+    known = [state for state in known if state in {"green", "yellow", "red"}]
+    if not known:
+        return "unknown"
+    if "red" in known:
+        return "red"
+    if "yellow" in known:
+        return "yellow"
+    return "green"
 
 
 def _lit(state: str) -> bool:
@@ -397,6 +424,7 @@ def assess(snapshot: dict | None = None) -> dict:
     return {
         "caption": CAPTION,
         "note": NOTE,
+        "overall": overall_state(layers),
         "thresholds": dict(THRESHOLDS),
         "leaders": list(LEADERS),
         "breadth": {
@@ -430,20 +458,366 @@ def _latest(observations) -> float | None:
     return _finite(observations[-1][1])
 
 
+def clear_bear_cache() -> None:
+    """重新整理時清掉同一天的行情與廣度。不改牛熊分數。"""
+    _PRICE_CACHE.clear()
+    _REGIME_CACHE["at"] = 0.0
+    _REGIME_CACHE["regime"] = None
+    _REGIME_CACHE["ready"] = False
+    _BREADTH_CACHE["at"] = 0.0
+    _BREADTH_CACHE["value"] = None
+
+
+def _bundle_has_closes(prices: dict | None) -> bool:
+    for value in (prices or {}).values():
+        if isinstance(value, list) and any(_finite(item) is not None for item in value):
+            return True
+    return False
+
+
+def closes_to_bundle(closes: dict | None) -> dict:
+    """收盤序列（由舊到新）收成預警要用的行情。不夠長的項目留空，不當 0。"""
+    closes = closes or {}
+    bundle: dict = {}
+    for symbol in ("SPY", "XLV", "XLP", "XLU", "XLK", "SPHB", "SPLV", "^GSPC", "^TWII", "^VIX", *LEADERS):
+        series = [_finite(item) for item in (closes.get(symbol) or [])]
+        series = [item for item in series if item is not None]
+        bundle[symbol] = series or None
+    window = THRESHOLDS["leader_dma"]
+    flags = []
+    for symbol in LEADERS:
+        series = bundle.get(symbol) or []
+        if len(series) < window:
+            flags.append(None)
+        else:
+            average = sum(series[-window:]) / window
+            flags.append(bool(series[-1] < average))
+    bundle["leader_below"] = flags
+    for key, symbol in (("spx", "^GSPC"), ("twii", "^TWII")):
+        series = bundle.get(symbol) or []
+        bundle[f"{key}_last"] = series[-1] if series else None
+        bundle[f"{key}_high"] = max(series[-252:]) if len(series) >= 252 else None
+    return bundle
+
+
+def fetch_core_prices() -> dict:
+    """約十幾個代號的一年以上收盤。不含標普 500 成分股，避免每次請求打五百檔。"""
+    from order_insights import fetch_close_history
+
+    history = fetch_close_history(list(PRICE_TICKERS), period="2y")
+    closes = {}
+    for symbol, series in (history or {}).items():
+        values = []
+        for item in getattr(series, "tolist", lambda: [])():
+            number = _finite(item)
+            if number is not None:
+                values.append(number)
+        if values:
+            closes[str(symbol)] = values
+    if not closes:
+        return {}
+    return closes_to_bundle(closes)
+
+
 def cached_price_bundle(today: date, fetch_prices=None) -> dict:
-    """同一天、同一個程序只抓一次行情。抓不到回空，呼叫端當成未知。"""
+    """同一天、同一個程序只抓一次行情。沒傳抓取函式就用 Yahoo。整包失敗十分鐘內不連打，成功才留到當天。"""
+    import time
+
     key = today.isoformat()
-    if _PRICE_CACHE.get("day") == key:
-        return _PRICE_CACHE.get("prices") or {}
-    prices = {}
-    if fetch_prices is not None:
+    if _PRICE_CACHE.get("day") == key and _PRICE_CACHE.get("ok"):
+        return dict(_PRICE_CACHE.get("prices") or {})
+    if fetch_prices is None:
+        fetch_prices = fetch_core_prices
+    failed_at = _PRICE_CACHE.get("fail_at")
+    if _PRICE_CACHE.get("fail_day") == key and failed_at and time.time() - float(failed_at) < _PRICE_FAIL_SECONDS:
+        return dict(_PRICE_CACHE.get("prices") or {})
+    try:
+        prices = fetch_prices() or {}
+    except Exception:
+        prices = {}
+    if _bundle_has_closes(prices):
+        _PRICE_CACHE["day"] = key
+        _PRICE_CACHE["ok"] = True
+        _PRICE_CACHE["prices"] = prices
+        _PRICE_CACHE.pop("fail_at", None)
+    else:
+        _PRICE_CACHE["ok"] = False
+        _PRICE_CACHE["fail_day"] = key
+        _PRICE_CACHE["fail_at"] = time.time()
+        _PRICE_CACHE["prices"] = prices
+    return dict(prices)
+
+
+def read_sheet_regime() -> str | None:
+    """試算表上的牛熊狀態。倉庫 JSON 示例不算。"""
+    from macro_cycle import load_macro_cycle
+    from macro_cycle_live import read_quant_macro_tabs, remember_live_view
+    from macro_cycle_sheet import compose_macro_view
+    from portfolio_greeks import trusted_regime
+    from portfolio_risk import load_service_account_info
+
+    key = load_service_account_info()
+    sheet = read_quant_macro_tabs(key)
+    view = compose_macro_view(load_macro_cycle(), sheet, {})
+    remember_live_view(view)
+    return trusted_regime(view)
+
+
+def cached_sheet_regime(reader=None, now: float | None = None) -> str | None:
+    """十五分鐘內用同一份。第五頁剛讀過的試算表結果優先。"""
+    import time
+
+    from macro_cycle_live import peek_live_view
+    from portfolio_greeks import trusted_regime
+
+    current = time.time() if now is None else float(now)
+    live = trusted_regime(peek_live_view(now=current))
+    if live:
+        return live
+    if _REGIME_CACHE["ready"] and current - float(_REGIME_CACHE["at"]) < 15 * 60:
+        return _REGIME_CACHE["regime"]
+    if reader is None:
+        reader = read_sheet_regime
+    try:
+        regime = reader()
+    except Exception:
+        regime = None
+    if regime not in CAP_STEPS:
+        regime = None
+    _REGIME_CACHE["at"] = current
+    _REGIME_CACHE["regime"] = regime
+    _REGIME_CACHE["ready"] = True
+    return regime
+
+
+def parse_symbol_column(text: str) -> list[str]:
+    """CSV 第一列或名為 Symbol 的欄。BRK.B 改成 Yahoo 的 BRK-B。"""
+    lines = [line for line in str(text or "").splitlines() if line.strip()]
+    if not lines:
+        return []
+    header = [part.strip().strip('"').lower() for part in lines[0].split(",")]
+    index = header.index("symbol") if "symbol" in header else 0
+    found = []
+    for line in lines[1:]:
+        parts = line.split(",")
+        if len(parts) <= index:
+            continue
+        raw = parts[index].strip().strip('"').upper().replace(".", "-")
+        if raw and raw not in found:
+            found.append(raw)
+    return found
+
+
+def fetch_sp500_symbols(opener=None) -> list[str]:
+    import urllib.request
+
+    open_url = opener or urllib.request.urlopen
+    with open_url(SP500_LIST_URL, timeout=20) as response:
+        payload = response.read()
+    if isinstance(payload, bytes):
+        payload = payload.decode("utf-8", "replace")
+    symbols = parse_symbol_column(payload)
+    if len(symbols) < 400:
+        return []
+    return symbols
+
+
+def breadth_from_closes(closes_by_symbol: dict | None) -> tuple[float | None, float | None, int]:
+    """目前站上 200 日線的比例，以及 4 週（20 根）前的比例。算不出來是 None，不是 0。"""
+    sessions = THRESHOLDS["week_sessions"] * THRESHOLDS["breadth_fall_weeks"]
+    current, counted = breadth_percent(closes_by_symbol)
+    prior_map = {}
+    for symbol, series in (closes_by_symbol or {}).items():
+        if series and len(series) > sessions:
+            prior_map[symbol] = series[:-sessions]
+    prior, _prior_counted = breadth_percent(prior_map)
+    return current, prior, counted
+
+
+def compute_breadth(fetch_symbols, fetch_closes) -> dict:
+    """成分股由呼叫端提供。名單或收盤不夠就留 None。"""
+    result = {
+        "breadth_us": None,
+        "breadth_us_prior": None,
+        "breadth_us_count": 0,
+        "breadth_tw": None,
+        "breadth_tw_prior": None,
+        "breadth_tw_count": 0,
+    }
+    for market, prefix in (("us", "breadth_us"), ("tw", "breadth_tw")):
         try:
-            prices = fetch_prices() or {}
+            symbols = list(fetch_symbols(market) or [])
         except Exception:
-            prices = {}
-    _PRICE_CACHE["day"] = key
-    _PRICE_CACHE["prices"] = prices
-    return prices
+            symbols = []
+        if not symbols:
+            continue
+        try:
+            closes = fetch_closes(symbols) or {}
+        except Exception:
+            closes = {}
+        current, prior, counted = breadth_from_closes(closes)
+        result[prefix] = current
+        result[f"{prefix}_prior"] = prior
+        result[f"{prefix}_count"] = counted
+    return result
+
+
+def fetch_close_lists(symbols: list[str], period: str = "2y", chunk: int = 40) -> dict:
+    """分批抓收盤。單批失敗留空，不把缺的代號當成 0。"""
+    from order_insights import fetch_close_history
+
+    unique = []
+    for symbol in symbols:
+        text = str(symbol or "").strip()
+        if text and text not in unique:
+            unique.append(text)
+    found = {}
+    for start in range(0, len(unique), chunk):
+        history = fetch_close_history(unique[start:start + chunk], period=period)
+        for symbol, series in (history or {}).items():
+            values = []
+            for item in getattr(series, "tolist", lambda: [])():
+                number = _finite(item)
+                if number is not None:
+                    values.append(number)
+            if values:
+                found[str(symbol)] = values
+    return found
+
+
+def compute_stored_breadth() -> dict:
+    """每日快照用。美股用標普 500 公開名單。台股沒有完整的 0050+0051 檔案時不拿別的名單充數。"""
+    def symbols(market: str):
+        if market == "us":
+            return fetch_sp500_symbols()
+        return []
+
+    return compute_breadth(symbols, fetch_close_lists)
+
+
+def _blank_number(value):
+    if value is None or str(value).strip() == "":
+        return None
+    return _finite(value)
+
+
+def _sheet_cell(value):
+    if value is None:
+        return ""
+    if isinstance(value, float):
+        return round(value, 2)
+    return value
+
+
+def record_breadth(spreadsheet, today: str, result: dict, written_at: str = "") -> dict:
+    """寫進 Bear_Breadth。沒有任何一側算得出來就不寫，也不寫 0。"""
+    result = result or {}
+    usable = any(result.get(key) is not None for key in ("breadth_us", "breadth_tw"))
+    summary = {
+        "status": "skipped",
+        "sheet": BREADTH_TAB,
+        "as_of": today,
+        "breadth_us": result.get("breadth_us"),
+        "breadth_tw": result.get("breadth_tw"),
+        "detail": "成分股收盤不足，沒有把缺的廣度寫成 0。",
+    }
+    if not usable:
+        return summary
+    from nav_snapshot import _ensure_worksheet
+
+    worksheet, created, _migrated = _ensure_worksheet(spreadsheet, BREADTH_TAB, list(BREADTH_HEADER))
+    values = [
+        today,
+        _sheet_cell(result.get("breadth_us")),
+        _sheet_cell(result.get("breadth_us_prior")),
+        _sheet_cell(result.get("breadth_tw")),
+        _sheet_cell(result.get("breadth_tw_prior")),
+        _sheet_cell(result.get("breadth_us_count")),
+        _sheet_cell(result.get("breadth_tw_count")),
+        written_at,
+    ]
+    existing = worksheet.col_values(1)
+    target = None
+    from sheet_dates import parse_sheet_date
+
+    for index, raw in enumerate(existing[1:], start=2):
+        if parse_sheet_date(raw) == parse_sheet_date(today):
+            target = index
+            break
+    if target is None:
+        target = max(len(existing), 1) + 1
+    worksheet.update(range_name=f"A{target}:H{target}", values=[values], value_input_option="USER_ENTERED")
+    summary["status"] = "written"
+    summary["sheet_created"] = created
+    summary["detail"] = ""
+    return summary
+
+
+def read_stored_breadth(spreadsheet, today: date) -> dict:
+    """讀最近一列。超過 5 天，或分頁不存在，回空。空白不是 0。"""
+    try:
+        worksheet = spreadsheet.worksheet(BREADTH_TAB)
+    except Exception:
+        return {}
+    try:
+        from sheet_numbers import read_worksheet_records
+
+        rows = read_worksheet_records(worksheet)
+    except Exception:
+        try:
+            rows = worksheet.get_all_records()
+        except Exception:
+            return {}
+    from sheet_dates import parse_sheet_date
+
+    best = None
+    for row in rows or []:
+        day = parse_sheet_date(row.get("日期"))
+        if day is None:
+            continue
+        if best is None or day > best[0]:
+            best = (day, row)
+    if best is None:
+        return {}
+    age = (today - best[0]).days
+    if age < 0 or age > BREADTH_MAX_AGE_DAYS:
+        return {}
+    row = best[1]
+    return {
+        "as_of": best[0].isoformat(),
+        "breadth_us": _blank_number(row.get("美股廣度")),
+        "breadth_us_prior": _blank_number(row.get("美股四周前")),
+        "breadth_tw": _blank_number(row.get("台股廣度")),
+        "breadth_tw_prior": _blank_number(row.get("台股四周前")),
+    }
+
+
+def read_sheet_breadth(today: date) -> dict:
+    from portfolio_risk import load_service_account_info, open_quant_spreadsheet
+
+    book = open_quant_spreadsheet(load_service_account_info())
+    return read_stored_breadth(book, today)
+
+
+def cached_breadth(today: date, reader=None) -> dict:
+    """十五分鐘內不重讀試算表。沒有存檔就是空，請求本身不去抓 500 檔。"""
+    import time
+
+    current = time.time()
+    cached = _BREADTH_CACHE.get("value")
+    if isinstance(cached, dict) and current - float(_BREADTH_CACHE.get("at") or 0) < 15 * 60:
+        return dict(cached)
+    if reader is None:
+        reader = read_sheet_breadth
+    try:
+        found = reader(today) or {}
+    except Exception:
+        found = {}
+    if not isinstance(found, dict):
+        found = {}
+    _BREADTH_CACHE["at"] = current
+    _BREADTH_CACHE["value"] = found
+    return dict(found)
 
 
 def _return_over(closes: list[float] | None, weeks: int) -> float | None:
@@ -456,13 +830,19 @@ def _return_over(closes: list[float] | None, weeks: int) -> float | None:
     return total - 1.0
 
 
-def load_bear_warning(today: date, regime: str | None = None, credit_board: dict | None = None, fetch_fred=None, fetch_prices=None) -> dict:
-    """信用傳導沿用呼叫端已經抓好的 board，不再抓一次。利差與行情失敗就留未知。"""
+def load_bear_warning(today: date, regime: str | None = None, credit_board: dict | None = None, fetch_fred=None, fetch_prices=None, regime_reader=None, breadth_reader=None) -> dict:
+    """信用傳導沿用呼叫端已經抓好的 board，不再抓一次。行情沒傳函式就抓 Yahoo。廣度只讀每日快照。"""
+    if regime not in CAP_STEPS:
+        regime = cached_sheet_regime(reader=regime_reader)
     if fetch_fred is None:
         from page1_lights import fetch_fred_observations
 
         fetch_fred = fetch_fred_observations
     prices = cached_price_bundle(today, fetch_prices)
+    stored = cached_breadth(today, reader=breadth_reader)
+    for key in ("breadth_us", "breadth_us_prior", "breadth_tw", "breadth_tw_prior"):
+        if prices.get(key) is None and stored.get(key) is not None:
+            prices[key] = stored[key]
     if _PRICE_CACHE.get("curve_day") == today.isoformat():
         curves = dict(_PRICE_CACHE.get("curves") or {})
     else:
@@ -503,11 +883,36 @@ def load_bear_warning(today: date, regime: str | None = None, credit_board: dict
     return assess(snapshot)
 
 
+def _paint_light(st, state: str, text: str) -> None:
+    """綠黃紅用 Streamlit 色塊。未知用灰底，不是藍底提示，也不會藏起來。"""
+    label = _STATE_TEXT.get(state, "未知")
+    line = f"{label}　{text}"
+    if state == "red":
+        st.error(line)
+    elif state == "yellow":
+        st.warning(line)
+    elif state == "green":
+        st.success(line)
+    else:
+        st.markdown(
+            (
+                '<div style="background:#e5e7eb;color:#374151;border:1px solid #9ca3af;'
+                'border-radius:8px;padding:0.6rem 0.8rem;font-weight:700;margin:0.25rem 0;">'
+                f"未知　{text}</div>"
+            ),
+            unsafe_allow_html=True,
+        )
+
+
 def render_bear_panel(st, report: dict) -> None:
-    """第一頁信用傳導旁邊。只顯示。"""
-    report = report or assess()
+    """第一頁信用傳導旁邊。每一層與總燈都畫出來，未知是灰燈。"""
+    report = report or {}
+    if not report.get("layers"):
+        report = assess({"regime": report.get("regime")})
     st.subheader("熊市預警燈")
     st.caption(CAPTION)
+    overall = report.get("overall") or overall_state(report.get("layers"))
+    _paint_light(st, overall, "總燈（已知各層裡最差的一層）")
     cap = report.get("suggested_cap")
     regime_cap_value = report.get("regime_cap")
     warning_cap = report.get("warning_cap")
@@ -517,9 +922,8 @@ def render_bear_panel(st, report: dict) -> None:
     st.caption(f"建議槓桿上限 {cap_text}（牛熊上限 {regime_text}，預警調整 {warning_text}，取較低者）。{report.get('suggested_action') or ''}")
     st.caption(report.get("note") or NOTE)
     for layer in report.get("layers") or []:
-        st.markdown(f"**{layer['name']}：{_STATE_TEXT.get(layer['state'], '未知')}**")
-        lit = [item["name"] for item in layer["indicators"] if item["state"] in {"yellow", "red"}]
-        unknown = [item["name"] for item in layer["indicators"] if item["state"] == "unknown"]
-        st.caption("亮：" + ("、".join(lit) if lit else "無") + "。未知：" + ("、".join(unknown) if unknown else "無") + "。")
+        _paint_light(st, layer.get("state") or "unknown", layer.get("name") or "這一層")
+        for item in layer.get("indicators") or []:
+            _paint_light(st, item.get("state") or "unknown", f"{item.get('name') or '子指標'}　{item.get('value_text') or '未知'}")
     st.caption(US_BREADTH_UNIVERSE)
     st.caption(TW_BREADTH_UNIVERSE)

@@ -210,6 +210,7 @@ class BearWarningResponse(BaseModel):
     warning_cap: float | None = Field(default=None, description="預警調整後的上限。")
     suggested_cap: float | None = Field(default=None, description="min(regime_cap, warning_cap)。無法比較時是 null，不是 0。")
     suggested_action: str = ""
+    overall: Literal["green", "yellow", "red", "unknown"] = Field(description="1.14.0。已知各層裡最差的一盞。全未知是 unknown，不是綠。")
     thresholds: dict
     leaders: list[str] = Field(default_factory=list)
     breadth: dict
@@ -301,8 +302,8 @@ class PortfolioResponse(BaseModel):
     credit_transmission: CreditTransmissionResponse = Field(description="1.9.0 新增。信用傳導。各指標的值、日期、較前期變化、燈號，以及階段。門檻與第一頁相同。不計入部位或牛熊分數。")
     pledge: PledgeLoanResponse = Field(description="1.11.0 新增。股票質押借款與質押維持率。Active_Positions「融資/質押借款」整欄都算質押，淨值已扣除，這裡不再扣一次。門檻是程式預設。")
     margin_financing: MarginFinancingResponse = Field(description="1.11.0 新增。真正的融資（「融資」欄）。目前沒有融資部位時 label 為「無融資」。整戶 130% 維持率只套在這個欄，不套質押借款。")
-    deleverage: DeleverageResponse = Field(description="1.12.0 新增。使用者降槓目標：偏多上限 2.0 倍、降槓期間 1.5 倍。不是 REGIME_RISK 的偏多 1.8。槓桿用已扣質押借款的淨值。缺報價的降低名目是 null。")
-    bear_warning: BearWarningResponse = Field(description="1.13.0 新增。熊市預警燈。不改牛熊分數與 REGIME_RISK。suggested_cap 是牛熊上限與預警調整後上限的較低者。子指標缺資料是 unknown，不算通過。")
+    deleverage: DeleverageResponse = Field(description="1.12.0 新增。使用者降槓目標：偏多上限 2.0 倍、降槓期間 1.5 倍。不是 REGIME_RISK 的偏多 1.8。槓桿用已扣質押借款的淨值。缺報價的降低名目是 null。1.14.0 起同一代號跨帳戶合成一列。")
+    bear_warning: BearWarningResponse = Field(description="1.13.0 新增，1.14.0 加 overall。熊市預警燈。不改牛熊分數與 REGIME_RISK。suggested_cap 是牛熊上限與預警調整後上限的較低者。子指標缺資料是 unknown，不算通過。")
 
 
 class AdviceResponse(BaseModel):
@@ -344,6 +345,7 @@ class NavSnapshotResponse(BaseModel):
     usdtwd_source: Literal["live", "cached", "last_known", "fallback"] = Field(default="live", description="live＝即時；cached＝本程序最近一次成功值；last_known＝NAV_Snapshots 最後一筆即時匯率；fallback＝預設 32.5。非 live 時 warnings 會說明。")
     warnings: list[str]
     macro_history: dict = Field(default_factory=dict, description="同一天寫入 Macro_Score_History 的結果。status 為 written、kept、skipped 或 failed。失敗不會讓淨值快照失敗。total 缺值是 null，不是 0。")
+    bear_breadth: dict = Field(default_factory=dict, description="1.14.0。同一天寫入 Bear_Breadth 的廣度。失敗或跳過不會讓淨值快照失敗。沒有成分股收盤時不寫 0。")
 
 
 def export_json_schema() -> dict:

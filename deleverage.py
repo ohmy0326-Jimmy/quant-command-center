@@ -147,6 +147,44 @@ def _swap_row(row) -> dict | None:
     return base
 
 
+def _sum_optional(left, right):
+    if left is None or right is None:
+        return None
+    return left + right
+
+
+def _aggregate_swaps(items: list[dict]) -> list[dict]:
+    """同一代號跨帳戶加總。任一戶沒有報價，整列的降低名目是 null，不加 0。"""
+    grouped: dict[str, dict] = {}
+    order: list[str] = []
+    counts: dict[str, int] = {}
+    for item in items:
+        key = item["symbol"]
+        counts[key] = counts.get(key, 0) + 1
+        current = grouped.get(key)
+        if current is None:
+            grouped[key] = dict(item)
+            order.append(key)
+            continue
+        for field in ("market_value_twd", "notional_twd", "reduction_twd"):
+            current[field] = _sum_optional(current.get(field), item.get(field))
+        if not current.get("name") and item.get("name"):
+            current["name"] = item["name"]
+        current["leverage_after"] = None
+        current["cumulative_leverage"] = None
+    rows = []
+    for key in order:
+        row = grouped[key]
+        count = counts[key]
+        if count > 1:
+            extra = f"同一代號 {count} 個帳戶已加總。"
+            note = row.get("note") or ""
+            if extra not in note:
+                row["note"] = (note + " " + extra).strip()
+        rows.append(row)
+    return rows
+
+
 def build_deleverage(positions: pd.DataFrame | None, metrics: dict | None) -> dict:
     """用已扣質押借款的淨值與名目曝險。缺報價的槓桿 ETF 名目是 null，不是 0。"""
     metrics = metrics or {}
@@ -167,6 +205,7 @@ def build_deleverage(positions: pd.DataFrame | None, metrics: dict | None) -> di
             item = _swap_row(row)
             if item is not None:
                 swaps.append(item)
+    swaps = _aggregate_swaps(swaps)
     swaps.sort(key=lambda item: (item["reduction_twd"] is None, -(item["reduction_twd"] or 0.0)))
     running = exposure if complete else None
     for item in swaps:

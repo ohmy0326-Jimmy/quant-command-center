@@ -529,6 +529,9 @@ if page == "第一頁：總經與風險鬧鐘":
         if st.button("🔄 重新整理", key="refresh_p1", use_container_width=True):
             cached_history_map.clear()
             clear_macro_risk_caches()
+            from bear_warning import clear_bear_cache
+
+            clear_bear_cache()
             st.rerun()
     st.markdown("---")
     
@@ -577,23 +580,6 @@ if page == "第一頁：總經與風險鬧鐘":
             )
             page1_board = load_page1_board(risk_items)
             page1_lights.render_page1_summary(st, page1_board, risk_summary)
-            from credit_transmission import load_board, render_credit_panel
-            from bear_warning import load_bear_warning, render_bear_panel
-            from macro_cycle_live import macro_view_for_orders
-            from portfolio_greeks import trusted_regime
-
-            credit_board = load_board(datetime.now(macro_risk.TPE).date(), fetch=cached_fred_observations)
-            credit_col, bear_col = st.columns(2)
-            render_credit_panel(credit_col, credit_board)
-            render_bear_panel(
-                bear_col,
-                load_bear_warning(
-                    datetime.now(macro_risk.TPE).date(),
-                    regime=trusted_regime(macro_view_for_orders()),
-                    credit_board=credit_board,
-                    fetch_fred=cached_fred_observations,
-                ),
-            )
 
             st.markdown("---")
             
@@ -647,6 +633,30 @@ if page == "第一頁：總經與風險鬧鐘":
                 _render_page1_charts(hist, indicators)
         except Exception as e:
             st.error(f"總經圖表載入失敗: {e}")
+
+    from credit_transmission import load_board, render_credit_panel
+    from bear_warning import assess, load_bear_warning, render_bear_panel
+
+    credit_col, bear_col = st.columns(2)
+    credit_board = None
+    bear_report = None
+    try:
+        credit_board = load_board(datetime.now(macro_risk.TPE).date(), fetch=cached_fred_observations)
+        render_credit_panel(credit_col, credit_board)
+        from macro_cycle_live import macro_view_for_orders
+        from portfolio_greeks import trusted_regime
+
+        bear_report = load_bear_warning(
+            datetime.now(macro_risk.TPE).date(),
+            regime=trusted_regime(macro_view_for_orders()),
+            credit_board=credit_board,
+            fetch_fred=cached_fred_observations,
+        )
+    except Exception as exc:
+        bear_col.caption(f"預警資料這次沒算完（{type(exc).__name__}）。下面的燈是未知，不是通過。")
+        if credit_board is None:
+            credit_col.caption("信用傳導這次沒有載入。")
+    render_bear_panel(bear_col, bear_report or assess())
 
 # ==========================================
 # 第二頁：板塊與主題資金輪動
