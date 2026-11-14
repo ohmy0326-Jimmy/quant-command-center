@@ -218,16 +218,46 @@ def relative_gate(asset, benchmark) -> dict:
     return {"name": "相對大盤連兩週", "state": state, "detail": detail}
 
 
+_GATE_FAIL = {
+    "價格結構": "價格未站上均線",
+    "相對大盤連兩週": "相對大盤未轉強",
+}
+_GATE_UNKNOWN = {
+    "價格結構": "價格結構",
+    "相對大盤連兩週": "相對大盤",
+}
+
+
+def gate_status_text(gates: list[dict]) -> str:
+    """格子裡的短狀態。說明句不放這裡。"""
+    total = len(gates)
+    if total and all(gate["state"] == PASS for gate in gates):
+        return f"✅ {total}/{total} 通過"
+    failed = [_GATE_FAIL.get(gate["name"], gate["name"]) for gate in gates if gate["state"] == FAIL]
+    unknown = [_GATE_UNKNOWN.get(gate["name"], gate["name"]) for gate in gates if gate["state"] == UNKNOWN]
+    parts = []
+    if failed:
+        parts.append("❌ " + "、".join(failed))
+    if unknown:
+        if len(unknown) == total:
+            parts.append("⚪ 未知（缺價格資料）")
+        else:
+            parts.append("⚪ 未知（" + "、".join(unknown) + "）")
+    return "；".join(parts) if parts else "⚪ 未知（缺價格資料）"
+
+
 def summarize_gates(gates: list[dict]) -> dict:
     passed = sum(1 for gate in gates if gate["state"] == PASS)
     failed = sum(1 for gate in gates if gate["state"] == FAIL)
     unknown_names = [gate["name"] for gate in gates if gate["state"] == UNKNOWN]
     unknown = len(unknown_names)
-    text = f"通過 {passed}、未過 {failed}、未知 {unknown}。"
-    if unknown_names:
-        text += "未知是" + "、".join(unknown_names) + "。"
-    text += "未知沒有算成通過或未過。"
-    return {"passed": passed, "failed": failed, "unknown": unknown, "text": text, "gates": gates}
+    return {
+        "passed": passed,
+        "failed": failed,
+        "unknown": unknown,
+        "text": gate_status_text(gates),
+        "gates": gates,
+    }
 
 
 def evaluate_entry(frame, benchmark) -> dict:
@@ -326,6 +356,7 @@ def render_sector_summary(st, rows: list[dict], strong_by_etf: dict) -> None:
         "這是價格比較，不是資金流，也不是投信或外資買賣超。進場關卡只輔助，不擋下單。總經不在這兩關裡。"
     )
     st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+    st.caption("未知不算通過，也不算未過。進場只看價格結構與相對大盤，沒有第三關。")
     st.subheader("前十大裡，三個交易日漲幅達到 10% 的股票")
     shown = False
     for ticker, result in strong_by_etf.items():
@@ -339,7 +370,7 @@ def render_sector_summary(st, rows: list[dict], strong_by_etf: dict) -> None:
         st.caption("目前沒有同時具備真實持股與足夠股價歷史、且三個交易日漲幅達到 10% 的股票。")
     st.caption(
         "持平帶是超額報酬 ±0.5 個百分點。上穿看最近 5 個交易日。連兩週是最近兩段各 5 個共同交易日的超額報酬都大於 0。"
-        "這些是程式預設，不是使用者逐條確認過的策略參數。未知關卡沒有算成通過或未過。"
+        "這些是程式預設，不是使用者逐條確認過的策略參數。"
     )
 
 

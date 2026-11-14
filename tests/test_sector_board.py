@@ -64,8 +64,17 @@ class GateTests(unittest.TestCase):
         )
         self.assertEqual(summary["passed"], 1)
         self.assertEqual(summary["unknown"], 1)
-        self.assertIn("未知沒有算成通過或未過", summary["text"])
+        self.assertEqual(summary["text"], "⚪ 未知（價格結構）")
+        self.assertNotIn("未知沒有算成通過或未過", summary["text"])
         self.assertNotIn("3/3", summary["text"])
+        both_unknown = board.summarize_gates(
+            [{"name": "價格結構", "state": board.UNKNOWN, "detail": ""}, {"name": "相對大盤連兩週", "state": board.UNKNOWN, "detail": ""}]
+        )
+        self.assertEqual(both_unknown["text"], "⚪ 未知（缺價格資料）")
+        both_pass = board.summarize_gates(
+            [{"name": "價格結構", "state": board.PASS, "detail": ""}, {"name": "相對大盤連兩週", "state": board.PASS, "detail": ""}]
+        )
+        self.assertEqual(both_pass["text"], "✅ 2/2 通過")
 
     def test_roles_and_unmapped_stance(self):
         self.assertEqual(board.role_of("XLK"), "攻擊")
@@ -110,6 +119,7 @@ class GateTests(unittest.TestCase):
         )
         self.assertEqual(summary["unknown"], 0)
         self.assertEqual(summary["failed"], 2)
+        self.assertEqual(summary["text"], "❌ 價格未站上均線、相對大盤未轉強")
         self.assertNotIn("總經允許", summary["text"])
         self.assertNotIn("未對應", summary["text"])
 
@@ -157,7 +167,7 @@ rows = [{
     "代號": "XLK", "名稱": "科技", "類型": "攻擊",
     "4週報酬": "未知", "4週相對大盤": "未知", "4週方向": "未知",
     "12週報酬": "未知", "12週相對大盤": "未知", "12週方向": "未知",
-    "第五頁立場": "未對應第五頁產業", "進場關卡": "通過 0、未過 0、未知 2。未知沒有算成通過或未過。",
+    "第五頁立場": "未對應第五頁產業", "進場關卡": "⚪ 未知（缺價格資料）",
     "對齊天數": 0,
 }]
 sector_board.render_sector_summary(st, rows, {"XLK": {"rows": [], "skipped": [], "note": "沒有真實前十大，不列強勢股。"}})
@@ -166,7 +176,8 @@ sector_board.render_sector_summary(st, rows, {"XLK": {"rows": [], "skipped": [],
         self.assertFalse(at.exception)
         blob = "\n".join(str(item.value) for item in list(at.caption) + list(at.markdown))
         self.assertIn("不是資金流", blob)
-        self.assertIn("未知關卡沒有算成通過或未過", blob)
+        self.assertIn("未知不算通過，也不算未過", blob)
+        self.assertNotIn("總經允許", blob)
         self.assertIn("不列強勢股", blob)
 
 
