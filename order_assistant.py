@@ -415,18 +415,31 @@ def _fx_for_kind(kind: str, usdtwd: float) -> float:
 
 
 def _coerce_positions(positions: pd.DataFrame) -> pd.DataFrame:
+    from sheet_numbers import coerce_amount_columns
+
     frame = positions.copy()
-    for col in ("持有數量", "平均成本", "投入總金額", "最大虧損比例", "標的槓桿", "即時報價", "Beta值"):
-        if col in frame.columns:
-            frame[col] = pd.to_numeric(frame[col], errors="coerce").astype(float)
+    warnings = coerce_amount_columns(
+        frame,
+        {
+            "持有數量": None,
+            "平均成本": None,
+            "投入總金額": None,
+            "最大虧損比例": None,
+            "標的槓桿": None,
+            "即時報價": None,
+            "Beta值": None,
+        },
+    )
+    frame.attrs["sheet_number_warnings"] = list(frame.attrs.get("sheet_number_warnings") or []) + warnings
     return frame
 
 
 def _coerce_accounts(accounts: pd.DataFrame) -> pd.DataFrame:
+    from sheet_numbers import coerce_nav_amounts
+
     frame = accounts.copy()
-    for col in ("現金餘額", "融資/質押借款"):
-        if col in frame.columns:
-            frame[col] = pd.to_numeric(frame[col], errors="coerce").fillna(0.0).astype(float)
+    warnings = coerce_nav_amounts(frame)
+    frame.attrs["sheet_number_warnings"] = list(frame.attrs.get("sheet_number_warnings") or []) + warnings
     return frame
 
 

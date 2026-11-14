@@ -251,7 +251,9 @@ def recorded_stop_dates(spreadsheet) -> dict[str, str]:
     """讀 stop_loss 的首次觀察日。分頁不存在就回空，不建立、不寫入。"""
     try:
         worksheet = spreadsheet.worksheet(ALERT_STATE_SHEET)
-        rows = worksheet.get_all_records()
+        from sheet_numbers import read_worksheet_records
+
+        rows = read_worksheet_records(worksheet)
     except Exception:
         return {}
     for row in rows:
@@ -458,7 +460,9 @@ class SheetAlertStore:
 
     def load(self) -> dict:
         out = {}
-        for row in self.worksheet.get_all_records():
+        from sheet_numbers import read_worksheet_records
+
+        for row in read_worksheet_records(self.worksheet):
             key = str(row.get("key") or "").strip()
             if key:
                 out[key] = Record(*(str(row.get(h, "") if row.get(h) is not None else "") for h in ALERT_STATE_HEADERS[1:]))

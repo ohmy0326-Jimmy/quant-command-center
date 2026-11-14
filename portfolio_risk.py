@@ -177,10 +177,12 @@ def read_quant_sheets(spreadsheet):
     """讀取已開啟的 Quant_Database。回傳順序與第四頁相同：(帳戶, 淨值歷史, 持倉)。"""
     from futures_ledger import FUTURES_LEDGER_SHEET, TRADE_LOG_SHEET, apply_yuanta_ledger
 
-    accounts = pd.DataFrame(spreadsheet.worksheet("Active_Positions").get_all_records())
+    from sheet_numbers import read_worksheet_records
+
+    accounts = pd.DataFrame(read_worksheet_records(spreadsheet.worksheet("Active_Positions")))
     # Daily_NAV 分頁可以不存在（已改成 App 即時算淨值）。淨值歷史改讀 NAV_Snapshots。
     nav = nav_history_frame(spreadsheet)
-    positions = pd.DataFrame(spreadsheet.worksheet("持倉統計").get_all_records())
+    positions = pd.DataFrame(read_worksheet_records(spreadsheet.worksheet("持倉統計")))
     accounts = apply_yuanta_ledger(
         accounts,
         _optional_sheet(spreadsheet, FUTURES_LEDGER_SHEET),
@@ -198,8 +200,10 @@ def fetch_quant_sheets(key_data: dict):
 def _optional_sheet(spreadsheet, title: str) -> pd.DataFrame | None:
     """分頁不存在或讀取失敗時回 None，讓本日餘額退回 B7，不讓整頁失敗。"""
     try:
+        from sheet_numbers import read_worksheet_records
+
         worksheet = spreadsheet.worksheet(title)
-        return pd.DataFrame(worksheet.get_all_records())
+        return pd.DataFrame(read_worksheet_records(worksheet))
     except Exception:
         return None
 
@@ -465,19 +469,30 @@ def normalize_positions(quant_data: pd.DataFrame, today: date | None = None) -> 
     if df.empty:
         return df
 
-    df["持有數量"] = pd.to_numeric(df["持有數量"], errors="coerce").fillna(0.0)
-    df["平均成本"] = pd.to_numeric(df["平均成本"], errors="coerce").fillna(0.0)
     if "投入總金額" not in df.columns:
         df["投入總金額"] = 0.0
-    df["投入總金額"] = pd.to_numeric(df["投入總金額"], errors="coerce").fillna(0.0)
     if "最大虧損比例" not in df.columns:
         df["最大虧損比例"] = np.nan
     if "停損原值" not in df.columns:
         df["停損原值"] = df["最大虧損比例"]
     if "標的槓桿" not in df.columns:
         df["標的槓桿"] = 1.0
-    else:
-        df["標的槓桿"] = pd.to_numeric(df["標的槓桿"], errors="coerce").fillna(1.0)
+    from sheet_numbers import coerce_amount_columns
+
+    number_warnings = coerce_amount_columns(
+        df,
+        {
+            "持有數量": 0.0,
+            "平均成本": 0.0,
+            "投入總金額": 0.0,
+            "標的槓桿": 1.0,
+            "最大虧損比例": None,
+        },
+    )
+    df.attrs["sheet_number_warnings"] = list(df.attrs.get("sheet_number_warnings") or []) + number_warnings
+    if "持有數量" in df.columns:
+        readable_qty = pd.to_numeric(df["持有數量"], errors="coerce")
+        df = df.loc[np.isfinite(readable_qty)].copy()
     if "名稱" not in df.columns:
         df["名稱"] = ""
     df["名稱"] = df["名稱"].astype(str)
@@ -848,7 +863,7 @@ def value_positions_safely(positions: pd.DataFrame, accounts: pd.DataFrame, usdt
 
     try:
         valued, acc, metrics = run(positions)
-        return valued, acc, metrics, []
+        return valued, acc, metrics, list(metrics.get("sheet_number_warnings") or [])
     except Exception as whole_err:
         if positions is None or positions.empty:
             raise
@@ -866,6 +881,7 @@ def value_positions_safely(positions: pd.DataFrame, accounts: pd.DataFrame, usdt
         kept = positions.drop(index=bad)
         kept.attrs = dict(positions.attrs)
         valued, acc, metrics = run(kept)
+        warnings.extend(str(item) for item in (metrics.get("sheet_number_warnings") or []) if str(item) not in warnings)
         return valued, acc, metrics, warnings
 
 
@@ -1101,6 +1117,20 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
     if not df.empty:
         if "停損原值" not in df.columns and "最大虧損比例" in df.columns:
             df["停損原值"] = df["最大虧損比例"]
+        from sheet_numbers import coerce_amount_columns
+
+        df.attrs["sheet_number_warnings"] = list(df.attrs.get("sheet_number_warnings") or []) + coerce_amount_columns(
+            df,
+            {
+                "持有數量": 0.0,
+                "平均成本": 0.0,
+                "投入總金額": 0.0,
+                "標的槓桿": 1.0,
+                "最大虧損比例": None,
+                "即時報價": None,
+                "Beta值": None,
+            },
+        )
         for col in ("持有數量", "平均成本", "投入總金額", "最大虧損比例", "標的槓桿", "即時報價", "Beta值"):
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce").astype(float)
@@ -1120,7 +1150,7 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
         else:
             df["產業別"] = df["產業別"].fillna("其他").astype(str)
 
-        df["名目合約總值(原幣)"] = pd.to_numeric(df["投入總金額"], errors="coerce").fillna(0.0).astype(float)
+        df["名目合約總值(原幣)"] = pd.to_numeric(df["投入總金額"], errors="coerce").astype(float)
         df["換算匯率"] = np.where(df["種類"].astype(str).str.contains("美"), usdtwd, 1.0).astype(float)
         df["實質佔用本金(原幣)"] = df["名目合約總值(原幣)"].abs().astype(float)
         df["維持保證金(原幣)"] = 0.0
@@ -1395,10 +1425,12 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
 
     if not account_data.empty and "帳戶名稱" in account_data.columns:
         account_data["帳戶名稱"] = account_data["帳戶名稱"].astype(str).str.strip()
+        from sheet_numbers import coerce_nav_amounts
+
         for col in ["現金餘額", "融資/質押借款"]:
             if col not in account_data.columns:
                 account_data[col] = 0.0
-            account_data[col] = pd.to_numeric(account_data[col], errors="coerce").fillna(0.0).astype(float)
+        account_data.attrs["sheet_number_warnings"] = list(account_data.attrs.get("sheet_number_warnings") or []) + coerce_nav_amounts(account_data)
 
         if not df.empty:
             acc_market = df.groupby("帳戶")["權益市值(台幣)"].sum()
@@ -1420,6 +1452,15 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
 
         for idx, row in account_data.iterrows():
             acc_name = str(row["帳戶名稱"]).strip()
+            try:
+                cash_ready = float(row["現金餘額"])
+                debt_ready = float(row["融資/質押借款"])
+            except (TypeError, ValueError):
+                cash_ready = float("nan")
+                debt_ready = float("nan")
+            if not math.isfinite(cash_ready) or not math.isfinite(debt_ready):
+                account_data.at[idx, "帳戶淨值"] = np.nan
+                continue
             subset = df[df["帳戶"] == acc_name] if not df.empty else pd.DataFrame()
 
             initial_m = 0.0
@@ -1539,6 +1580,8 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
         for idx, row in account_data.iterrows():
             acc_name = str(row["帳戶名稱"]).strip()
             acc_nav = float(row["帳戶淨值"])
+            if not math.isfinite(acc_nav):
+                continue
             mtype = acc_market_types[acc_name]
             if mtype == "TW":
                 tw_nav += acc_nav
@@ -1556,6 +1599,14 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
     if not df.empty:
         df["真實風險權重 (%)"] = np.where(nav > 0, (df["實質曝險(台幣)"] / nav) * 100.0, 0.0).astype(float)
 
+    sheet_number_warnings = []
+    for frame in (positions, df, account_data):
+        if frame is None:
+            continue
+        for item in frame.attrs.get("sheet_number_warnings") or []:
+            text = str(item)
+            if text and text not in sheet_number_warnings:
+                sheet_number_warnings.append(text)
     helper_cols = [col for col in ("_cb_mv", "_cb_equity", "_cb_beta", "_cb_beta_source", "_cb_cost") if col in df.columns]
     if helper_cols:
         df = df.drop(columns=helper_cols)
@@ -1568,6 +1619,7 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
         options_missing_delta if not df.empty else [], expired_removed,
         beta_tw_nav=beta_tw_nav, beta_us_nav=beta_us_nav,
     )
+    metrics["sheet_number_warnings"] = sheet_number_warnings
     metrics["unallocated_nav"] = float(unallocated_nav)
     metrics["sleeve_nav_complete"] = bool(sleeve_complete)
     metrics["beta_basis"] = "sleeve_nav" if sleeve_complete else "total_nav"

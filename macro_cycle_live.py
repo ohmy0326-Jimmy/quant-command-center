@@ -189,7 +189,9 @@ def _read_tab(spreadsheet, title: str, required: tuple[str, ...]):
     if missing:
         return [], f"{title} 缺少欄位：" + ", ".join(missing)
     try:
-        return worksheet.get_all_records(), None
+        from sheet_numbers import read_worksheet_records
+
+        return read_worksheet_records(worksheet), None
     except Exception:
         return [], f"{title} 內容讀不到"
 

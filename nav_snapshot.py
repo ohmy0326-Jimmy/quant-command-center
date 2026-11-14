@@ -41,17 +41,9 @@ _USD = {"USD", "US$", "美元", "美金"}
 # ---------------------------------------------------------------- 出入金
 
 def _number(value) -> float | None:
-    if value is None or isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return None if pd.isna(value) else float(value)
-    text = str(value).strip().replace(",", "").replace("，", "").replace("NT$", "").replace("$", "")
-    if not text:
-        return None
-    try:
-        return float(text)
-    except ValueError:
-        return None
+    from sheet_numbers import parse_sheet_number
+
+    return parse_sheet_number(value)
 
 
 def cash_flows_tab_flows(frame: pd.DataFrame | None, usdtwd: float) -> tuple[list[dict], list[str]]:
@@ -231,7 +223,9 @@ def _history_rows(spreadsheet) -> list[dict]:
     except (WorksheetNotFound, KeyError):
         return []
     try:
-        return list(worksheet.get_all_records())
+        from sheet_numbers import read_worksheet_records
+
+        return read_worksheet_records(worksheet)
     except Exception:
         return []
 

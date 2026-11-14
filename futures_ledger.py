@@ -905,25 +905,9 @@ def _is_yuanta_account(value) -> bool:
 
 
 def _optional_number(value) -> float | None:
-    if value is None or isinstance(value, bool):
-        return None
-    try:
-        if pd.isna(value):
-            return None
-    except TypeError:
-        pass
-    if isinstance(value, (int, float)):
-        number = float(value)
-        if math.isnan(number) or math.isinf(number):
-            return None
-        return number
-    text = str(value).strip().replace(",", "").replace("，", "")
-    if not text or text.lower() in {"nan", "none"}:
-        return None
-    try:
-        return float(text)
-    except ValueError:
-        return None
+    from sheet_numbers import parse_sheet_number
+
+    return parse_sheet_number(value)
 
 
 def _cash_usable(value) -> bool:
