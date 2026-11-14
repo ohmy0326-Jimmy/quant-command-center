@@ -14,7 +14,7 @@ import pandas as pd
 
 from cb_holdings import product_kind
 
-SCHEMA_VERSION = "1.8.0"
+SCHEMA_VERSION = "1.9.0"
 TAIPEI = ZoneInfo("Asia/Taipei")
 
 
@@ -196,6 +196,7 @@ def portfolio_payload(
     usdtwd_source: str = "live",
     warnings: list[str] | None = None,
     regime: str | None = None,
+    credit_transmission: dict | None = None,
 ) -> dict:
     total_beta = float(metrics.get("total_beta", metrics.get("beta", 0.0)))
     complete = bool(metrics.get("exposure_complete", True))
@@ -214,6 +215,10 @@ def portfolio_payload(
     quality = beta_quality_warning(metrics)
     if quality and quality not in warning_lines:
         warning_lines.append(quality)
+    if credit_transmission is None:
+        from credit_transmission import absent_board, api_view
+
+        credit_transmission = api_view(absent_board())
     return {
         "schema_version": SCHEMA_VERSION,
         "as_of": format_as_of(as_of),
@@ -245,6 +250,7 @@ def portfolio_payload(
         "beta_leverage": beta_leverage_block(metrics),
         "greeks": greeks_block(positions, metrics),
         "beta_targets": beta_target_block(metrics, regime),
+        "credit_transmission": credit_transmission,
         "positions": position_records(positions),
         "yuanta_futures": yuanta_from_metrics(metrics),
     }
@@ -312,6 +318,8 @@ def load_live_book(as_of: datetime | None = None) -> LiveBook:
     from macro_cycle_live import macro_view_for_orders
 
     moment = as_of or taipei_now()
+    from credit_transmission import api_view, load_board
+
     payload = portfolio_payload(
         valued,
         metrics,
@@ -320,5 +328,6 @@ def load_live_book(as_of: datetime | None = None) -> LiveBook:
         usdtwd_source=fx.source,
         warnings=warnings,
         regime=trusted_regime(macro_view_for_orders()),
+        credit_transmission=api_view(load_board(moment.date())),
     )
     return LiveBook(payload, valued, metrics)

@@ -40,7 +40,7 @@ X-API-Key: <READONLY_API_KEY>
 
 每個 JSON 都有：
 
-- `schema_version`：目前 `1.8.0`。1.7.0 已有 `greeks` 與 `beta_targets`。1.8.0 再加上 Beta 品質與混合帳戶：`beta_complete`、`unknown_beta_symbols`、`sleeve_nav_complete`、`unallocated_nav`、`beta_basis`、`beta_label`，部位多 `beta_quality`。`beta` 是台股對加權、美股對 S&P 500 的敏感度相加後除以總淨值，不是單一指數 Beta。資料不足的 Beta 不計入，也不是 1。1.6.0 的缺 Delta 規則仍在。
+- `schema_version`：目前 `1.9.0`。1.7.0 已有 `greeks` 與 `beta_targets`。1.8.0 再加上 Beta 品質與混合帳戶：`beta_complete`、`unknown_beta_symbols`、`sleeve_nav_complete`、`unallocated_nav`、`beta_basis`、`beta_label`，部位多 `beta_quality`。1.9.0 加 `credit_transmission`（階段、放款量燈、信用價格燈、放款意願燈、各列的值／日期／變化／燈號、門檻表）。這塊不計入淨值或 Beta。`beta` 是台股對加權、美股對 S&P 500 的敏感度相加後除以總淨值，不是單一指數 Beta。資料不足的 Beta 不計入，也不是 1。1.6.0 的缺 Delta 規則仍在。
 - `as_of`：`Asia/Taipei` 的 ISO 8601，例如 `2026-10-29T22:00:00+08:00`
 
 機器可讀的 JSON Schema 在 [`readonly_api.schema.json`](readonly_api.schema.json)，由 `api/schemas.py` 的 Pydantic 模型產生。
@@ -98,6 +98,8 @@ X-API-Key: <READONLY_API_KEY>
 1.7.0：`greeks.tw` 與 `greeks.us` 分開。`delta_notional` 是原生貨幣的有號名目（台股 TWD、美股 USD）。`delta_points` 是這份名目 ÷ 該市場指數價；沒有指數價就是 null。`theta_per_day` 是每日時間價值；選擇權沒有 Theta 時整側是 null。`beta_targets` 的區間寫在 `portfolio_greeks.DEFAULT_BETA_BANDS`，是程式預設。狀態未知時不給目標，也不估算避險口數。台股口數只用台指期或小台，美股只用 SPX、XSP 或 SPY 的名目。
 
 1.8.0：美股 Beta 對 S&P 500（`^GSPC`），看種類是不是美股，不再用「代號剛好三個字母」判成台股。同一輪所有美股共用一次下載的基準，取最近 252 個基準交易日，至少 60 個重疊日報酬；共變異與變異都用樣本數減一；數字存完整精度，畫面才四捨五入到兩位。不足時 `beta_quality` 是 `missing`，`beta_exposure` 是 null，不是 1，`beta_complete` 為 false。已知槓桿／反向 ETF（含 SOXS＝−3）用契約倍數，名目取絕對值，Beta 只乘一次，不用 ETF 自己的報酬。選擇權的標的價不用權利金代替；缺 Delta 或標的價整筆不算。空單淨值是負的市值。`tw_nav`／`us_nav` 只含整戶同一市場的帳戶；混合帳戶放 `unallocated_nav`，此時 `beta_basis` 是 `total_nav`，台股與美股敏感度都除以總淨值。舊欄位名稱都還在。1.7.0 的 `greeks` 與 `beta_targets` 保留。PR47 讀的實際 Beta 就是這裡算出來的數字。
+
+1.9.0：`credit_transmission`。`stage`／`stage_code` 是階段；`stage_trigger` 在 `price_first` 時是 `price`、`standards` 或 `both`，其餘是 null。`lending_light`、`price_light`、`standards_light` 是 green、yellow、red 或 null。放款量是 TOTLL 與工商放款 TOTCI，都是週資料。TOTCI 抓不到時該列改為 BUSLOANS，並標明月資料。`rows` 每一列有 `id`、`name`、`series_id`、`value`、`unit`、`date`、`change`、`change_label`、`light`、`light_text`、`reason`。`thresholds` 與第一頁 `credit_transmission.THRESHOLDS` 是同一張表。`cds` 固定說明沒有免費來源。抓不到時 `value` 是 null、`light` 是 `missing`，不沿用舊值。這塊不進牛熊分數，也不推播。
 
 `price` 是原幣報價（臺指期是指數點，美股是美元）。`market_value` 與 `pnl` 是台幣：分別對應第四頁的「即時市值(台幣)」與「淨未實現損益(原幣) × 換算匯率」。股票損益已含 0.3% 證交稅估算，不會再從淨值扣一次。1.3.0 起期貨 `market_value` 是名目市值（報價 × 乘數 × 口數），舊的「保證金加未實現損益」改放 `equity_value`。
 

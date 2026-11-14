@@ -354,6 +354,7 @@ class ApiHttpTests(unittest.TestCase):
                 "beta_leverage",
                 "greeks",
                 "beta_targets",
+                "credit_transmission",
                 "positions",
                 "yuanta_futures",
             },

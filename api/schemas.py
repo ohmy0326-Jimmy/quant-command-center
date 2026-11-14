@@ -82,6 +82,43 @@ class YuantaFuturesResponse(BaseModel):
     margin_call: bool = Field(description="權益低於維持保證金時為 true。")
 
 
+class CreditRowResponse(BaseModel):
+    model_config = _MODEL
+
+    id: str
+    name: str
+    series_id: str = ""
+    value: float | None = None
+    unit: str = ""
+    date: str | None = None
+    change: float | None = None
+    change_label: str = ""
+    light: Literal["green", "yellow", "red", "missing", "stale", "unavailable"]
+    light_text: str
+    reason: str = ""
+
+
+class CreditTransmissionResponse(BaseModel):
+    """1.9.0。與第一頁信用傳導面板同一套 THRESHOLDS，不計入牛熊總分。"""
+
+    model_config = _MODEL
+
+    stage: str = Field(description="階段句。只有放款量與信用價格同時惡化才是傳導確認。")
+    stage_code: Literal["equity_only", "price_first", "confirmed", "volume_only", "insufficient"]
+    stage_trigger: Literal["price", "standards", "both"] | None = Field(
+        default=None,
+        description="1.9.0。stage_code 為 price_first 時：price＝信用價格惡化；standards＝只有放款意願收緊；both＝價格與放款意願一起轉緊。其餘階段是 null。",
+    )
+    lending_light: Literal["green", "yellow", "red"] | None = Field(description="TOTLL 與工商放款 TOTCI（皆為週資料，52 週年增、13 週年化、21 天過舊）的較差燈。要整體綠燈時兩條都得是綠。TOTCI 抓不到才改用 BUSLOANS，該列標明月資料。")
+    price_light: Literal["green", "yellow", "red"] | None = Field(description="高收益 OAS、投資級 OAS、NFCI 的較差燈。STLFSI4 有黃或紅時會把價格燈拉差。")
+    standards_light: Literal["green", "yellow", "red"] | None = Field(description="SLOOS 放款意願。缺失或過舊是 null，不算收緊。")
+    disclaimer: str
+    rule_note: str = Field(description="門檻與快速減速的定義，與畫面上的註解相同。")
+    cds: str = Field(description="固定說明沒有免費 CDS，不帶數字。")
+    thresholds: dict = Field(description="credit_transmission.THRESHOLDS。燈號只讀這張表。")
+    rows: list[CreditRowResponse]
+
+
 class PortfolioResponse(BaseModel):
     model_config = _MODEL
 
@@ -117,6 +154,7 @@ class PortfolioResponse(BaseModel):
     yuanta_futures: YuantaFuturesResponse
     greeks: dict = Field(default_factory=dict, description="1.7.0 新增。台股與美股分開的 Delta／Theta。缺值是 null，合計不完整時 delta_complete 或 theta_complete 為 false，缺的部位沒有當成 0。兩市場不加總。")
     beta_targets: dict = Field(default_factory=dict, description="1.7.0 新增。依第五頁多空狀態的目標 Beta 區間。區間是程式預設。狀態未知時 tw 與 us 是 null。避險只建議同市場工具。")
+    credit_transmission: CreditTransmissionResponse = Field(description="1.9.0 新增。信用傳導。各指標的值、日期、較前期變化、燈號，以及階段。門檻與第一頁相同。不計入部位或牛熊分數。")
 
 
 class AdviceResponse(BaseModel):
