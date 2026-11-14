@@ -174,6 +174,48 @@ class MarginFinancingResponse(BaseModel):
     accounts: list[MarginFinancingAccountResponse] = Field(default_factory=list)
 
 
+class BearIndicatorResponse(BaseModel):
+    """1.12.0。單一預警子指標。未知不是通過。"""
+
+    model_config = _MODEL
+
+    name: str
+    state: Literal["green", "yellow", "red", "unknown"]
+    value: float | None = None
+    value_text: str = ""
+    threshold: str = ""
+    source: str = ""
+
+
+class BearLayerResponse(BaseModel):
+    """1.12.0。一層預警。state 由子指標彙總，未知不算通過。"""
+
+    model_config = _MODEL
+
+    id: str
+    name: str
+    state: Literal["green", "yellow", "red", "unknown"]
+    indicators: list[BearIndicatorResponse]
+
+
+class BearWarningResponse(BaseModel):
+    """1.12.0。熊市預警。不改牛熊分數，也不改 REGIME_RISK。"""
+
+    model_config = _MODEL
+
+    caption: str
+    note: str
+    regime: str | None = None
+    regime_cap: float | None = Field(default=None, description="目前牛熊狀態在 REGIME_RISK 的槓桿上限。狀態未知是 null。")
+    warning_cap: float | None = Field(default=None, description="預警調整後的上限。")
+    suggested_cap: float | None = Field(default=None, description="min(regime_cap, warning_cap)。無法比較時是 null，不是 0。")
+    suggested_action: str = ""
+    thresholds: dict
+    leaders: list[str] = Field(default_factory=list)
+    breadth: dict
+    layers: list[BearLayerResponse]
+
+
 class PortfolioResponse(BaseModel):
     model_config = _MODEL
 
@@ -212,6 +254,7 @@ class PortfolioResponse(BaseModel):
     credit_transmission: CreditTransmissionResponse = Field(description="1.9.0 新增。信用傳導。各指標的值、日期、較前期變化、燈號，以及階段。門檻與第一頁相同。不計入部位或牛熊分數。")
     pledge: PledgeLoanResponse = Field(description="1.11.0 新增。股票質押借款與質押維持率。Active_Positions「融資/質押借款」整欄都算質押，淨值已扣除，這裡不再扣一次。門檻是程式預設。")
     margin_financing: MarginFinancingResponse = Field(description="1.11.0 新增。真正的融資（「融資」欄）。目前沒有融資部位時 label 為「無融資」。整戶 130% 維持率只套在這個欄，不套質押借款。")
+    bear_warning: BearWarningResponse = Field(description="1.12.0 新增。熊市預警燈。不改牛熊分數與 REGIME_RISK。suggested_cap 是牛熊上限與預警調整後上限的較低者。子指標缺資料是 unknown，不算通過。")
 
 
 class AdviceResponse(BaseModel):

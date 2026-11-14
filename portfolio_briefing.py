@@ -14,7 +14,7 @@ import pandas as pd
 
 from cb_holdings import product_kind
 
-SCHEMA_VERSION = "1.11.0"
+SCHEMA_VERSION = "1.12.0"
 TAIPEI = ZoneInfo("Asia/Taipei")
 
 
@@ -197,6 +197,7 @@ def portfolio_payload(
     warnings: list[str] | None = None,
     regime: str | None = None,
     credit_transmission: dict | None = None,
+    bear_warning: dict | None = None,
 ) -> dict:
     total_beta = float(metrics.get("total_beta", metrics.get("beta", 0.0)))
     complete = bool(metrics.get("exposure_complete", True))
@@ -257,6 +258,7 @@ def portfolio_payload(
         "credit_transmission": credit_transmission,
         "pledge": _pledge_block(metrics),
         "margin_financing": _margin_block(metrics),
+        "bear_warning": _bear_block(regime, bear_warning),
         "positions": position_records(positions),
         "yuanta_futures": yuanta_from_metrics(metrics),
     }
@@ -278,6 +280,14 @@ def _margin_block(metrics: dict) -> dict:
     if isinstance(stored, dict) and stored.get("label"):
         return stored
     return empty_margin_financing()
+
+
+def _bear_block(regime: str | None, bear_warning: dict | None) -> dict:
+    from bear_warning import assess
+
+    if isinstance(bear_warning, dict) and bear_warning.get("layers"):
+        return bear_warning
+    return assess({"regime": regime})
 
 
 def greeks_block(positions: pd.DataFrame, metrics: dict) -> dict:
@@ -343,7 +353,14 @@ def load_live_book(as_of: datetime | None = None) -> LiveBook:
 
     moment = as_of or taipei_now()
     from credit_transmission import api_view, load_board
+    from bear_warning import load_bear_warning
 
+    regime = trusted_regime(macro_view_for_orders())
+    board = load_board(moment.date())
+    try:
+        bear = load_bear_warning(moment.date(), regime=regime, credit_board=board)
+    except Exception:
+        bear = None
     payload = portfolio_payload(
         valued,
         metrics,
@@ -351,7 +368,8 @@ def load_live_book(as_of: datetime | None = None) -> LiveBook:
         as_of=moment,
         usdtwd_source=fx.source,
         warnings=warnings,
-        regime=trusted_regime(macro_view_for_orders()),
-        credit_transmission=api_view(load_board(moment.date())),
+        regime=regime,
+        credit_transmission=api_view(board),
+        bear_warning=bear,
     )
     return LiveBook(payload, valued, metrics)

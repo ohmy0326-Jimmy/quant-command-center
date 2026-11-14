@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.11.0",
+  "schema_version": "1.12.0",
   "header": "X-API-Key",
   "models": {
     "health": {
@@ -7,7 +7,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.11.0"
+            "1.12.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -33,6 +33,201 @@
     },
     "portfolio": {
       "$defs": {
+        "BearIndicatorResponse": {
+          "additionalProperties": false,
+          "description": "1.12.0。單一預警子指標。未知不是通過。",
+          "properties": {
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "state": {
+              "enum": [
+                "green",
+                "yellow",
+                "red",
+                "unknown"
+              ],
+              "title": "State",
+              "type": "string"
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Value"
+            },
+            "value_text": {
+              "default": "",
+              "title": "Value Text",
+              "type": "string"
+            },
+            "threshold": {
+              "default": "",
+              "title": "Threshold",
+              "type": "string"
+            },
+            "source": {
+              "default": "",
+              "title": "Source",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "state"
+          ],
+          "title": "BearIndicatorResponse",
+          "type": "object"
+        },
+        "BearLayerResponse": {
+          "additionalProperties": false,
+          "description": "1.12.0。一層預警。state 由子指標彙總，未知不算通過。",
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "state": {
+              "enum": [
+                "green",
+                "yellow",
+                "red",
+                "unknown"
+              ],
+              "title": "State",
+              "type": "string"
+            },
+            "indicators": {
+              "items": {
+                "$ref": "#/$defs/BearIndicatorResponse"
+              },
+              "title": "Indicators",
+              "type": "array"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "state",
+            "indicators"
+          ],
+          "title": "BearLayerResponse",
+          "type": "object"
+        },
+        "BearWarningResponse": {
+          "additionalProperties": false,
+          "description": "1.12.0。熊市預警。不改牛熊分數，也不改 REGIME_RISK。",
+          "properties": {
+            "caption": {
+              "title": "Caption",
+              "type": "string"
+            },
+            "note": {
+              "title": "Note",
+              "type": "string"
+            },
+            "regime": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Regime"
+            },
+            "regime_cap": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "目前牛熊狀態在 REGIME_RISK 的槓桿上限。狀態未知是 null。",
+              "title": "Regime Cap"
+            },
+            "warning_cap": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "預警調整後的上限。",
+              "title": "Warning Cap"
+            },
+            "suggested_cap": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "min(regime_cap, warning_cap)。無法比較時是 null，不是 0。",
+              "title": "Suggested Cap"
+            },
+            "suggested_action": {
+              "default": "",
+              "title": "Suggested Action",
+              "type": "string"
+            },
+            "thresholds": {
+              "additionalProperties": true,
+              "title": "Thresholds",
+              "type": "object"
+            },
+            "leaders": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Leaders",
+              "type": "array"
+            },
+            "breadth": {
+              "additionalProperties": true,
+              "title": "Breadth",
+              "type": "object"
+            },
+            "layers": {
+              "items": {
+                "$ref": "#/$defs/BearLayerResponse"
+              },
+              "title": "Layers",
+              "type": "array"
+            }
+          },
+          "required": [
+            "caption",
+            "note",
+            "thresholds",
+            "breadth",
+            "layers"
+          ],
+          "title": "BearWarningResponse",
+          "type": "object"
+        },
         "BetaLeverageLegResponse": {
           "additionalProperties": false,
           "properties": {
@@ -940,7 +1135,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.11.0"
+            "1.12.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -1144,6 +1339,10 @@
         "margin_financing": {
           "$ref": "#/$defs/MarginFinancingResponse",
           "description": "1.11.0 新增。真正的融資（「融資」欄）。目前沒有融資部位時 label 為「無融資」。整戶 130% 維持率只套在這個欄，不套質押借款。"
+        },
+        "bear_warning": {
+          "$ref": "#/$defs/BearWarningResponse",
+          "description": "1.12.0 新增。熊市預警燈。不改牛熊分數與 REGIME_RISK。suggested_cap 是牛熊上限與預警調整後上限的較低者。子指標缺資料是 unknown，不算通過。"
         }
       },
       "required": [
@@ -1168,7 +1367,8 @@
         "yuanta_futures",
         "credit_transmission",
         "pledge",
-        "margin_financing"
+        "margin_financing",
+        "bear_warning"
       ],
       "title": "PortfolioResponse",
       "type": "object"
@@ -1178,7 +1378,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.11.0"
+            "1.12.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -1225,7 +1425,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.11.0"
+            "1.12.0"
           ],
           "title": "Schema Version",
           "type": "string"

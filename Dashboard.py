@@ -578,10 +578,21 @@ if page == "第一頁：總經與風險鬧鐘":
             page1_board = load_page1_board(risk_items)
             page1_lights.render_page1_summary(st, page1_board, risk_summary)
             from credit_transmission import load_board, render_credit_panel
+            from bear_warning import load_bear_warning, render_bear_panel
+            from macro_cycle_live import macro_view_for_orders
+            from portfolio_greeks import trusted_regime
 
-            render_credit_panel(
-                st,
-                load_board(datetime.now(macro_risk.TPE).date(), fetch=cached_fred_observations),
+            credit_board = load_board(datetime.now(macro_risk.TPE).date(), fetch=cached_fred_observations)
+            credit_col, bear_col = st.columns(2)
+            render_credit_panel(credit_col, credit_board)
+            render_bear_panel(
+                bear_col,
+                load_bear_warning(
+                    datetime.now(macro_risk.TPE).date(),
+                    regime=trusted_regime(macro_view_for_orders()),
+                    credit_board=credit_board,
+                    fetch_fred=cached_fred_observations,
+                ),
             )
 
             st.markdown("---")
