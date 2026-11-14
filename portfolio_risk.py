@@ -1667,6 +1667,9 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
                     unknown_beta.append(symbol)
     metrics["unknown_beta_symbols"] = list(dict.fromkeys(unknown_beta))
     metrics["beta_complete"] = not metrics["unknown_beta_symbols"]
+    from deleverage import build_deleverage
+
+    metrics["deleverage"] = build_deleverage(df, metrics)
 
     return df, account_data, metrics
 

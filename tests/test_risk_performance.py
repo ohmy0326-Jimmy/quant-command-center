@@ -115,7 +115,7 @@ def test_card_renders_without_history():
     assert [m.value for m in at.metric][2:] == ["—", "⚪"]
     captions = " ".join(str(c.value) for c in at.caption)
     assert "淨值歷史無法取得" in captions
-    assert len(at.dataframe) == 2  # Beta／槓桿三列表，加上台美分開的希臘值
+    assert len(at.dataframe) == 3  # Beta／槓桿、希臘值，加上降槓換成 1 倍的表
 
 
 def test_card_renders_with_history():
