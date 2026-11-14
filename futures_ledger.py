@@ -96,6 +96,7 @@ LEDGER_COLUMNS = [
 ]
 # Trade_Log 實際表頭 A–R。不要改這些欄，也不要另開交易明細分頁。
 # N–R（類型起）可以整欄不存在或空白；A–M 的「種類」「總金額」不可改名。
+# N 欄「類型」仍是開倉／平倉覆蓋，不是部位分類。
 EXISTING_TRADE_HEADERS = (
     "時間",
     "帳戶",
@@ -116,8 +117,15 @@ EXISTING_TRADE_HEADERS = (
     "已實現損益",
     "交易後帳戶槓桿",
 )
-# N–R。讀取時可以不存在或空白。
+# N–R。讀取時可以不存在或空白。不要把 S 欄放進這組，避免範本覆寫既有表。
 APPENDED_TRADE_HEADERS = ("類型", "長短線", "停損價", "已實現損益", "交易後帳戶槓桿")
+# S 欄，在「交易後帳戶槓桿」右邊。選填。依欄名讀，不看欄位字母。
+POSITION_TYPE_HEADER = "部位類型"
+POSITION_TYPES = ("核心", "波段", "事件", "槓桿")
+POSITION_TYPE_UNCLASSIFIED = "未分類"
+POSITION_TYPE_FILTERS = POSITION_TYPES + (POSITION_TYPE_UNCLASSIFIED,)
+# 程式預期的整列順序。S 可以整欄不存在。
+TRADE_LOG_COLUMN_ORDER = EXISTING_TRADE_HEADERS + (POSITION_TYPE_HEADER,)
 # 種類是台股期貨／台股，不是開倉平倉的「類型」。總金額是契約金額，不是出入金的「金額」。
 _DO_NOT_RENAME = frozenset({"種類", "總金額"})
 
@@ -225,6 +233,38 @@ def template_ledger_frame() -> pd.DataFrame:
 def template_trade_frame() -> pd.DataFrame:
     """只列出可追加的欄。不要用這張表覆蓋既有 Trade_Log。"""
     return pd.DataFrame(columns=list(APPENDED_TRADE_HEADERS))
+
+
+def position_type_label(value) -> str:
+    """部位類型只認四個下拉值。空值、缺值或其他文字都顯示未分類。"""
+    text = _cell_text(value)
+    if text in POSITION_TYPES:
+        return text
+    return POSITION_TYPE_UNCLASSIFIED
+
+
+def position_type_of(row) -> str:
+    """只讀「部位類型」。不讀 N 欄「類型」。缺欄或空值是未分類。"""
+    if row is None:
+        return POSITION_TYPE_UNCLASSIFIED
+    if isinstance(row, dict):
+        if POSITION_TYPE_HEADER not in row:
+            return POSITION_TYPE_UNCLASSIFIED
+        return position_type_label(row.get(POSITION_TYPE_HEADER))
+    index = getattr(row, "index", None)
+    if index is not None and POSITION_TYPE_HEADER not in index:
+        return POSITION_TYPE_UNCLASSIFIED
+    getter = getattr(row, "get", None)
+    if getter is None:
+        return POSITION_TYPE_UNCLASSIFIED
+    return position_type_label(getter(POSITION_TYPE_HEADER))
+
+
+def filter_rows_by_position_type(rows, choice: str | None):
+    """篩選值是核心、波段、事件、槓桿或未分類。其他值不過濾。"""
+    if choice not in POSITION_TYPE_FILTERS:
+        return list(rows)
+    return [row for row in rows if position_type_of(row) == choice]
 
 
 def symbol_root(symbol: str) -> str:

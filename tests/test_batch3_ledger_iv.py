@@ -12,8 +12,12 @@ import pandas as pd
 from futures_ledger import (
     APPENDED_TRADE_HEADERS,
     EXISTING_TRADE_HEADERS,
+    POSITION_TYPE_HEADER,
+    TRADE_LOG_COLUMN_ORDER,
     apply_yuanta_ledger,
     contract_multiplier,
+    filter_rows_by_position_type,
+    position_type_of,
     quote_yuanta_ledger,
     template_ledger_frame,
 )
@@ -89,6 +93,12 @@ class TradeLogTests(unittest.TestCase):
         )
         self.assertEqual(APPENDED_TRADE_HEADERS, EXISTING_TRADE_HEADERS[13:])
         self.assertEqual(EXISTING_TRADE_HEADERS[0], "時間")
+        self.assertEqual(EXISTING_TRADE_HEADERS[13], "類型")
+        self.assertNotIn(POSITION_TYPE_HEADER, EXISTING_TRADE_HEADERS)
+        self.assertNotIn(POSITION_TYPE_HEADER, APPENDED_TRADE_HEADERS)
+        self.assertEqual(TRADE_LOG_COLUMN_ORDER[:18], EXISTING_TRADE_HEADERS)
+        self.assertEqual(TRADE_LOG_COLUMN_ORDER[18], "部位類型")
+        self.assertEqual(len(TRADE_LOG_COLUMN_ORDER), 19)
 
     def test_dashboard_reads_sheet_not_notion_trade_log(self):
         root = Path(__file__).resolve().parents[1]
@@ -186,6 +196,53 @@ class TradeLogTests(unittest.TestCase):
         quote = quote_yuanta_ledger(_ledger(), trades, today=CAL_DAY)
         gross = (45027 - 46733) * 10
         self.assertAlmostEqual(quote.realized, gross, places=4)
+
+    def test_position_type_is_optional_and_does_not_override_open_close(self):
+        plain = pd.DataFrame([_trade_log_row(已實現損益=-100)])
+        tagged = pd.DataFrame([_trade_log_row(已實現損益=-100, 部位類型="核心")])
+        base = quote_yuanta_ledger(_ledger(), plain, today=CAL_DAY)
+        with_bucket = quote_yuanta_ledger(_ledger(), tagged, today=CAL_DAY)
+        self.assertAlmostEqual(with_bucket.realized, base.realized, places=4)
+        self.assertAlmostEqual(with_bucket.balance, base.balance, places=4)
+
+        opened = quote_yuanta_ledger(_ledger(), pd.DataFrame([_trade_log_row(類型="開倉")]), today=CAL_DAY)
+        opened_tagged = quote_yuanta_ledger(
+            _ledger(),
+            pd.DataFrame([_trade_log_row(類型="開倉", 部位類型="槓桿")]),
+            today=CAL_DAY,
+        )
+        closed = quote_yuanta_ledger(_ledger(), pd.DataFrame([_trade_log_row()]), today=CAL_DAY)
+        self.assertEqual(opened.realized, 0)
+        self.assertEqual(opened_tagged.realized, 0)
+        self.assertNotEqual(closed.realized, 0)
+
+        buy = quote_yuanta_ledger(
+            _ledger(),
+            pd.DataFrame([_trade_log_row(動作="買進", 部位類型="平倉")]),
+            today=CAL_DAY,
+        )
+        self.assertEqual(buy.realized, 0)
+        self.assertEqual(position_type_of({"部位類型": "平倉", "類型": "開倉"}), "未分類")
+        self.assertEqual(position_type_of({"類型": "進場"}), "未分類")
+        self.assertEqual(position_type_of({"類型": "平倉", "部位類型": "事件"}), "事件")
+        self.assertEqual(position_type_of({}), "未分類")
+        self.assertEqual(position_type_of({"部位類型": ""}), "未分類")
+        self.assertEqual(position_type_of({"部位類型": None}), "未分類")
+        self.assertEqual(position_type_of({"部位類型": "  波段  "}), "波段")
+        self.assertEqual(position_type_of(pd.Series({"部位類型": float("nan"), "類型": "平倉"})), "未分類")
+        self.assertEqual(position_type_of(pd.Series({"類型": "平倉"})), "未分類")
+
+        rows = [
+            {"部位類型": "核心", "類型": "開倉"},
+            {"部位類型": "", "類型": "平倉"},
+            {"類型": "停利"},
+            {"部位類型": "事件"},
+        ]
+        self.assertEqual([position_type_of(row) for row in filter_rows_by_position_type(rows, "核心")], ["核心"])
+        self.assertEqual(len(filter_rows_by_position_type(rows, "未分類")), 2)
+        self.assertEqual(len(filter_rows_by_position_type(rows, "事件")), 1)
+        self.assertEqual(len(filter_rows_by_position_type(rows, None)), 4)
+        self.assertEqual(position_type_of(pd.Series({"部位類型": "槓桿"})), "槓桿")
 
     def test_column_q_overrides_the_formula_and_skips_default_fees(self):
         trades = pd.DataFrame([_trade_log_row(已實現損益=-16000, 類型="", 長短線="", 停損價="", 交易後帳戶槓桿="")])
@@ -353,7 +410,7 @@ class FetchSheetsTests(unittest.TestCase):
             "Daily_NAV": [{"日期": 46328, "總淨值": 500000}],
             "持倉統計": [],
             "Futures_Ledger": _ledger().to_dict(orient="records"),
-            "Trade_Log": [_trade_log_row(已實現損益=-250)],
+            "Trade_Log": [_trade_log_row(已實現損益=-250, 部位類型="波段", 類型="進場")],
         }
 
         class Worksheet:
