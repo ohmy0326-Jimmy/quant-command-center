@@ -14,7 +14,7 @@ import pandas as pd
 
 from cb_holdings import product_kind
 
-SCHEMA_VERSION = "1.14.0"
+SCHEMA_VERSION = "1.15.0"
 TAIPEI = ZoneInfo("Asia/Taipei")
 
 
@@ -224,6 +224,7 @@ def portfolio_payload(
         from credit_transmission import absent_board, api_view
 
         credit_transmission = api_view(absent_board())
+    bear = _bear_block(regime, bear_warning)
     return {
         "schema_version": SCHEMA_VERSION,
         "as_of": format_as_of(as_of),
@@ -258,8 +259,8 @@ def portfolio_payload(
         "credit_transmission": credit_transmission,
         "pledge": _pledge_block(metrics),
         "margin_financing": _margin_block(metrics),
-        "deleverage": _deleverage_block(positions, metrics),
-        "bear_warning": _bear_block(regime, bear_warning),
+        "bear_warning": bear,
+        "deleverage": _deleverage_block(positions, metrics, bear),
         "positions": position_records(positions),
         "yuanta_futures": yuanta_from_metrics(metrics),
     }
@@ -294,15 +295,34 @@ def _bear_block(regime: str | None, bear_warning: dict | None) -> dict:
     return assess({"regime": regime})
 
 
-def _deleverage_block(positions: pd.DataFrame, metrics: dict) -> dict:
+def _deleverage_block(positions: pd.DataFrame, metrics: dict, bear_warning: dict | None = None) -> dict:
     from deleverage import build_deleverage, empty_deleverage
 
-    stored = metrics.get("deleverage")
-    if isinstance(stored, dict) and stored.get("targets"):
-        return stored
+    enriched = dict(metrics or {})
+    if isinstance(bear_warning, dict):
+        enriched["bear_overall"] = bear_warning.get("overall")
     if positions is not None and metrics:
-        return build_deleverage(positions, metrics)
+        return build_deleverage(positions, enriched)
     return empty_deleverage()
+
+
+def _brake_light(nav_history) -> str | None:
+    """沿用第四頁煞車燈。歷史不夠是 None，不猜成綠。"""
+    try:
+        from nav_snapshot import history_frame
+        from risk_performance import brake_light, drawdown_stats, flow_adjusted_index
+
+        frame = history_frame(nav_history)
+        if frame is None or frame.empty:
+            return None
+        flows = {}
+        if "flow" in frame.columns:
+            for key, value in frame["flow"].items():
+                flows[str(pd.Timestamp(key).date())] = float(value or 0.0)
+        light, _text = brake_light(drawdown_stats(flow_adjusted_index(frame["nav"], flows)).get("current_dd_pct"))
+        return light
+    except Exception:
+        return None
 
 
 def greeks_block(positions: pd.DataFrame, metrics: dict) -> dict:
@@ -360,6 +380,7 @@ def load_live_book(as_of: datetime | None = None) -> LiveBook:
         prices, betas, sectors = populate_market_fields_parallel(positions, market_beta_and_sector, tw_index, extras=extras)
         positions = attach_quotes(positions, prices, betas, sectors, extras=extras)
     valued, _accounts, metrics = finalize_valuation(positions, accounts, usdtwd)
+    metrics["brake_light"] = _brake_light(nav_history)
     if tw_index is not None:
         metrics["tw_index"] = tw_index
     metrics["usdtwd"] = usdtwd

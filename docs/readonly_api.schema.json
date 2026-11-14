@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.14.0",
+  "schema_version": "1.15.0",
   "header": "X-API-Key",
   "models": {
     "health": {
@@ -7,7 +7,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.14.0"
+            "1.15.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -33,6 +33,112 @@
     },
     "portfolio": {
       "$defs": {
+        "AllocationBucketResponse": {
+          "additionalProperties": false,
+          "description": "1.15.0。使用者的倉位區間。role=cap 時 high 是上限，不是要補滿的下限。",
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "label": {
+              "title": "Label",
+              "type": "string"
+            },
+            "role": {
+              "enum": [
+                "band",
+                "cap"
+              ],
+              "title": "Role",
+              "type": "string"
+            },
+            "target_low": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Target Low"
+            },
+            "target_high": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Target High"
+            },
+            "current_twd": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Current Twd"
+            },
+            "current_pct": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Current Pct"
+            },
+            "gap_twd": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Gap Twd"
+            },
+            "status": {
+              "default": "",
+              "title": "Status",
+              "type": "string"
+            },
+            "note": {
+              "default": "",
+              "title": "Note",
+              "type": "string"
+            },
+            "symbols": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Symbols",
+              "type": "array"
+            }
+          },
+          "required": [
+            "id",
+            "label",
+            "role"
+          ],
+          "title": "AllocationBucketResponse",
+          "type": "object"
+        },
         "BearIndicatorResponse": {
           "additionalProperties": false,
           "description": "1.13.0。單一預警子指標。未知不是通過。",
@@ -536,7 +642,7 @@
         },
         "DeleverageResponse": {
           "additionalProperties": false,
-          "description": "1.12.0。降槓進度。淨值已扣質押借款。",
+          "description": "1.12.0。降槓進度。淨值已扣質押借款。1.15.0 加上使用者的倉位目標。",
           "properties": {
             "label": {
               "title": "Label",
@@ -600,11 +706,56 @@
               },
               "title": "Swaps",
               "type": "array"
+            },
+            "allocation_note": {
+              "default": "",
+              "title": "Allocation Note",
+              "type": "string"
+            },
+            "exposure_band": {
+              "$ref": "#/$defs/ExposureBandResponse"
+            },
+            "buckets": {
+              "items": {
+                "$ref": "#/$defs/AllocationBucketResponse"
+              },
+              "title": "Buckets",
+              "type": "array"
+            },
+            "unclassified": {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "title": "Unclassified",
+              "type": "array"
+            },
+            "tactical": {
+              "$ref": "#/$defs/TacticalExposureResponse"
+            },
+            "event_risk": {
+              "additionalProperties": true,
+              "title": "Event Risk",
+              "type": "object"
+            },
+            "priority_reductions": {
+              "items": {
+                "$ref": "#/$defs/PriorityReductionResponse"
+              },
+              "title": "Priority Reductions",
+              "type": "array"
+            },
+            "priority_reason": {
+              "default": "",
+              "title": "Priority Reason",
+              "type": "string"
             }
           },
           "required": [
             "label",
-            "note"
+            "note",
+            "exposure_band",
+            "tactical"
           ],
           "title": "DeleverageResponse",
           "type": "object"
@@ -791,6 +942,66 @@
             "target_leverage"
           ],
           "title": "DeleverageTargetResponse",
+          "type": "object"
+        },
+        "ExposureBandResponse": {
+          "additionalProperties": false,
+          "description": "1.15.0。使用者的總名目目標 1.0–1.2 倍。分母是已扣質押的淨值。",
+          "properties": {
+            "label": {
+              "title": "Label",
+              "type": "string"
+            },
+            "low": {
+              "title": "Low",
+              "type": "number"
+            },
+            "high": {
+              "title": "High",
+              "type": "number"
+            },
+            "current": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Current"
+            },
+            "gap_twd": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "低於下限要補的名目，或高於上限要減的名目。區間內是 0。未知是 null。",
+              "title": "Gap Twd"
+            },
+            "status": {
+              "default": "",
+              "title": "Status",
+              "type": "string"
+            },
+            "note": {
+              "default": "",
+              "title": "Note",
+              "type": "string"
+            }
+          },
+          "required": [
+            "label",
+            "low",
+            "high"
+          ],
+          "title": "ExposureBandResponse",
           "type": "object"
         },
         "MarginFinancingAccountResponse": {
@@ -1311,6 +1522,180 @@
           "title": "PositionResponse",
           "type": "object"
         },
+        "PriorityReductionResponse": {
+          "additionalProperties": false,
+          "properties": {
+            "symbol": {
+              "title": "Symbol",
+              "type": "string"
+            },
+            "name": {
+              "default": "",
+              "title": "Name",
+              "type": "string"
+            },
+            "notional_twd": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Notional Twd"
+            },
+            "tag": {
+              "default": "",
+              "title": "Tag",
+              "type": "string"
+            },
+            "reason": {
+              "default": "",
+              "title": "Reason",
+              "type": "string"
+            }
+          },
+          "required": [
+            "symbol"
+          ],
+          "title": "PriorityReductionResponse",
+          "type": "object"
+        },
+        "TacticalExposureResponse": {
+          "additionalProperties": false,
+          "description": "1.15.0。槓桿 ETF 名目上限是淨值的 20%，不算科技核心。",
+          "properties": {
+            "label": {
+              "title": "Label",
+              "type": "string"
+            },
+            "cap_pct": {
+              "title": "Cap Pct",
+              "type": "number"
+            },
+            "notional_twd": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Notional Twd"
+            },
+            "notional_pct": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Notional Pct"
+            },
+            "exceeded": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Exceeded"
+            },
+            "warning": {
+              "default": "",
+              "title": "Warning",
+              "type": "string"
+            },
+            "positions": {
+              "items": {
+                "$ref": "#/$defs/TacticalPositionResponse"
+              },
+              "title": "Positions",
+              "type": "array"
+            },
+            "note": {
+              "default": "",
+              "title": "Note",
+              "type": "string"
+            }
+          },
+          "required": [
+            "label",
+            "cap_pct"
+          ],
+          "title": "TacticalExposureResponse",
+          "type": "object"
+        },
+        "TacticalPositionResponse": {
+          "additionalProperties": false,
+          "properties": {
+            "symbol": {
+              "title": "Symbol",
+              "type": "string"
+            },
+            "name": {
+              "default": "",
+              "title": "Name",
+              "type": "string"
+            },
+            "multiple": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Multiple"
+            },
+            "market_value_twd": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Market Value Twd"
+            },
+            "notional_twd": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Notional Twd"
+            },
+            "tag": {
+              "default": "戰術曝險",
+              "title": "Tag",
+              "type": "string"
+            }
+          },
+          "required": [
+            "symbol"
+          ],
+          "title": "TacticalPositionResponse",
+          "type": "object"
+        },
         "YuantaFuturesResponse": {
           "additionalProperties": false,
           "properties": {
@@ -1406,7 +1791,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.14.0"
+            "1.15.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -1613,7 +1998,7 @@
         },
         "deleverage": {
           "$ref": "#/$defs/DeleverageResponse",
-          "description": "1.12.0 新增。使用者降槓目標：偏多上限 2.0 倍、降槓期間 1.5 倍。不是 REGIME_RISK 的偏多 1.8。槓桿用已扣質押借款的淨值。缺報價的降低名目是 null。1.14.0 起同一代號跨帳戶合成一列。"
+          "description": "1.12.0 新增。使用者降槓目標：偏多上限 2.0 倍、降槓期間 1.5 倍。不是 REGIME_RISK 的偏多 1.8。槓桿用已扣質押借款的淨值。缺報價的降低名目是 null。1.14.0 起同一代號跨帳戶合成一列。1.15.0 加倉位目標配比、戰術曝險上限與優先減碼。"
         },
         "bear_warning": {
           "$ref": "#/$defs/BearWarningResponse",
@@ -1654,7 +2039,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.14.0"
+            "1.15.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -1701,7 +2086,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.14.0"
+            "1.15.0"
           ],
           "title": "Schema Version",
           "type": "string"

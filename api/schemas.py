@@ -249,8 +249,76 @@ class DeleverageSwapResponse(BaseModel):
     cumulative_leverage: float | None = Field(default=None, description="由降低名目大的先換，換完之後的組合槓桿。")
 
 
+class ExposureBandResponse(BaseModel):
+    """1.15.0。使用者的總名目目標 1.0–1.2 倍。分母是已扣質押的淨值。"""
+
+    model_config = _MODEL
+
+    label: str
+    low: float
+    high: float
+    current: float | None = None
+    gap_twd: float | None = Field(default=None, description="低於下限要補的名目，或高於上限要減的名目。區間內是 0。未知是 null。")
+    status: str = ""
+    note: str = ""
+
+
+class AllocationBucketResponse(BaseModel):
+    """1.15.0。使用者的倉位區間。role=cap 時 high 是上限，不是要補滿的下限。"""
+
+    model_config = _MODEL
+
+    id: str
+    label: str
+    role: Literal["band", "cap"]
+    target_low: float | None = None
+    target_high: float | None = None
+    current_twd: float | None = None
+    current_pct: float | None = None
+    gap_twd: float | None = None
+    status: str = ""
+    note: str = ""
+    symbols: list[str] = Field(default_factory=list)
+
+
+class TacticalPositionResponse(BaseModel):
+    model_config = _MODEL
+
+    symbol: str
+    name: str = ""
+    multiple: float | None = None
+    market_value_twd: float | None = None
+    notional_twd: float | None = None
+    tag: str = "戰術曝險"
+
+
+class TacticalExposureResponse(BaseModel):
+    """1.15.0。槓桿 ETF 名目上限是淨值的 20%，不算科技核心。"""
+
+    model_config = _MODEL
+
+    label: str
+    cap_pct: float
+    notional_twd: float | None = None
+    notional_pct: float | None = None
+    exceeded: bool | None = None
+    warning: str = ""
+    positions: list[TacticalPositionResponse] = Field(default_factory=list)
+    note: str = ""
+
+
+class PriorityReductionResponse(BaseModel):
+    model_config = _MODEL
+
+    symbol: str
+    name: str = ""
+    notional_twd: float | None = None
+    tag: str = ""
+    reason: str = ""
+
+
 class DeleverageResponse(BaseModel):
-    """1.12.0。降槓進度。淨值已扣質押借款。"""
+    """1.12.0。降槓進度。淨值已扣質押借款。1.15.0 加上使用者的倉位目標。"""
 
     model_config = _MODEL
 
@@ -262,6 +330,14 @@ class DeleverageResponse(BaseModel):
     exposure_complete: bool = False
     targets: list[DeleverageTargetResponse] = Field(default_factory=list)
     swaps: list[DeleverageSwapResponse] = Field(default_factory=list)
+    allocation_note: str = ""
+    exposure_band: ExposureBandResponse
+    buckets: list[AllocationBucketResponse] = Field(default_factory=list)
+    unclassified: list[dict] = Field(default_factory=list)
+    tactical: TacticalExposureResponse
+    event_risk: dict = Field(default_factory=dict)
+    priority_reductions: list[PriorityReductionResponse] = Field(default_factory=list)
+    priority_reason: str = ""
 
 
 class PortfolioResponse(BaseModel):
@@ -302,7 +378,7 @@ class PortfolioResponse(BaseModel):
     credit_transmission: CreditTransmissionResponse = Field(description="1.9.0 新增。信用傳導。各指標的值、日期、較前期變化、燈號，以及階段。門檻與第一頁相同。不計入部位或牛熊分數。")
     pledge: PledgeLoanResponse = Field(description="1.11.0 新增。股票質押借款與質押維持率。Active_Positions「融資/質押借款」整欄都算質押，淨值已扣除，這裡不再扣一次。門檻是程式預設。")
     margin_financing: MarginFinancingResponse = Field(description="1.11.0 新增。真正的融資（「融資」欄）。目前沒有融資部位時 label 為「無融資」。整戶 130% 維持率只套在這個欄，不套質押借款。")
-    deleverage: DeleverageResponse = Field(description="1.12.0 新增。使用者降槓目標：偏多上限 2.0 倍、降槓期間 1.5 倍。不是 REGIME_RISK 的偏多 1.8。槓桿用已扣質押借款的淨值。缺報價的降低名目是 null。1.14.0 起同一代號跨帳戶合成一列。")
+    deleverage: DeleverageResponse = Field(description="1.12.0 新增。使用者降槓目標：偏多上限 2.0 倍、降槓期間 1.5 倍。不是 REGIME_RISK 的偏多 1.8。槓桿用已扣質押借款的淨值。缺報價的降低名目是 null。1.14.0 起同一代號跨帳戶合成一列。1.15.0 加倉位目標配比、戰術曝險上限與優先減碼。")
     bear_warning: BearWarningResponse = Field(description="1.13.0 新增，1.14.0 加 overall。熊市預警燈。不改牛熊分數與 REGIME_RISK。suggested_cap 是牛熊上限與預警調整後上限的較低者。子指標缺資料是 unknown，不算通過。")
 
 
