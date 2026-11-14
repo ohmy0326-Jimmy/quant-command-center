@@ -175,7 +175,7 @@ class MarginFinancingResponse(BaseModel):
 
 
 class BearIndicatorResponse(BaseModel):
-    """1.12.0。單一預警子指標。未知不是通過。"""
+    """1.13.0。單一預警子指標。未知不是通過。"""
 
     model_config = _MODEL
 
@@ -188,7 +188,7 @@ class BearIndicatorResponse(BaseModel):
 
 
 class BearLayerResponse(BaseModel):
-    """1.12.0。一層預警。state 由子指標彙總，未知不算通過。"""
+    """1.13.0。一層預警。state 由子指標彙總，未知不算通過。"""
 
     model_config = _MODEL
 
@@ -199,7 +199,7 @@ class BearLayerResponse(BaseModel):
 
 
 class BearWarningResponse(BaseModel):
-    """1.12.0。熊市預警。不改牛熊分數，也不改 REGIME_RISK。"""
+    """1.13.0。熊市預警。不改牛熊分數，也不改 REGIME_RISK。"""
 
     model_config = _MODEL
 
@@ -214,6 +214,53 @@ class BearWarningResponse(BaseModel):
     leaders: list[str] = Field(default_factory=list)
     breadth: dict
     layers: list[BearLayerResponse]
+
+
+class DeleverageTargetResponse(BaseModel):
+    """1.12.0。使用者的降槓目標，不是 REGIME_RISK。"""
+
+    model_config = _MODEL
+
+    id: str
+    label: str
+    target_leverage: float
+    reduction_twd: float | None = Field(default=None, description="要降到目標還需減少的名目，台幣。已在目標內是 0。名目不完整是 null，不是 0。")
+    progress: float | None = Field(default=None, description="目標倍數 ÷ 目前倍數，0 到 1。滿格代表已落到目標。未知是 null。")
+    reached: bool | None = None
+    reason: str = ""
+
+
+class DeleverageSwapResponse(BaseModel):
+    """1.12.0。持有的槓桿 ETF 換成 1 倍標的。只列實際持倉。"""
+
+    model_config = _MODEL
+
+    symbol: str
+    name: str = ""
+    underlying: str | None = None
+    multiple: float | None = None
+    multiple_source: str = ""
+    note: str = ""
+    market_value_twd: float | None = None
+    notional_twd: float | None = None
+    reduction_twd: float | None = Field(default=None, description="換成 1 倍可降低的名目。沒有報價是 null，不是 0。")
+    leverage_after: float | None = None
+    cumulative_leverage: float | None = Field(default=None, description="由降低名目大的先換，換完之後的組合槓桿。")
+
+
+class DeleverageResponse(BaseModel):
+    """1.12.0。降槓進度。淨值已扣質押借款。"""
+
+    model_config = _MODEL
+
+    label: str
+    note: str
+    net_value: float | None = None
+    notional_exposure: float | None = None
+    leverage: float | None = None
+    exposure_complete: bool = False
+    targets: list[DeleverageTargetResponse] = Field(default_factory=list)
+    swaps: list[DeleverageSwapResponse] = Field(default_factory=list)
 
 
 class PortfolioResponse(BaseModel):
@@ -254,7 +301,8 @@ class PortfolioResponse(BaseModel):
     credit_transmission: CreditTransmissionResponse = Field(description="1.9.0 新增。信用傳導。各指標的值、日期、較前期變化、燈號，以及階段。門檻與第一頁相同。不計入部位或牛熊分數。")
     pledge: PledgeLoanResponse = Field(description="1.11.0 新增。股票質押借款與質押維持率。Active_Positions「融資/質押借款」整欄都算質押，淨值已扣除，這裡不再扣一次。門檻是程式預設。")
     margin_financing: MarginFinancingResponse = Field(description="1.11.0 新增。真正的融資（「融資」欄）。目前沒有融資部位時 label 為「無融資」。整戶 130% 維持率只套在這個欄，不套質押借款。")
-    bear_warning: BearWarningResponse = Field(description="1.12.0 新增。熊市預警燈。不改牛熊分數與 REGIME_RISK。suggested_cap 是牛熊上限與預警調整後上限的較低者。子指標缺資料是 unknown，不算通過。")
+    deleverage: DeleverageResponse = Field(description="1.12.0 新增。使用者降槓目標：偏多上限 2.0 倍、降槓期間 1.5 倍。不是 REGIME_RISK 的偏多 1.8。槓桿用已扣質押借款的淨值。缺報價的降低名目是 null。")
+    bear_warning: BearWarningResponse = Field(description="1.13.0 新增。熊市預警燈。不改牛熊分數與 REGIME_RISK。suggested_cap 是牛熊上限與預警調整後上限的較低者。子指標缺資料是 unknown，不算通過。")
 
 
 class AdviceResponse(BaseModel):

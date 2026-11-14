@@ -683,12 +683,11 @@ elif page == "第二頁：板塊與主題資金輪動":
             from macro_cycle_live import macro_view_for_orders
 
             macro_view = macro_view_for_orders()
-            regime = (macro_view or {}).get("regime")
             board_rows = []
             holdings_map = {}
             for ticker, name in sectors_dict.items():
                 frame = etf_hist.get((ticker, "1y"), pd.DataFrame())
-                board_rows.append(sector_board.board_row(ticker, name, frame, benchmark, macro_view, regime))
+                board_rows.append(sector_board.board_row(ticker, name, frame, benchmark, macro_view))
                 holdings_map[ticker] = sector_board.format_holdings(holding_rows.get(ticker) or [])
             symbols = tuple(sorted({item["symbol"] for rows in holding_rows.values() for item in rows}))
             closes = cached_symbol_closes(symbols)

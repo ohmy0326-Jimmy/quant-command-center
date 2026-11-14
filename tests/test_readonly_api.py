@@ -357,6 +357,7 @@ class ApiHttpTests(unittest.TestCase):
                 "credit_transmission",
                 "pledge",
                 "margin_financing",
+                "deleverage",
                 "bear_warning",
                 "positions",
                 "yuanta_futures",

@@ -31,7 +31,7 @@ def _table(rows: list[dict], show_figures: bool):
     if frame.empty:
         return frame
     soon = frame["近7日"].tolist()
-    columns = ["日期", "事件", "市場", "類型", "確定度", "相關持股"]
+    columns = ["日期", "事件", "劇本卡", "市場", "類型", "確定度", "相關持股"]
     if show_figures:
         columns.append("數字")
     shown = frame[columns].rename(columns={"數字": "預估／前值／實際"})

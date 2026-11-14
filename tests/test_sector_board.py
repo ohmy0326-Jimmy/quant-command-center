@@ -41,11 +41,13 @@ class AlignTests(unittest.TestCase):
 
 
 class GateTests(unittest.TestCase):
-    def test_macro_gate_neutral_is_unknown(self):
-        self.assertEqual(board.macro_gate("牛")["state"], board.PASS)
-        self.assertEqual(board.macro_gate("偏空")["state"], board.FAIL)
-        self.assertEqual(board.macro_gate("中性")["state"], board.UNKNOWN)
-        self.assertEqual(board.macro_gate(None)["state"], board.UNKNOWN)
+    def test_entry_has_price_and_relative_only(self):
+        frame = pd.DataFrame({"Close": np.linspace(10, 12, 30), "Volume": np.full(30, 1000)})
+        bench = _series(np.linspace(100, 110, 30))
+        entry = board.evaluate_entry(frame, bench)
+        self.assertEqual([gate["name"] for gate in entry["gates"]], ["價格結構", "相對大盤連兩週"])
+        self.assertNotIn("總經", entry["text"])
+        self.assertFalse(hasattr(board, "macro_gate"))
 
     def test_short_history_does_not_fail_the_price_gate(self):
         frame = pd.DataFrame({"Close": np.linspace(10, 12, 30), "Volume": np.full(30, 1000)})
@@ -58,10 +60,10 @@ class GateTests(unittest.TestCase):
         short = board.relative_gate(_series(np.linspace(100, 110, 8)), _series(np.full(8, 100.0)))
         self.assertEqual(short["state"], board.UNKNOWN)
         summary = board.summarize_gates(
-            [board.macro_gate(None), {"name": "價格結構", "state": board.UNKNOWN, "detail": ""}, board.relative_gate(asset, bench)]
+            [{"name": "價格結構", "state": board.UNKNOWN, "detail": ""}, board.relative_gate(asset, bench)]
         )
         self.assertEqual(summary["passed"], 1)
-        self.assertEqual(summary["unknown"], 2)
+        self.assertEqual(summary["unknown"], 1)
         self.assertIn("未知沒有算成通過或未過", summary["text"])
         self.assertNotIn("3/3", summary["text"])
 
@@ -104,10 +106,11 @@ class GateTests(unittest.TestCase):
             self.assertEqual(industries_for_board(ticker), ())
             self.assertEqual(board.stance_text(ticker, view), "未對應第五頁產業")
         summary = board.summarize_gates(
-            [board.macro_gate("中性"), {"name": "價格結構", "state": board.FAIL, "detail": ""}, {"name": "相對大盤連兩週", "state": board.FAIL, "detail": ""}]
+            [{"name": "價格結構", "state": board.FAIL, "detail": ""}, {"name": "相對大盤連兩週", "state": board.FAIL, "detail": ""}]
         )
-        self.assertEqual(summary["unknown"], 1)
-        self.assertIn("未知是總經允許", summary["text"])
+        self.assertEqual(summary["unknown"], 0)
+        self.assertEqual(summary["failed"], 2)
+        self.assertNotIn("總經允許", summary["text"])
         self.assertNotIn("未對應", summary["text"])
 
 
@@ -154,7 +157,7 @@ rows = [{
     "代號": "XLK", "名稱": "科技", "類型": "攻擊",
     "4週報酬": "未知", "4週相對大盤": "未知", "4週方向": "未知",
     "12週報酬": "未知", "12週相對大盤": "未知", "12週方向": "未知",
-    "第五頁立場": "未對應第五頁產業", "進場三關": "通過 0、未過 0、未知 3。未知沒有算成通過或未過。",
+    "第五頁立場": "未對應第五頁產業", "進場關卡": "通過 0、未過 0、未知 2。未知沒有算成通過或未過。",
     "對齊天數": 0,
 }]
 sector_board.render_sector_summary(st, rows, {"XLK": {"rows": [], "skipped": [], "note": "沒有真實前十大，不列強勢股。"}})

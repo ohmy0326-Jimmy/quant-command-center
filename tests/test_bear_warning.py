@@ -161,7 +161,7 @@ class RuleTests(unittest.TestCase):
             as_of=AS_OF,
             regime="偏多",
         )
-        self.assertEqual(payload["schema_version"], "1.12.0")
+        self.assertEqual(payload["schema_version"], "1.13.0")
         self.assertEqual(payload["bear_warning"]["caption"], CAPTION)
         self.assertEqual(payload["bear_warning"]["suggested_cap"], 1.8)
         PortfolioResponse(**payload)
