@@ -1526,7 +1526,15 @@ def finalize_valuation(positions: pd.DataFrame, accounts: pd.DataFrame, usdtwd: 
                 cash = float(row["現金餘額"])
                 mkt_val = float(row["即時持股市值"])
                 debt = float(row["融資/質押借款"])
-                net_val = cash + mkt_val - debt
+                margin_financing = 0.0
+                if "融資" in account_data.columns:
+                    try:
+                        margin_financing = float(row.get("融資"))
+                    except (TypeError, ValueError):
+                        margin_financing = 0.0
+                    if not math.isfinite(margin_financing):
+                        margin_financing = 0.0
+                net_val = cash + mkt_val - debt - margin_financing
                 account_data.at[idx, "帳戶淨值"] = net_val
                 if initial_m > 0 or maint_m > 0:
                     avail = net_val - initial_m
@@ -1728,9 +1736,15 @@ def _metrics_from_frames(
     exposure_values = pd.to_numeric(account_data["名目曝險"], errors="coerce").to_numpy(dtype=float)
     finite_exposure = exposure_values[np.isfinite(exposure_values)]
     exposure = float(finite_exposure.sum()) if len(finite_exposure) else 0.0
-    debt = float(account_data["融資/質押借款"].sum()) if "融資/質押借款" in account_data.columns else 0.0
+    from pledge_loan import margin_financing_view, pledge_view
+
+    pledge = pledge_view(account_data, df)
+    financing = margin_financing_view(account_data, df)
+    metrics["pledge"] = pledge
+    metrics["pledge_loan"] = pledge["balance"]
+    metrics["margin_financing"] = financing
     metrics["exposure"] = exposure
-    metrics["debt"] = debt
+    metrics["debt"] = pledge["balance"] + financing["balance"]
     metrics["leverage"] = (exposure / nav) if nav > 0 else 0.0
 
     names = account_data["帳戶名稱"].astype(str)

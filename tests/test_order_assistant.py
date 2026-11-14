@@ -249,6 +249,9 @@ class OrderImpactTests(unittest.TestCase):
         self.assertTrue(any("融資" in note for note in warnings))
         self.assertAlmostEqual(updated.metrics["nav"], snap.metrics["nav"], places=6)
         self.assertAlmostEqual(updated.metrics["debt"], 50.0, places=6)
+        self.assertAlmostEqual(updated.metrics["margin_financing"]["balance"], 50.0, places=6)
+        self.assertAlmostEqual(updated.metrics["pledge"]["balance"], 0.0, places=6)
+        self.assertAlmostEqual(float(updated.accounts_valued.iloc[0]["融資/質押借款"]), 0.0, places=6)
         self.assertAlmostEqual(updated.metrics["cash"], 0.0, places=6)
 
     def test_new_tx_sets_margin_and_economic_notional(self):

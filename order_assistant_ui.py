@@ -701,7 +701,7 @@ def _render_order(snapshot, rules: Rules):
             columns={
                 "account": "帳戶",
                 "market_value": "持股市值",
-                "debt": "融資/質押借款",
+                "debt": "融資",
                 "maintenance_now_pct": "目前維持率%",
                 "trigger_drop_pct": "觸發追繳跌幅%",
                 "already_call": "已追繳",
@@ -712,7 +712,7 @@ def _render_order(snapshot, rules: Rules):
             m_df.style.format(
                 {
                     "持股市值": "NT$ {:,.0f}",
-                    "融資/質押借款": "NT$ {:,.0f}",
+                    "融資": "NT$ {:,.0f}",
                     "目前維持率%": "{:.1f}%",
                     "觸發追繳跌幅%": "{:.1f}%",
                 }
@@ -720,7 +720,41 @@ def _render_order(snapshot, rules: Rules):
             width="stretch",
             hide_index=True,
         )
-        st.caption("假設整戶維持率 130%、持股同步下跌；美股券商（IB／嘉信）實際維持率依券商規定，僅供參考。")
+        st.caption("融資整戶維持率 130%，持股同步下跌。這段只看融資，不含質押借款。美股券商實際維持率依券商規定，僅供參考。")
+    else:
+        st.caption("無融資")
+
+    from pledge_loan import drop_to_call_text, pledge_caption
+
+    pledge = after.metrics.get("pledge") or {}
+    pledge_rows = pledge.get("accounts") or []
+    if pledge_rows:
+        p_df = pd.DataFrame(
+            [
+                {
+                    "帳戶": row.get("account"),
+                    "質押借款": row.get("balance"),
+                    "質押品市值": row.get("collateral_value"),
+                    "質押維持率%": row.get("maintenance_pct"),
+                    "燈": {"red": "紅", "yellow": "黃", "green": "綠"}.get(row.get("light"), ""),
+                    "距追繳": drop_to_call_text(row.get("drop_to_call_pct")),
+                    "質押品": "估算" if row.get("collateral_basis") == "estimated_tw_spot" else "試算表",
+                }
+                for row in pledge_rows
+            ]
+        )
+        st.dataframe(
+            p_df.style.format(
+                {
+                    "質押借款": "NT$ {:,.0f}",
+                    "質押品市值": "NT$ {:,.0f}",
+                    "質押維持率%": "{:.1f}%",
+                }
+            ),
+            width="stretch",
+            hide_index=True,
+        )
+    st.caption(pledge_caption(pledge))
 
     st.markdown("**TXO 賣權避險建議（口數只看下單後台股淨曝險）**")
     def_pdelta = round(default_put_delta(after.twii if after.twii else 0.0), 2)

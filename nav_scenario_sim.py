@@ -511,7 +511,7 @@ def cash_basis_text(book: Book) -> str:
         (
             f"報表現金 NT$ {book.reported_cash:,.0f}（佔淨值 {book.reported_cash_pct:.1f}%）"
             "＝非期貨帳戶現金餘額＋期貨可動用保證金（權益數高於原始保證金才算，不足則以 0 計）。"
-            f"融資／質押借款 NT$ {book.debt:,.0f} 已經從淨值扣除，不會再從這筆現金扣一次。"
+            f"質押借款 NT$ {book.debt:,.0f} 已經從淨值扣除，不會再從這筆現金扣一次。"
         ),
         (
             f"元大期貨權益數 NT$ {book.futures_equity:,.0f}（本日餘額，空白時用備援 168,308，加上未平倉損益與選擇權市值）"

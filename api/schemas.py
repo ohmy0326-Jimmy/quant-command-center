@@ -119,6 +119,61 @@ class CreditTransmissionResponse(BaseModel):
     rows: list[CreditRowResponse]
 
 
+class PledgeAccountResponse(BaseModel):
+    """1.11.0。單一帳戶的股票質押維持率。"""
+
+    model_config = _MODEL
+
+    account: str
+    balance: float = Field(description="質押借款餘額，台幣。來自 Active_Positions「融資/質押借款」，淨值已扣除。")
+    collateral_value: float = Field(description="質押品市值，台幣。")
+    collateral_basis: Literal["sheet", "estimated_tw_spot"] = Field(description="sheet＝試算表有標質押品；estimated_tw_spot＝沒標，改用該戶台股現股市值。")
+    maintenance_pct: float = Field(description="質押維持率＝質押品市值 ÷ 質押借款 × 100。")
+    light: Literal["green", "yellow", "red"]
+    drop_to_call_pct: float | None = Field(default=None, description="距 130% 追繳線，質押品還能跌幾個百分點。已低於追繳線時是負數。質押品市值是 0 時是 null。")
+
+
+class PledgeLoanResponse(BaseModel):
+    """1.11.0。股票質押借款。門檻是程式預設，要對照券商契約。"""
+
+    model_config = _MODEL
+
+    balance: float = Field(description="質押借款合計，台幣。沒有質押時是 0。")
+    collateral_value: float | None = Field(default=None, description="計入維持率的質押品市值合計。沒有借款時是 null。")
+    collateral_basis: Literal["sheet", "estimated_tw_spot", "none"] = "none"
+    maintenance_pct: float | None = Field(default=None, description="合計維持率。沒有借款時是 null，不是 0。")
+    light: Literal["green", "yellow", "red"] | None = None
+    drop_to_call_pct: float | None = Field(default=None, description="距追繳還可跌幾個百分點。已低於 130% 時是負數。")
+    estimated: bool = Field(default=False, description="true 表示至少有一戶的質押品是用台股現股市值估算的。")
+    thresholds: dict = Field(description="pledge_loan.PLEDGE_THRESHOLDS。call_below_pct 130、yellow_high_pct 160。")
+    note: str
+    accounts: list[PledgeAccountResponse] = Field(default_factory=list)
+
+
+class MarginFinancingAccountResponse(BaseModel):
+    """1.11.0。真正的融資，不含質押借款。"""
+
+    model_config = _MODEL
+
+    account: str
+    balance: float
+    market_value: float
+    maintenance_pct: float
+    drop_to_call_pct: float
+    already_call: bool
+
+
+class MarginFinancingResponse(BaseModel):
+    """1.11.0。沒有融資部位時 label 是「無融資」、balance 是 0。"""
+
+    model_config = _MODEL
+
+    balance: float
+    label: str
+    status: Literal["none", "active"]
+    accounts: list[MarginFinancingAccountResponse] = Field(default_factory=list)
+
+
 class PortfolioResponse(BaseModel):
     model_config = _MODEL
 
@@ -155,6 +210,8 @@ class PortfolioResponse(BaseModel):
     greeks: dict = Field(default_factory=dict, description="1.7.0 新增。台股與美股分開的 Delta／Theta。缺值是 null，合計不完整時 delta_complete 或 theta_complete 為 false，缺的部位沒有當成 0。兩市場不加總。1.10.0 起 greeks.tw.hedge_contracts 是台指期避險口數：大台 200、小台 50、微台 10（每點台幣）。full／half 是小數口數，full_lots／half_lots 是四捨五入。點數不完整或不大於 0 時 available 為 false、rows 是空的。已持有空單已在 delta_points，不另扣。選擇權不給口數。")
     beta_targets: dict = Field(default_factory=dict, description="1.7.0 新增。依第五頁多空狀態的目標 Beta 區間。區間是程式預設。狀態未知時 tw 與 us 是 null。避險只建議同市場工具。")
     credit_transmission: CreditTransmissionResponse = Field(description="1.9.0 新增。信用傳導。各指標的值、日期、較前期變化、燈號，以及階段。門檻與第一頁相同。不計入部位或牛熊分數。")
+    pledge: PledgeLoanResponse = Field(description="1.11.0 新增。股票質押借款與質押維持率。Active_Positions「融資/質押借款」整欄都算質押，淨值已扣除，這裡不再扣一次。門檻是程式預設。")
+    margin_financing: MarginFinancingResponse = Field(description="1.11.0 新增。真正的融資（「融資」欄）。目前沒有融資部位時 label 為「無融資」。整戶 130% 維持率只套在這個欄，不套質押借款。")
 
 
 class AdviceResponse(BaseModel):
