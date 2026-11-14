@@ -4,8 +4,9 @@
 相對強弱＝板塊報酬 − 基準（預設 S&P 500）報酬。日期只留兩邊都有收盤的交易日。
 持平帶是程式預設：超額報酬絕對值小於 0.5 個百分點。這不是使用者逐條確認過的策略參數。
 
-進場三關沿用重建規格的三句，細項用下面寫明的預設。任一關資料不夠就是未知，
-未知不算通過，也不算不通過。
+進場關卡只看價格結構與相對大盤連兩週。總經不擋進場：防禦板塊在總經偏弱時仍可進場，
+總經只決定總槓桿上限（REGIME_RISK 不在這裡改）。任一關資料不夠就是未知，
+未知不算通過，也不算不通過。不另加第三關。
 """
 
 from __future__ import annotations
@@ -142,21 +143,6 @@ def _state_text(state: str) -> str:
     return {"pass": "通過", "fail": "未過", "unknown": "未知"}[state]
 
 
-def macro_gate(regime: str | None) -> dict:
-    """程式預設：牛或偏多才算總經允許。中性與缺資料是未知。偏空、熊是未過。"""
-    text = str(regime or "").strip()
-    if text in {"牛", "偏多"}:
-        state = PASS
-    elif text in {"偏空", "熊"}:
-        state = FAIL
-    else:
-        state = UNKNOWN
-    detail = "程式預設：第五頁狀態為牛或偏多才通過。中性、空白或讀不到是未知，不是通過。"
-    if text:
-        detail = f"第五頁狀態「{text}」。" + detail
-    return {"name": "總經允許", "state": state, "detail": detail}
-
-
 def _crossed_up(fast: pd.Series, slow: pd.Series) -> bool | None:
     if len(fast) < CROSS_WINDOW + 1 or len(slow) < CROSS_WINDOW + 1:
         return None
@@ -244,8 +230,9 @@ def summarize_gates(gates: list[dict]) -> dict:
     return {"passed": passed, "failed": failed, "unknown": unknown, "text": text, "gates": gates}
 
 
-def evaluate_entry(frame, benchmark, regime: str | None) -> dict:
-    gates = [macro_gate(regime), price_gate(frame), relative_gate(frame, benchmark)]
+def evaluate_entry(frame, benchmark) -> dict:
+    """進場只看價格結構與相對大盤。總經狀態不進這兩關。"""
+    gates = [price_gate(frame), relative_gate(frame, benchmark)]
     summary = summarize_gates(gates)
     summary["advisory"] = "只輔助看盤，不擋下單。"
     return summary
@@ -336,7 +323,7 @@ def render_sector_summary(st, rows: list[dict], strong_by_etf: dict) -> None:
     """第二頁上方的表。st 是 Streamlit。"""
     st.caption(
         "4 週＝20 個共同交易日，12 週＝60 個。相對大盤＝板塊報酬減 S&P 500 報酬，只對齊兩邊都有收盤的日期。"
-        "這是價格比較，不是資金流，也不是投信或外資買賣超。進場三關只輔助，不擋下單。"
+        "這是價格比較，不是資金流，也不是投信或外資買賣超。進場關卡只輔助，不擋下單。總經不在這兩關裡。"
     )
     st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
     st.subheader("前十大裡，三個交易日漲幅達到 10% 的股票")
@@ -356,9 +343,9 @@ def render_sector_summary(st, rows: list[dict], strong_by_etf: dict) -> None:
     )
 
 
-def board_row(ticker: str, name: str, frame, benchmark, view: dict | None, regime: str | None) -> dict:
+def board_row(ticker: str, name: str, frame, benchmark, view: dict | None) -> dict:
     strength = relative_strength(frame, benchmark)
-    entry = evaluate_entry(frame, benchmark, regime)
+    entry = evaluate_entry(frame, benchmark)
     four = strength["rows"]["4週"]
     twelve = strength["rows"]["12週"]
 
@@ -376,6 +363,6 @@ def board_row(ticker: str, name: str, frame, benchmark, view: dict | None, regim
         "12週相對大盤": pct(twelve["excess"]),
         "12週方向": twelve["direction"],
         "第五頁立場": stance_text(ticker, view),
-        "進場三關": entry["text"],
+        "進場關卡": entry["text"],
         "對齊天數": strength["aligned_days"],
     }
