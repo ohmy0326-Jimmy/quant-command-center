@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.9.0",
+  "schema_version": "1.10.0",
   "header": "X-API-Key",
   "models": {
     "health": {
@@ -7,7 +7,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.9.0"
+            "1.10.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -691,7 +691,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.9.0"
+            "1.10.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -874,7 +874,7 @@
         },
         "greeks": {
           "additionalProperties": true,
-          "description": "1.7.0 新增。台股與美股分開的 Delta／Theta。缺值是 null，合計不完整時 delta_complete 或 theta_complete 為 false，缺的部位沒有當成 0。兩市場不加總。",
+          "description": "1.7.0 新增。台股與美股分開的 Delta／Theta。缺值是 null，合計不完整時 delta_complete 或 theta_complete 為 false，缺的部位沒有當成 0。兩市場不加總。1.10.0 起 greeks.tw.hedge_contracts 是台指期避險口數：大台 200、小台 50、微台 10（每點台幣）。full／half 是小數口數，full_lots／half_lots 是四捨五入。點數不完整或不大於 0 時 available 為 false、rows 是空的。已持有空單已在 delta_points，不另扣。選擇權不給口數。",
           "title": "Greeks",
           "type": "object"
         },
@@ -919,7 +919,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.9.0"
+            "1.10.0"
           ],
           "title": "Schema Version",
           "type": "string"
@@ -966,7 +966,7 @@
       "properties": {
         "schema_version": {
           "examples": [
-            "1.9.0"
+            "1.10.0"
           ],
           "title": "Schema Version",
           "type": "string"

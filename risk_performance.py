@@ -163,25 +163,53 @@ def _fmt(value, digits=0):
     return f"{float(value):,.{digits}f}"
 
 
+def _render_tx_hedge(st, hedge: dict | None) -> None:
+    """台指期放空口數。已持有的空單在 Delta 裡，這裡不再扣。不推播、不進總經分數。"""
+    from portfolio_greeks import HEDGE_FUTURES_NOTE, hedge_contracts
+
+    plan = hedge if isinstance(hedge, dict) else hedge_contracts(None, False)
+    st.markdown("**台指期避險口數**")
+    st.caption(plan.get("note") or HEDGE_FUTURES_NOTE)
+    if not plan.get("available"):
+        st.caption(plan.get("reason") or "台股 Delta 點數不完整，不計算避險口數。")
+        return
+    table = []
+    for row in plan.get("rows") or []:
+        table.append({
+            "合約": row["name"],
+            "每點": f"{row['point_value']:.0f}",
+            "全避險": f"{row['full']:.2f}",
+            "建議口數": row["full_lots"],
+            "半避險": f"{row['half']:.2f}",
+            "半避險建議": row["half_lots"],
+        })
+    st.dataframe(pd.DataFrame(table), hide_index=True, width="stretch")
+    st.caption("口數是放空。小數是點數 ÷ 每點金額，建議口數是四捨五入。不另扣已經在 Delta 裡的台指期空單。")
+
+
 def _render_greeks_and_beta(st, metrics: dict) -> None:
     from portfolio_greeks import DEFAULT_BETA_BANDS, DEFAULT_NOTE, REGIMES, apply_indexes, beta_targets, trusted_regime
     from macro_cycle_live import macro_view_for_orders
 
     greeks = apply_indexes(metrics.get("portfolio_greeks") or {"tw": {}, "us": {}}, metrics.get("tw_index"), metrics.get("us_index"))
-    st.markdown("**全組合 Delta／Theta**")
-    st.caption("台股與美股分開，不加總。缺希臘值顯示 —，沒有當成 0。點數是原生貨幣名目 ÷ 指數價。")
-    rows = []
-    for key, label in (("tw", "台股"), ("us", "美股")):
-        book = greeks.get(key) or {}
-        rows.append({
-            "市場": label,
-            "幣別": book.get("currency") or "",
-            "Delta 點數": _fmt(book.get("delta_points"), 1),
-            "Delta 名目": _fmt(book.get("delta_notional"), 0),
-            "Theta／日": _fmt(book.get("theta_per_day"), 0),
-            "完整": "是" if book.get("delta_complete") and book.get("theta_complete") and book.get("points_complete") else "否",
-        })
-    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    greek_col, hedge_col = st.columns(2)
+    with greek_col:
+        st.markdown("**全組合 Delta／Theta**")
+        st.caption("台股與美股分開，不加總。缺希臘值顯示 —，沒有當成 0。點數是原生貨幣名目 ÷ 指數價。")
+        rows = []
+        for key, label in (("tw", "台股"), ("us", "美股")):
+            book = greeks.get(key) or {}
+            rows.append({
+                "市場": label,
+                "幣別": book.get("currency") or "",
+                "Delta 點數": _fmt(book.get("delta_points"), 1),
+                "Delta 名目": _fmt(book.get("delta_notional"), 0),
+                "Theta／日": _fmt(book.get("theta_per_day"), 0),
+                "完整": "是" if book.get("delta_complete") and book.get("theta_complete") and book.get("points_complete") else "否",
+            })
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    with hedge_col:
+        _render_tx_hedge(st, (greeks.get("tw") or {}).get("hedge_contracts"))
     overrides = {"TW": {}, "US": {}}
     with st.expander("目標 Beta 區間（程式預設）", expanded=False):
         st.caption(DEFAULT_NOTE + " 改動只留在這次工作階段。")

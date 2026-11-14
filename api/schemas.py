@@ -152,7 +152,7 @@ class PortfolioResponse(BaseModel):
     beta_leverage: BetaLeverageResponse = Field(description="1.3.0 新增。台股／美股／合計的槓桿、部位平均 Beta、帳戶 Beta。")
     positions: list[PositionResponse]
     yuanta_futures: YuantaFuturesResponse
-    greeks: dict = Field(default_factory=dict, description="1.7.0 新增。台股與美股分開的 Delta／Theta。缺值是 null，合計不完整時 delta_complete 或 theta_complete 為 false，缺的部位沒有當成 0。兩市場不加總。")
+    greeks: dict = Field(default_factory=dict, description="1.7.0 新增。台股與美股分開的 Delta／Theta。缺值是 null，合計不完整時 delta_complete 或 theta_complete 為 false，缺的部位沒有當成 0。兩市場不加總。1.10.0 起 greeks.tw.hedge_contracts 是台指期避險口數：大台 200、小台 50、微台 10（每點台幣）。full／half 是小數口數，full_lots／half_lots 是四捨五入。點數不完整或不大於 0 時 available 為 false、rows 是空的。已持有空單已在 delta_points，不另扣。選擇權不給口數。")
     beta_targets: dict = Field(default_factory=dict, description="1.7.0 新增。依第五頁多空狀態的目標 Beta 區間。區間是程式預設。狀態未知時 tw 與 us 是 null。避險只建議同市場工具。")
     credit_transmission: CreditTransmissionResponse = Field(description="1.9.0 新增。信用傳導。各指標的值、日期、較前期變化、燈號，以及階段。門檻與第一頁相同。不計入部位或牛熊分數。")
 
