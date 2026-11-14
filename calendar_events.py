@@ -818,6 +818,84 @@ def _http_get(url: str, timeout: int = 10, params=None):
     return requests.get(url, params=params, timeout=timeout)
 
 
+def scenario_card_for(event: dict) -> str:
+    """既有自動事件的劇本卡。只標使用者指定的對照，不另編卡號。"""
+    explicit = _clean(event.get("scenario_card"))
+    if explicit:
+        return explicit
+    title = _clean(event.get("title"))
+    kind = _clean(event.get("kind"))
+    if kind == "index" and "生效" in title:
+        return "S18"
+    return ""
+
+
+def load_manual_events(path=None) -> list[dict]:
+    """倉庫內的手動事件。日期空白代表官方表沒有這一天，不自編。"""
+    import csv
+    from pathlib import Path
+
+    file_path = Path(path) if path is not None else Path(__file__).resolve().parent / "data" / "manual_events.csv"
+    if not file_path.exists():
+        return []
+    found = []
+    with file_path.open(encoding="utf-8", newline="") as handle:
+        for row in csv.DictReader(handle):
+            raw_day = _clean(row.get("date"))
+            event_date = None
+            if raw_day:
+                event_date = date.fromisoformat(raw_day)
+            clock = _clean(row.get("time_taipei"))
+            title = _clean(row.get("title"))
+            note = _clean(row.get("note"))
+            source = _clean(row.get("source")) or "使用者提供"
+            pending = event_date is None or "待確認" in note
+            when_text = raw_day
+            if clock and when_text:
+                when_text = f"{when_text} {clock}"
+            elif clock:
+                when_text = clock
+            if "財報" in title:
+                kind = "earnings"
+            elif "FOMC" in title:
+                kind = "minutes"
+            else:
+                kind = "manual"
+            found.append({
+                "date": event_date,
+                "when_text": when_text or "日期待確認",
+                "session": "台北" if clock else "時段未知",
+                "source": source,
+                "certainty": "官方日期待確認" if pending else "使用者提供",
+                "title": title,
+                "symbol": "NVDA" if "NVIDIA" in title.upper() else "",
+                "market": _clean(row.get("market")) or "",
+                "estimate": None,
+                "previous": None,
+                "actual": None,
+                "note": note,
+                "kind": kind,
+                "scenario_card": _clean(row.get("scenario_card")),
+            })
+    return found
+
+
+def _same_event(left: dict, right: dict) -> bool:
+    if left.get("date") != right.get("date"):
+        return False
+    return _clean(left.get("title")) == _clean(right.get("title"))
+
+
+def merge_manual_events(events: list[dict], manual: list[dict] | None = None) -> list[dict]:
+    """併入手動列。同一天、同一標題不重複。結算仍只用既有規則。"""
+    merged = list(events)
+    for item in manual if manual is not None else load_manual_events():
+        if any(_same_event(item, existing) for existing in merged):
+            continue
+        merged.append(item)
+    return merged
+
+
 def build_calendar(rows, watchlist: str, earnings_by_symbol: dict, fmp_items, today: date, fetched_at: datetime, horizon_days: int = 90, fmp_error: str = "", official_confirmed: set[str] | None = None) -> dict:
     """組第三頁用的事件。earnings_by_symbol 的值可以是日曆，或含 error 的 dict。"""
     end = today + timedelta(days=horizon_days)
@@ -871,8 +949,10 @@ def build_calendar(rows, watchlist: str, earnings_by_symbol: dict, fmp_items, to
                 continue
             parsed["updated_at"] = fetched_at
             events.append(parsed)
-    events.sort(key=lambda item: (item["date"], item["title"]))
+    events = merge_manual_events(events)
+    events.sort(key=lambda item: (item["date"] or date.max, item["title"]))
     for event in events:
+        event["scenario_card"] = scenario_card_for(event)
         event["impacts"] = impacts_for(event, items)
         event.setdefault("updated_at", fetched_at)
         event["id"] = event_public_id(event)
@@ -899,6 +979,7 @@ def event_fingerprint(event: dict) -> str:
         str(event.get("certainty") or ""),
         str(event.get("source") or ""),
         str(event.get("note") or ""),
+        str(event.get("scenario_card") or ""),
         numbers,
         impacts,
     ])

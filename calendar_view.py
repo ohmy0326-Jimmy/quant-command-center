@@ -48,6 +48,8 @@ def certainty_badge(event: dict) -> str:
     text = str(event.get("certainty") or "")
     if "待確認" in text:
         return "待確認"
+    if "使用者提供" in text:
+        return "使用者提供"
     if "官方" in text:
         return "官方"
     if not text or "未知" in text:
@@ -124,20 +126,24 @@ def shape_calendar(model: dict, today: date, *, market: str = "全部", kind: st
     rows = []
     events = []
     for event in model.get("events") or []:
-        day = _as_date(event.get("date") or event.get("when_text"))
-        if day is None or day < today or (day - today).days > horizon_days:
-            continue
+        day = event.get("date") if isinstance(event.get("date"), date) else _as_date(event.get("date") or event.get("when_text"))
         row_market = market_label(event)
         row_kind = kind_label(event)
         if market != "全部" and row_market != market:
             continue
         if kind != "全部" and row_kind != kind:
             continue
-        soon = (day - today).days <= 7
-        weekday = WEEKDAYS[day.weekday()]
+        undated = day is None and "待確認" in str(event.get("certainty") or "")
+        if day is None and not undated:
+            continue
+        if day is not None and (day < today or (day - today).days > horizon_days):
+            continue
+        soon = False if undated else (day - today).days <= 7
+        weekday = "" if undated else WEEKDAYS[day.weekday()]
         rows.append({
-            "日期": f"{day.isoformat()}（{weekday}）",
+            "日期": "待確認" if undated else f"{day.isoformat()}（{weekday}）",
             "事件": str(event.get("title") or ""),
+            "劇本卡": str(event.get("scenario_card") or "—"),
             "市場": row_market,
             "類型": row_kind,
             "確定度": certainty_badge(event),
