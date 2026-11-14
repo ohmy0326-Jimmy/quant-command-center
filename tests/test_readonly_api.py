@@ -358,6 +358,7 @@ class ApiHttpTests(unittest.TestCase):
                 "pledge",
                 "margin_financing",
                 "deleverage",
+                "bear_warning",
                 "positions",
                 "yuanta_futures",
             },

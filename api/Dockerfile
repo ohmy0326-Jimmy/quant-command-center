@@ -14,7 +14,7 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt
 COPY portfolio_risk.py portfolio_greeks.py sector_map.py ai_advice.py portfolio_briefing.py cb_holdings.py stop_rules.py \
      taifex_quotes.py beta_rules.py futures_ledger.py sheet_dates.py stock_futures.py stock_futures_margin.py nav_snapshot.py \
      telegram_html.py alert_engine.py alert_inputs.py macro_risk.py risk_performance.py nav_scenario_sim.py \
-     order_assistant.py order_insights.py hedge_sim.py macro_cycle.py macro_cycle_sheet.py macro_score_trend.py macro_cycle_live.py macro_proxies.py app_secrets.py beta_leverage_ui.py page1_lights.py credit_transmission.py sheet_numbers.py pledge_loan.py deleverage.py ./
+     order_assistant.py order_insights.py hedge_sim.py macro_cycle.py macro_cycle_sheet.py macro_score_trend.py macro_cycle_live.py macro_proxies.py app_secrets.py beta_leverage_ui.py page1_lights.py credit_transmission.py sheet_numbers.py pledge_loan.py deleverage.py bear_warning.py ./
 # 第五頁多空狀態（macro_cycle）讀倉庫內的 JSON 與 schema。
 COPY data ./data
 COPY api ./api
